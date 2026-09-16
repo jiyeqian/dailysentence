@@ -86,8 +86,7 @@ main { padding: 0 14px; }
 #poster {
   display: block;
   width: 100%;
-  height: auto;
-  aspect-ratio: 9 / 16;
+  height: auto;          /* 高度随画布内在比例，长版海报会自动变高 */
   touch-action: manipulation;
 }
 .overlay {
@@ -107,11 +106,13 @@ main { padding: 0 14px; }
 .hint { margin: 10px 0 0; text-align: center; font-size: 12px; color: var(--muted); }
 
 /* ---------------- actions ---------------- */
-.actions { display: flex; gap: 10px; margin: 14px 0 4px; }
+.actions { display: flex; gap: 8px; margin: 14px 0 4px; }
 .btn {
-  flex: 1;
-  border: 0; border-radius: 14px; padding: 14px 10px;
-  font-size: 15px; font-weight: 600; font-family: inherit;
+  flex: 1 1 0;
+  min-width: 0;
+  border: 0; border-radius: 14px; padding: 14px 4px;
+  font-size: 13.5px; font-weight: 600; font-family: inherit;
+  white-space: nowrap;
   cursor: pointer; transition: transform 0.12s, opacity 0.2s;
 }
 .btn:active { transform: scale(0.97); }
@@ -120,8 +121,7 @@ main { padding: 0 14px; }
   background: linear-gradient(135deg, #4f8dfd, #22d3ee);
   box-shadow: 0 10px 26px rgba(79, 141, 253, 0.35);
 }
-.btn.ghost { background: var(--card); color: var(--text); border: 1px solid var(--line); flex: 0 0 auto; padding: 14px 16px; }
-.btn.small { flex: 0 0 auto; padding: 10px 16px; font-size: 13px; background: var(--card-2); color: var(--text); border: 1px solid var(--line); }
+.btn.ghost { background: var(--card); color: var(--text); border: 1px solid var(--line); }
 
 /* ---------------- cards ---------------- */
 .card {
@@ -163,14 +163,6 @@ input[type="text"]:focus, textarea:focus { border-color: rgba(79, 141, 253, 0.65
   border: 1px solid var(--line); font-family: inherit; font-size: 12.5px; font-weight: 600;
 }
 .seg button.on { background: rgba(79, 141, 253, 0.16); border-color: rgba(79, 141, 253, 0.55); color: #cfe0ff; }
-.note { margin: 10px 0 2px; font-size: 11.5px; color: var(--muted); line-height: 1.6; }
-
-.row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
-.file-btn {
-  flex: 1; text-align: center; padding: 11px; border-radius: 12px; cursor: pointer;
-  background: var(--bg-2); border: 1px dashed rgba(255, 255, 255, 0.18);
-  font-size: 13px; color: var(--text); font-weight: 600;
-}
 
 .field.range { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .field.range > span { flex: 0 0 62px; margin: 0; }

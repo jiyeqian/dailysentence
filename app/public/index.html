@@ -38,9 +38,11 @@
   </section>
 
   <div class="actions">
-    <button id="btnSave" class="btn primary">保存到相册</button>
-    <button id="btnPlay" class="btn ghost">试听发音</button>
+    <button id="btnTemplate" class="btn ghost">更换模板</button>
+    <button id="btnSave" class="btn primary">保存海报</button>
+    <button id="btnPlay" class="btn ghost">朗读</button>
     <button id="btnSource" class="btn ghost">原文</button>
+    <input id="fTemplate" type="file" accept="image/*" hidden>
   </div>
 
   <section class="card">
@@ -55,19 +57,13 @@
   <section class="card">
     <h2>背景图</h2>
     <div class="seg" id="segBg">
-      <button data-v="cover" class="on">铺满</button>
-      <button data-v="band">模糊底 + 完整图</button>
-      <button data-v="card">模糊底 + 图片卡片</button>
+      <button data-v="natural" class="on">原比例</button>
+      <button data-v="cover">铺满</button>
     </div>
-    <p class="note">背景取自网页中「每日一句」卡片左上角的配图。</p>
   </section>
 
   <section class="card">
-    <h2>个人信息卡片<span class="tag">自动识别</span></h2>
-    <div class="row">
-      <label class="file-btn">更换模板图<input id="fTemplate" type="file" accept="image/*" hidden></label>
-      <button id="btnAuto" class="btn small">重新识别</button>
-    </div>
+    <h2>信息卡微调<span class="tag">自动识别</span></h2>
     <label class="field range"><span>上边距</span><input id="rTop" type="range" min="25" max="80" value="59"><b id="vTop">59%</b></label>
     <label class="field range"><span>卡片高度</span><input id="rH" type="range" min="10" max="40" value="26"><b id="vH">26%</b></label>
     <label class="field range"><span>左右边距</span><input id="rM" type="range" min="0" max="12" value="4"><b id="vM">4%</b></label>
@@ -79,7 +75,7 @@
     <label class="switch"><input id="cDate" type="checkbox" checked><span>日期标签</span></label>
     <label class="switch"><input id="cRule" type="checkbox" checked><span>标题分隔线</span></label>
     <label class="switch"><input id="cSource" type="checkbox" checked><span>显示出处</span></label>
-    <label class="switch"><input id="cExamples" type="checkbox"><span>显示例句（更长的海报）</span></label>
+    <label class="switch"><input id="cLong" type="checkbox"><span>长版海报</span></label>
   </section>
 
   <footer class="foot">
