@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
+<meta name="theme-color" content="#0b0f17">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="每日一句海报">
+<meta name="description" content="把欧路词典「每日一句」合成一张可保存的手机海报">
+<title>每日一句 · 海报生成器</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="appbar">
+  <div class="brand">
+    <span class="dot"></span>
+    <div>
+      <h1>每日一句 · 海报</h1>
+      <p id="subtitle">正在获取今日句子…</p>
+    </div>
+  </div>
+  <button id="btnRefresh" class="icon-btn" title="重新获取">↻</button>
+</header>
+
+<main>
+  <section class="stage">
+    <div class="canvas-wrap">
+      <canvas id="poster" width="1080" height="1920"></canvas>
+      <div id="overlay" class="overlay"><div class="spinner"></div><span id="overlayText">加载中…</span></div>
+    </div>
+    <p class="hint" id="hint">长按图片即可保存到相册</p>
+  </section>
+
+  <div class="actions">
+    <button id="btnSave" class="btn primary">保存到相册</button>
+    <button id="btnPlay" class="btn ghost">试听发音</button>
+    <button id="btnSource" class="btn ghost">原文</button>
+  </div>
+
+  <section class="card">
+    <h2>文案<span class="tag">可直接改</span></h2>
+    <label class="field"><span>关键词</span><input id="fWord" type="text" placeholder="如 impulse"></label>
+    <label class="field"><span>英文</span><textarea id="fEn" rows="2"></textarea></label>
+    <label class="field"><span>中文</span><textarea id="fCn" rows="2"></textarea></label>
+    <label class="field"><span>释义</span><textarea id="fDefs" rows="3" placeholder="每行一条，如：n.冲动；脉冲"></textarea></label>
+    <label class="field"><span>出处</span><input id="fSource" type="text" placeholder="如 文森特·威廉·梵高"></label>
+  </section>
+
+  <section class="card">
+    <h2>背景图</h2>
+    <div class="seg" id="segBg">
+      <button data-v="cover" class="on">铺满</button>
+      <button data-v="band">模糊底 + 完整图</button>
+      <button data-v="card">模糊底 + 图片卡片</button>
+    </div>
+    <p class="note">背景取自网页中「每日一句」卡片左上角的配图。</p>
+  </section>
+
+  <section class="card">
+    <h2>个人信息卡片<span class="tag">自动识别</span></h2>
+    <div class="row">
+      <label class="file-btn">更换模板图<input id="fTemplate" type="file" accept="image/*" hidden></label>
+      <button id="btnAuto" class="btn small">重新识别</button>
+    </div>
+    <label class="field range"><span>上边距</span><input id="rTop" type="range" min="25" max="80" value="59"><b id="vTop">59%</b></label>
+    <label class="field range"><span>卡片高度</span><input id="rH" type="range" min="10" max="40" value="26"><b id="vH">26%</b></label>
+    <label class="field range"><span>左右边距</span><input id="rM" type="range" min="0" max="12" value="4"><b id="vM">4%</b></label>
+  </section>
+
+  <section class="card">
+    <h2>排版微调</h2>
+    <label class="field range"><span>字号</span><input id="rFont" type="range" min="80" max="120" value="100"><b id="vFont">100%</b></label>
+    <label class="switch"><input id="cDate" type="checkbox" checked><span>日期标签</span></label>
+    <label class="switch"><input id="cRule" type="checkbox" checked><span>标题分隔线</span></label>
+    <label class="switch"><input id="cSource" type="checkbox" checked><span>显示出处</span></label>
+    <label class="switch"><input id="cExamples" type="checkbox"><span>显示例句（更长的海报）</span></label>
+  </section>
+
+  <footer class="foot">
+    <p>内容来源 · 欧路词典「英语每日一句」</p>
+    <p><a id="linkSource" href="https://dict.eudic.net/home/dailysentence" target="_blank" rel="noopener">打开原网页</a></p>
+  </footer>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

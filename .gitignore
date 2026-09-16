@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# WorkBuddy 本地运行数据（含本机绝对路径与部署信息，不入库）
+.workbuddy/
+.wbapp_*.genie
