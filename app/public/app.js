@@ -34,7 +34,7 @@ const DEFAULT_RATIOS = { L: 0.0364, T: 0.5934, R: 0.9636, B: 0.8491 };
 
 const state = {
   apiData: null,
-  content: { word: '', phonetic: '', en: '', cn: '', defs: [], examples: [], source: '', date: '', dateCN: '' },
+  content: { word: '', phonetic: '', phonetics: [], en: '', cn: '', defs: [], examples: [], usages: [], usagesTitle: '', source: '', date: '', dateCN: '' },
   bgImage: null,
   template: null,
   ratios: { ...DEFAULT_RATIOS },
@@ -191,10 +191,13 @@ async function loadDaily(force) {
   state.content = {
     word: data.word || '',
     phonetic: data.phonetic || '',
+    phonetics: Array.isArray(data.phonetics) ? data.phonetics.slice() : [],
     en: data.en || '',
     cn: data.cn || '',
     defs: (data.definitions || []).slice(),
     examples: (data.examples || []).slice(),
+    usages: (data.usages || []).slice(),
+    usagesTitle: data.usagesTitle || '常用搭配',
     source: (data.source && data.source.author) || '',
     date: data.date || '',
     dateCN: data.dateCN || '',
@@ -204,6 +207,15 @@ async function loadDaily(force) {
     const v = QS.get(k);
     if (v) state.content[k] = v;
   });
+  /* 调试音标排版：?ph=ˈɪmpʌls（单音标）或 ?ph=英:ɪɡˈzæmpl|美:ɪɡˈzɑːmpl（双音标） */
+  const phRaw = QS.get('ph');
+  if (phRaw) {
+    state.content.phonetics = phRaw.split('|').filter(Boolean).map((seg) => {
+      const i = seg.indexOf(':');
+      return i > 0 ? { label: seg.slice(0, i), ph: seg.slice(i + 1) } : { label: '', ph: seg };
+    });
+    state.content.phonetic = '';
+  }
   fillForm();
   $('subtitle').textContent =
     (data.date ? data.date + ' · ' : '') + (data.word ? '关键词 ' + data.word : '今日一句');
@@ -464,7 +476,35 @@ function buildTextBlock(ctx, K) {
   };
 }
 
-/** 单词卡片：关键词 + 音标 + 释义（+ 长版海报下的例句），无底部栏 */
+/**
+ * 归一化音标，统一成 [{ label, ph, text }]。
+ * 只有一个音标时不显示「英/美」标签，保持和以前一致的观感；
+ * 英式 + 美式并存（2026-09-18 起上游会给两个）时才加标签区分。
+ */
+function phoneticList() {
+  const c = state.content;
+  const list = (c.phonetics && c.phonetics.length)
+    ? c.phonetics
+    : (c.phonetic ? [{ label: '', ph: c.phonetic }] : []);
+  const single = list.length <= 1;
+  return list
+    .filter((p) => p && p.ph)
+    .map((p) => ({
+      label: p.label || '',
+      ph: p.ph || '',
+      text: (single || !p.label ? '' : p.label + ' ') + '/ ' + (p.ph || '') + ' /',
+    }));
+}
+
+/** 把「for example 例如」拆成英文与中文两段，便于分色排版 */
+function splitUsage(t) {
+  const s = String(t == null ? '' : t).trim();
+  const m = s.match(/^([A-Za-z0-9'’\/\-\.\s()]+?)\s+([\u4e00-\u9fff].*)$/);
+  if (m) return { en: m[1].trim(), cn: m[2].trim() };
+  return { en: s, cn: '' };
+}
+
+/** 单词卡片：关键词 + 音标 + 释义（+ 长版海报下的例句与常用搭配），无底部栏 */
 function buildWordCard(ctx, K, topY) {
   const r = state.ratios;
   const x = Math.round(r.L * CW);
@@ -480,6 +520,22 @@ function buildWordCard(ctx, K, topY) {
   const defSize = 36 * K;
   const defLH = defSize * 1.62;
   const chipSize = 25 * K;
+
+  /* 关键词 + 音标：可能是「英 /…/ 美 /…/」，放不下就逐档缩小音标字号 */
+  ctx.font = T(wordSize, 600, F_SANS);
+  const wordW = ctx.measureText(state.content.word || '').width;
+  const phs = phoneticList();
+  let phDrawSize = phSize;
+  if (phs.length) {
+    for (let s = 1; s >= 0.6; s -= 0.05) {
+      const size = phSize * s;
+      ctx.font = T(size, 400, F_MONO);
+      const total = phs.reduce((acc, p) => acc + ctx.measureText(p.text).width, 0)
+        + Math.max(0, phs.length - 1) * 22;
+      phDrawSize = size;
+      if (wordW + 18 + total <= innerW) break;
+    }
+  }
 
   const defItems = [];
   for (const d of state.content.defs) {
@@ -510,16 +566,40 @@ function buildWordCard(ctx, K, topY) {
     }
   }
 
+  /* 常用搭配：同样只在「长版海报」下出现 */
+  const useItems = [];
+  const useTitle = state.content.usagesTitle || '常用搭配';
+  const useSize = 28 * K;
+  const useLH = useSize * 1.72;
+  if (state.opts.longPoster && state.content.usages.length) {
+    for (const t of state.content.usages) {
+      const { en, cn } = splitUsage(t);
+      ctx.font = T(useSize, 400, F_SANS);
+      const enW = ctx.measureText(en).width;
+      const cnW = cn ? ctx.measureText(cn).width : 0;
+      const gap = cn ? 18 : 0;
+      if (enW + gap + cnW <= innerW - 30) {
+        useItems.push({ sameLine: true, en, cn, enW, cnW, gap, h: useLH });
+      } else {
+        const lines = wrapText(ctx, t, innerW - 30);
+        useItems.push({ sameLine: false, lines, h: lines.length * useLH });
+      }
+    }
+  }
+  const useTitleH = useItems.length ? useSize * 2.1 : 0;
+
   let contentH = row1H + 16;
   for (const it of defItems) contentH += it.h + 10;
   if (exItems.length) contentH += 12 + exItems.reduce((s, e) => s + e.h + 16, 0);
+  if (useItems.length) contentH += 12 + useTitleH + useItems.reduce((s, e) => s + e.h + 8, 0);
 
   return {
     x, y: Math.round(topY), w, h: Math.round(padY * 2 + contentH),
     padX, padY, innerW,
-    wordSize, phSize, row1H,
+    wordSize, phSize, phDrawSize, row1H, wordW,
     defItems, defLH, chipSize, defSize,
     exItems,
+    useItems, useTitle, useSize, useLH, useTitleH,
   };
 }
 
@@ -834,10 +914,16 @@ function drawWordCard(ctx, L) {
   ctx.fillText(word, x0, baseline1);
   const ww = ctx.measureText(word).width;
 
-  if (state.content.phonetic) {
-    ctx.font = T(P.phSize, 400, F_MONO);
+  const phs = phoneticList();
+  if (phs.length) {
+    ctx.font = T(P.phDrawSize || P.phSize, 400, F_MONO);
     ctx.fillStyle = '#7c8aa5';
-    ctx.fillText('/ ' + state.content.phonetic + ' /', x0 + ww + 18, baseline1 - P.wordSize * 0.09);
+    const phY = baseline1 - P.wordSize * 0.09;
+    let px = x0 + ww + 18;
+    for (const p of phs) {
+      ctx.fillText(p.text, px, phY);
+      px += ctx.measureText(p.text).width + 22;
+    }
   }
   ctx.restore();
   y += P.row1H + 16;
@@ -893,6 +979,43 @@ function drawWordCard(ctx, L) {
       ex.cnLines.forEach((ln, i) => ctx.fillText(ln, x0 + 24, yy + i * ex.cnSize * 1.55 + ex.cnSize * 0.86));
       ctx.restore();
       y += ex.h + 16;
+    }
+  }
+
+  /* 常用搭配（长版） */
+  if (P.useItems && P.useItems.length) {
+    y += 10;
+    ctx.save();
+    ctx.font = T(P.useSize * 0.92, 600, F_SANS);
+    ctx.fillStyle = '#64748b';
+    ctx.fillText(P.useTitle, x0, y + P.useSize * 0.92 * 0.86);
+    ctx.restore();
+    y += P.useTitleH;
+
+    for (const it of P.useItems) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(x0 + 10, y + P.useSize * 0.42, 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#c3ccd9';
+      ctx.fill();
+      ctx.restore();
+
+      ctx.save();
+      ctx.font = T(P.useSize, 400, F_SANS);
+      if (it.sameLine) {
+        ctx.fillStyle = '#334155';
+        ctx.fillText(it.en, x0 + 28, y + P.useSize * 0.86);
+        if (it.cn) {
+          ctx.fillStyle = '#8b98ad';
+          ctx.fillText(it.cn, x0 + 28 + it.enW + it.gap, y + P.useSize * 0.86);
+        }
+      } else {
+        ctx.fillStyle = '#475569';
+        it.lines.forEach((ln, i) =>
+          ctx.fillText(ln, x0 + 28, y + i * P.useLH + P.useSize * 0.86));
+      }
+      ctx.restore();
+      y += it.h + 8;
     }
   }
 }

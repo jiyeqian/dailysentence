@@ -129,6 +129,53 @@ function pick(re, html, idx = 1) {
   return m[idx] === undefined ? m[0] || '' : m[idx];
 }
 
+/**
+ * 解析「关键词行」，兼容上游的几种写法：
+ *   impulse  /ˈɪmpʌls/                      单个音标（无语言标签）
+ *   example  英 /ɪɡˈzæmpl/                  只有英式
+ *   example  英 /ɪɡˈzæmpl/  美 /ɪɡˈzɑːmpl/  英式 + 美式（2026-09-18 起出现）
+ * 返回 { word, phonetics: [{ label, ph }] }
+ */
+function parseWordLine(raw) {
+  const s = String(raw == null ? '' : raw).replace(/\s+/g, ' ').trim();
+  const marks = [];
+  const re = /(?:(英式|美式|英|美)\s*)?\/([^/]{1,80}?)\//g;
+  let m;
+  while ((m = re.exec(s))) {
+    const ph = m[2].trim();
+    if (ph) {
+      marks.push({ label: m[1] || '', ph, start: m.index, end: m.index + m[0].length });
+    }
+  }
+  let word = s;
+  if (marks.length) {
+    word = (s.slice(0, marks[0].start) + ' ' + s.slice(marks[marks.length - 1].end)).trim();
+  }
+  /* 兜底清掉残留在单词里的语言标签（如「example 英」） */
+  word = word.replace(/[\s·、,，]*(英式|美式|英|美)$/, '').trim();
+  return { word, phonetics: marks.map(({ label, ph }) => ({ label, ph })) };
+}
+
+/** 上游已知的分组小标题词表 */
+const HEADER_WORDS = /^(本句出自|出自|来源|解析|词汇|单词|释义|词义|例句|示例|例|常见用法|常用用法|常见搭配|常用搭配|常用短语|搭配|用法|短语|词组|句式|表达|扩展|同义词|近义词|反义词|词根|词源|记忆|联想|辨析|注意)/;
+
+/**
+ * 判断某一行是不是分组小标题。
+ * 「解析:」「例句：」带冒号；但 2026-09-18 起「例句」「常用搭配」是裸词无冒号，
+ * 所以再补两条判据：已知标题词、以及「短小纯中文 + 前面有空行分隔」。
+ */
+function isSectionHeader(text, isDetailHeader, blankBefore) {
+  const s = String(text == null ? '' : text).trim();
+  if (!s) return false;
+  /* detail_header 是页面显式标注的标题，可能带长内容（如「本句出自：某某（原文名）」），不受长度限制 */
+  if (isDetailHeader) return true;
+  if (s.length > 14) return false;
+  if (/[:：]\s*$/.test(s)) return true;
+  if (HEADER_WORDS.test(s)) return true;
+  if (blankBefore && /^[\u4e00-\u9fff]{2,6}$/.test(s)) return true;
+  return false;
+}
+
 /* ------------------------------------------------------------------ */
 /* 解析「每日一句」页面                                                 */
 /* ------------------------------------------------------------------ */
@@ -181,14 +228,19 @@ function parseDaily(html) {
 
   const sections = [];
   let cur = null;
+  let blankBefore = false; // 上一项是否空行（上游用空行把小标题与正文分开）
   for (const it of items) {
-    if (!it.text) continue;
-    if (JUNK.test(it.text)) {
-      notice = (notice ? notice + ' ' : '') + it.text;
+    if (!it.text) {
+      blankBefore = true;
       continue;
     }
-    // detail_header 显式标题；「例句：」「常见用法：」这类短小的“冒号结尾”行也算标题
-    const isHeader = it.header || /^[^\s，。；！？、]{1,10}[:：]$/.test(it.text);
+    if (JUNK.test(it.text)) {
+      notice = (notice ? notice + ' ' : '') + it.text;
+      blankBefore = false;
+      continue;
+    }
+    const isHeader = isSectionHeader(it.text, it.header, blankBefore);
+    blankBefore = false;
     if (isHeader) {
       cur = { label: it.text.replace(/[:：]\s*$/, '').trim(), lines: [] };
       sections.push(cur);
@@ -203,6 +255,10 @@ function parseDaily(html) {
   out.definitions = [];
   out.examples = [];
   out.usages = [];
+  out.usagesTitle = '';
+  out.word = '';
+  out.phonetic = '';
+  out.phonetics = [];
   out.notice = notice;
   out.source = { title: '', author: '', desc: '' };
 
@@ -215,17 +271,13 @@ function parseDaily(html) {
       const am = tail.match(/^([^（(]+)/);
       out.source.author = (am ? am[1] : tail).trim();
       out.source.desc = lines.join(' ').trim();
-    } else if (/^解析|^词汇|^单词/.test(label)) {
+    } else if (/^解析|^词汇|^单词|^释义|^词义/.test(label)) {
       if (lines.length) {
-        const wl = lines.shift();
-        const m = wl.match(/^(.+?)\s*\/\s*(.+?)\s*\/\s*$/);
-        if (m) {
-          out.word = m[1].trim();
-          out.phonetic = m[2].trim();
-        } else {
-          out.word = wl.replace(/\/.*$/, '').trim();
-          out.phonetic = '';
-        }
+        const parsed = parseWordLine(lines.shift());
+        out.word = parsed.word;
+        out.phonetics = parsed.phonetics;
+        /* 兼容字段：只有一个音标时给字符串，双音标交给 phonetics */
+        out.phonetic = parsed.phonetics.length === 1 ? parsed.phonetics[0].ph : '';
         for (const l of lines) {
           const pm = l.match(/^([a-zA-Z]{1,6}\.)\s*(.+)$/);
           if (pm) out.definitions.push({ pos: pm[1].toLowerCase(), text: pm[2].trim() });
@@ -247,8 +299,9 @@ function parseDaily(html) {
         }
       }
       if (pendingEn) out.examples.push({ en: pendingEn, cn: '' });
-    } else if (/常见用法|用法|搭配/.test(label)) {
+    } else if (/用法|搭配|短语|词组|句式|表达/.test(label)) {
       out.usages = lines.slice();
+      out.usagesTitle = label || '常用搭配';
     } else if (!out.source.desc && lines.length) {
       out.source.title = out.source.title || sec.label;
       out.source.desc = lines.join(' ').trim();
