@@ -632,9 +632,21 @@ function buildTextBlock(ctx, K) {
 }
 
 /**
+ * 音标只保留内容，去掉外面那层斜杠 / 方括号 / 空白。
+ * 数据源各处的写法不统一（`/dɪˈsiːv/`、`[dɪˈsiːv]`、`/ dɪˈsiːv /`），
+ * 统一到这里剥干净，再由下面包一层 `/…/`，避免出现 `//` 或双份斜杠。
+ */
+function normPh(s) {
+  return String(s == null ? '' : s)
+    .replace(/^[\s/[]+/, '')
+    .replace(/[\s/\]]+$/, '');
+}
+
+/**
  * 归一化音标，统一成 [{ label, ph, text }]。
  * 只有一个音标时不显示「英/美」标签，保持和以前一致的观感；
- * 英式 + 美式并存（2026-09-18 起上游会给两个）时才加标签区分。
+ * 英式 + 美式并存（2026-09-18 起上游会给两个）时才加标签区分，
+ * 形如 `英 /dɪ'siːv/　美 /dɪ'siːv/`。
  */
 function phoneticList() {
   const c = state.content;
@@ -644,11 +656,14 @@ function phoneticList() {
   const single = list.length <= 1;
   return list
     .filter((p) => p && p.ph)
-    .map((p) => ({
-      label: p.label || '',
-      ph: p.ph || '',
-      text: (single || !p.label ? '' : p.label + ' ') + '/ ' + (p.ph || '') + ' /',
-    }));
+    .map((p) => {
+      const ph = normPh(p.ph);
+      return {
+        label: p.label || '',
+        ph,
+        text: (single || !p.label ? '' : p.label + ' ') + '/' + ph + '/',
+      };
+    });
 }
 
 
