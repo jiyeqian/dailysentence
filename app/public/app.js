@@ -37,6 +37,9 @@ const state = {
   candidates: [],       // 上游缺解析时，从句子挑出的关键词候选（Top 3）
   selectedWord: '',     // 当前选中的候选关键词
   picking: false,       // 正在查词典，避免重复点击
+  lookupSeq: 0,         // 查词序号：晚到的旧结果直接丢掉
+  defsWord: '',         // 当前释义属于哪个关键词（用来判断改词后是否过期）
+  defsManual: false,    // 释义被手改过，就别再自动覆盖
   content: {
     word: '', phonetic: '', phonetics: [], en: '', cn: '',
     defs: [], examples: [], usages: [], usagesTitle: '', source: '', date: '', dateCN: '',
@@ -222,6 +225,9 @@ async function loadDaily(force) {
     dateCN: data.dateCN || '',
     autoKind: missing ? (fb ? 'dict' : (autoWord ? 'guess' : '')) : '',
   };
+  /* 释义跟着哪个关键词走、有没有被手改 —— 供「改词自动重查」判断 */
+  state.defsWord = missing ? (fb ? autoWord : '') : (data.word || '');
+  state.defsManual = false;
   /* 便于分享 / 调试：允许用 ?word=&en=&cn= 覆盖文案 */
   ['word', 'en', 'cn', 'source'].forEach((k) => {
     const v = QS.get(k);
@@ -294,17 +300,34 @@ async function selectCandidate(word) {
   if (!word || state.picking) return;
   state.picking = true;
   state.selectedWord = word;
+  setFixNote('正在查词典补全「' + word + '」…');
+  await applyLookup(word, { auto: true });
+  state.picking = false;
+}
+
+/**
+ * 查询词典并把结果回填到单词卡片。
+ *
+ * 关键词一变，旧词的音标 / 释义 / 例句立刻就过期了，所以这里先把它们清空，
+ * 避免「标题写着 never、释义还留着 deceive」这种错配。
+ * auto = 关键词是自动挑的（不是用户手敲的），查不到时决定要不要留「自动选词」标记。
+ */
+async function applyLookup(word, opts = {}) {
+  const auto = !!opts.auto;
   const c = state.content;
+  const seq = ++state.lookupSeq;
+
   c.word = word;
   c.phonetic = '';
   c.phonetics = [];
   c.defs = [];
   c.examples = [];
-  c.autoKind = 'guess';
+  c.autoKind = auto ? 'guess' : '';
+  state.defsWord = '';
+  state.defsManual = false;
   renderCandidates();
   fillForm();
   scheduleRender();
-  setFixNote('正在查词典补全「' + word + '」…');
 
   let r = null;
   try {
@@ -313,20 +336,48 @@ async function selectCandidate(word) {
   } catch (e) {
     r = null;
   }
+  /* 等待期间又换了词 / 输入框已被改回别的内容，这次的结果作废 */
+  if (seq !== state.lookupSeq) return false;
+  if ((($('fWord').value) || '').trim() !== word) return false;
 
+  const missing = !!(state.apiData && state.apiData.missing);
   if (r && r.ok) {
     c.phonetics = Array.isArray(r.phonetics) ? r.phonetics : [];
     c.defs = Array.isArray(r.definitions) ? r.definitions : [];
     c.examples = Array.isArray(r.examples) ? r.examples : [];
     c.autoKind = 'dict';
-    setFixNote(r.lemma ? '已按原形 ' + r.lemma + ' 取到释义。' : '已用词典内容补全。');
+    state.defsWord = word;
+    if (missing) setFixNote(r.lemma ? '已按原形 ' + r.lemma + ' 取到释义。' : '已用词典内容补全。');
   } else {
-    c.autoKind = 'guess';
-    setFixNote('词典没查到「' + word + '」，海报上只显示关键词，释义可在下面手填。');
+    c.autoKind = auto ? 'guess' : '';
+    if (missing) setFixNote('词典没查到「' + word + '」，海报上只显示关键词，释义可在下面手填。');
   }
-  state.picking = false;
   fillForm();
   scheduleRender();
+  return !!(r && r.ok);
+}
+
+/** 手敲关键词后自动重查词典：否则释义 / 例句还留着上一个词的 */
+function autoLookupTypedWord() {
+  const w = ($('fWord').value || '').trim();
+  if (w.length < 3) return;        /* 多半还没敲完 */
+  if (w === state.defsWord) return; /* 释义已经是这个词的 */
+  if (state.picking || !state.apiData) return;
+  /* 释义是手填的就不覆盖，但音标 / 例句一定属于上一个词，清掉免得张冠李戴 */
+  if (state.defsManual) {
+    const c = state.content;
+    if (c.phonetics.length || c.phonetic || c.examples.length) {
+      c.phonetics = [];
+      c.phonetic = '';
+      c.examples = [];
+      fillForm();
+      scheduleRender();
+    }
+    return;
+  }
+  applyLookup(w, { auto: false }).then((ok) => {
+    toast(ok ? '已按词典更新「' + w + '」的音标与释义' : '词典没查到「' + w + '」，释义可在下面手填');
+  });
 }
 
 function safeGet(k) {
@@ -601,13 +652,19 @@ function phoneticList() {
 }
 
 
-/** 角标文案与配色：关键词不是来自上游原文时，在海报上留个很小的提示 */
+/**
+ * 卡片右下角的小圆标：一个加圈的字，说明关键词 / 释义不是上游今天给的内容。
+ * 做得刻意轻 —— 是给留心的人看的，不该抢句子的注意力。
+ */
 const BADGE = {
-  dict: { text: '词典补全', fg: '#3b73e0', bg: 'rgba(79,141,253,0.12)', bd: 'rgba(79,141,253,0.42)' },
-  guess: { text: '自动选词', fg: '#64748b', bg: 'rgba(148,163,184,0.18)', bd: 'rgba(148,163,184,0.5)' },
+  dict: { ch: '补', fg: '#3b73e0', bd: 'rgba(79,141,253,0.5)', bg: 'rgba(79,141,253,0.07)' },
+  guess: { ch: '选', fg: '#7b8794', bd: 'rgba(148,163,184,0.55)', bg: 'rgba(148,163,184,0.08)' },
 };
 
-const BADGE_FS = 22;
+const BADGE_D = 38;   /* 圆标直径 */
+const BADGE_FS = 21;  /* 圈内字号 */
+const BADGE_MX = 22;  /* 距卡片右边 */
+const BADGE_MY = 20;  /* 距卡片下边 */
 
 function badgeOf() {
   return BADGE[state.content.autoKind] || null;
@@ -633,14 +690,9 @@ function buildWordCard(ctx, K, topY) {
   const padY = 34;
   const innerW = w - padX * 2;
 
-  /* 右上角角标要占位，标题行可用宽度相应收窄 */
+  /* 右下角圆标只占底部一点空间，标题行宽度不再被它挤 */
   const badge = badgeOf();
-  let badgeW = 0;
-  if (badge) {
-    ctx.font = T(BADGE_FS, 600, F_SANS);
-    badgeW = measureSpaced(ctx, badge.text, 1.5) + 36 + 26;
-  }
-  const rowMaxW = innerW - badgeW;
+  const rowMaxW = innerW;
 
   const wordSize = 47 * K;
   const phSize = 31 * K;
@@ -701,11 +753,12 @@ function buildWordCard(ctx, K, topY) {
 
   return {
     hidden: false,
-    x, y: Math.round(topY), w, h: Math.round(padY * 2 + contentH),
+    /* 有圆标时底部多留一点，免得压到最后一行释义上 */
+    x, y: Math.round(topY), w, h: Math.round(padY * 2 + contentH + (badge ? 26 : 0)),
     padX, padY, innerW,
     wordSize, phSize, phDrawSize, row1H, wordW,
     defItems, defLH, chipSize, defSize,
-    exItems, badge, badgeW,
+    exItems, badge,
   };
 }
 
@@ -1092,30 +1145,29 @@ function drawWordCard(ctx, L) {
   drawBadge(ctx, P);
 }
 
-/** 卡片右上角的小角标：说明这张卡片的关键词不是来自上游原文 */
+/** 卡片右下角的小圆标：一个加圈的字，说明关键词 / 释义不是上游今天给的内容 */
 function drawBadge(ctx, P) {
   const b = P.badge;
-  if (!b || !P.badgeW) return;
-  const fs = BADGE_FS;
-  const bh = Math.round(fs * 1.9);
-  const bw = Math.round(P.badgeW);
-  const bx = P.x + P.w - bw - 24;
-  const by = P.y + 22;
+  if (!b) return;
+  const cx = Math.round(P.x + P.w - BADGE_MX - BADGE_D / 2);
+  const cy = Math.round(P.y + P.h - BADGE_MY - BADGE_D / 2);
 
   ctx.save();
-  roundRect(ctx, bx, by, bw, bh, bh / 2);
+  ctx.beginPath();
+  ctx.arc(cx, cy, BADGE_D / 2, 0, Math.PI * 2);
   ctx.fillStyle = b.bg;
   ctx.fill();
   ctx.strokeStyle = b.bd;
-  ctx.lineWidth = 1.5;
+  ctx.lineWidth = 1.4;
   ctx.stroke();
   ctx.restore();
 
   ctx.save();
-  ctx.font = T(fs, 600, F_SANS);
+  ctx.font = T(BADGE_FS, 600, F_SANS);
   ctx.fillStyle = b.fg;
+  ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  drawSpaced(ctx, b.text, bx + 18, by + bh / 2 + 1, 1.5);
+  ctx.fillText(b.ch, cx, cy + 1);
   ctx.restore();
 }
 
@@ -1165,15 +1217,23 @@ function scheduleRender() {
 
 function bindUI() {
   let inputTimer = null;
+  let wordTimer = null;
   ['fWord', 'fEn', 'fCn', 'fDefs', 'fSource'].forEach((id) => {
     $(id).addEventListener('input', () => {
       /* 亲手改过关键词，就不再是「自动选的」了，角标跟着撤掉 */
       if (id === 'fWord') state.content.autoKind = '';
+      /* 亲手写过释义，就别再拿词典结果盖掉 */
+      if (id === 'fDefs') state.defsManual = true;
       clearTimeout(inputTimer);
       inputTimer = setTimeout(() => {
         readForm();
         scheduleRender();
       }, 220);
+      /* 改完关键词等一会儿没再动，就自动重查词典（释义/例句本来属于上一个词） */
+      if (id === 'fWord') {
+        clearTimeout(wordTimer);
+        wordTimer = setTimeout(autoLookupTypedWord, 700);
+      }
     });
   });
 
