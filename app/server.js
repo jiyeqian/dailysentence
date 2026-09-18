@@ -38,12 +38,16 @@ const ALLOW_HOSTS = new Set([
   'cdn.frdic.com',
 ]);
 
+/* 上游对「反复新建连接」比较敏感，复用长连接能明显降低被 302 挡回的概率 */
+const KA_AGENT = new https.Agent({ keepAlive: true, maxSockets: 4, keepAliveMsecs: 30000 });
+
 /* ------------------------------------------------------------------ */
 /* HTTP 抓取（自动跟随跳转，支持 http / https）                          */
 /* ------------------------------------------------------------------ */
 
 function fetchRaw(target, opts = {}) {
   const redirects = opts.redirects || 0;
+  const maxRedirects = opts.maxRedirects === undefined ? 5 : opts.maxRedirects;
   return new Promise((resolve, reject) => {
     let u;
     try {
@@ -52,27 +56,29 @@ function fetchRaw(target, opts = {}) {
       return reject(new Error('bad url: ' + target));
     }
     const mod = u.protocol === 'https:' ? https : http;
+    const reqOpts = {
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: u.pathname + u.search,
+      method: 'GET',
+      headers: Object.assign(
+        {
+          'User-Agent': UA,
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/*,*/*;q=0.8',
+          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+          'Accept-Encoding': 'identity',
+          Referer: 'https://dict.eudic.net/',
+        },
+        opts.headers || {}
+      ),
+    };
+    if (u.protocol === 'https:') reqOpts.agent = KA_AGENT;
     const req = mod.request(
-      {
-        protocol: u.protocol,
-        hostname: u.hostname,
-        port: u.port || (u.protocol === 'https:' ? 443 : 80),
-        path: u.pathname + u.search,
-        method: 'GET',
-        headers: Object.assign(
-          {
-            'User-Agent': UA,
-            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/*,*/*;q=0.8',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'identity',
-            Referer: 'https://dict.eudic.net/',
-          },
-          opts.headers || {}
-        ),
-      },
+      reqOpts,
       (res) => {
         const code = res.statusCode || 0;
-        if ([301, 302, 303, 307, 308].includes(code) && res.headers.location && redirects < 5) {
+        if ([301, 302, 303, 307, 308].includes(code) && res.headers.location && redirects < maxRedirects) {
           res.resume();
           const next = new URL(res.headers.location, target).toString();
           return fetchRaw(next, Object.assign({}, opts, { redirects: redirects + 1 })).then(resolve, reject);
@@ -127,6 +133,409 @@ function pick(re, html, idx = 1) {
   const m = String(html == null ? '' : html).match(re);
   if (!m) return '';
   return m[idx] === undefined ? m[0] || '' : m[idx];
+}
+
+/** 取 [a, b) 之间的片段；b 省略则一直到结尾；找不到 a 时返回空串 */
+function sliceBetween(html, a, b) {
+  const s = String(html == null ? '' : html);
+  const i = s.indexOf(a);
+  if (i < 0) return '';
+  if (!b) return s.slice(i);
+  const j = s.indexOf(b, i + a.length);
+  return s.slice(i, j < 0 ? undefined : j);
+}
+
+/** 从 from 起，最早的某个 needle 出现位置；都没有返回 -1 */
+function earliestOf(s, needles, from) {
+  let best = -1;
+  for (const n of needles) {
+    const i = s.indexOf(n, from);
+    if (i >= 0 && (best < 0 || i < best)) best = i;
+  }
+  return best;
+}
+
+/**
+ * 释义 / 例句正文统一处理：上游会把部分汉字随机换成一张小图
+ * （<img class="dictimgtoword">），这里统一打成占位符 HOLE，
+ * 方便后续「多次抓取 + 逐位合并」把缺字补回来。
+ * 这些位置不会出现正经配图，所以任何 <img> 都按被换掉的汉字处理
+ * —— 上游偶尔不写类名，只按类名匹配会漏掉，缺字就变成空格了。
+ */
+const HOLE = '\u0001';
+
+function markDefImgs(s) {
+  return String(s == null ? '' : s).replace(/<img[^>]*>/gi, HOLE);
+}
+
+/* ------------------------------------------------------------------ */
+/* 关键词候选：上游没给解析内容时，从英文句子里挑「最像关键词」的词       */
+/* ------------------------------------------------------------------ */
+
+/** 闭类词（功能词）黑名单：代词 / 助动词 / 限定词 / 介词 / 连词 / 虚副词 */
+const CLOSED_CLASS = new Set(
+  (
+    'i me my mine myself we us our ours ourselves you your yours yourself yourselves ' +
+    'he him his himself she her hers herself it its itself they them their theirs themselves ' +
+    'this that these those who whom whose which what whatever whoever someone somebody something ' +
+    'anyone anybody anything everyone everybody everything nobody nothing none one ones ' +
+    'am is are was were be been being do does did done doing have has had having ' +
+    'will would shall should can could may might must ought ' +
+    'a an the some any no every each either neither both all few many much more most ' +
+    'several such another other others enough less least own same ' +
+    'of to in on at by for with without about against between among into onto through during ' +
+    'before after above below under over up down out off away along around near ' +
+    'and but or nor so yet if because as than while although though unless until till since whether ' +
+    'not very too also just only even still always never often sometimes usually really quite rather ' +
+    'almost already ever else here there now then when where why how once again further thus hence ' +
+    'yes please'
+  )
+    .split(/\s+/)
+    .filter(Boolean)
+);
+
+/** 轻量词形还原（只用于候选词去重打分；正式查词典时另有更严谨的还原） */
+function basicLemma(w) {
+  if (w.length > 4 && /ies$/.test(w)) return w.slice(0, -3) + 'y';
+  if (w.length > 4 && /(ches|shes|sses|xes|zes|oes)$/.test(w)) return w.slice(0, -2);
+  if (w.length > 3 && /s$/.test(w) && !/ss$/.test(w)) return w.slice(0, -1);
+  return w;
+}
+
+/**
+ * 从英文句子挑 Top N 关键词候选。
+ * 打分 = 基础 10 + 词频加成（同一词根每多出现一次 +12） + 长度偏好（6–12 字母 +6）。
+ */
+function extractKeywords(sentence, limit = 3) {
+  const raw = String(sentence || '').match(/[A-Za-z][A-Za-z'’-]*/g) || [];
+  const tally = new Map();
+  for (const w0 of raw) {
+    if (/['’]/.test(w0)) continue; // 缩写（don't / it's）不算关键词
+    const w = w0.toLowerCase().replace(/^-+|-+$/g, '');
+    if (!/^[a-z][a-z-]{2,}$/.test(w)) continue;
+    if (CLOSED_CLASS.has(w)) continue;
+    const key = basicLemma(w);
+    if (CLOSED_CLASS.has(key)) continue;
+    const t = tally.get(key) || { word: key, count: 0, len: key.replace(/-/g, '').length };
+    t.count += 1;
+    tally.set(key, t);
+  }
+  return [...tally.values()]
+    .map((t) => {
+      let score = 10 + (t.count - 1) * 12;
+      if (t.len >= 6 && t.len <= 12) score += 6;
+      else if (t.len >= 5) score += 3;
+      else score -= 4;
+      return { word: t.word, count: t.count, score };
+    })
+    .sort((a, b) => b.score - a.score || a.word.localeCompare(b.word))
+    .slice(0, limit);
+}
+
+/* ------------------------------------------------------------------ */
+/* 欧路词典词条页：补全上游缺失的 音标 / 释义 / 双语例句                  */
+/* ------------------------------------------------------------------ */
+
+const DICT_PAGE = 'https://dict.eudic.net/dicts/en/';
+
+/** 词形还原候选（原词条释义质量差时按顺序回查） */
+function lemmaCandidates(word) {
+  const w = String(word || '').toLowerCase();
+  const out = [];
+  const push = (x) => {
+    if (x && x.length >= 3 && x !== w && out.indexOf(x) < 0) out.push(x);
+  };
+  if (w.length > 4 && /ies$/.test(w)) push(w.slice(0, -3) + 'y');
+  if (w.length > 4 && /(ches|shes|sses|xes|zes|oes)$/.test(w)) push(w.slice(0, -2));
+  if (w.length > 4 && /ed$/.test(w)) {
+    push(w.slice(0, -1)); // deceived -> deceive
+    push(w.slice(0, -2)); // jumped   -> jump
+    if (/([bdfglmnprt])\1ed$/.test(w)) push(w.slice(0, -3)); // stopped -> stop
+  }
+  if (w.length > 5 && /ing$/.test(w)) {
+    push(w.slice(0, -3)); // walking -> walk
+    push(w.slice(0, -3) + 'e'); // making  -> make
+    if (/([bdfglmnprt])\1ing$/.test(w)) push(w.slice(0, -4)); // running -> run
+  }
+  if (w.length > 3 && /s$/.test(w) && !/ss$/.test(w)) push(w.slice(0, -1));
+  return out;
+}
+
+/** 解析词条页；缺字位置统一是 HOLE */
+function parseDictPage(html, query) {
+  const out = { ok: false, word: query, phonetics: [], definitions: [], examples: [] };
+  if (!html) return out;
+
+  /* ---- 音标：<span class="phontype">英</span><span class="Phonitic">/dɪ'siːv/</span> ---- */
+  const phRegion =
+    sliceBetween(html, 'class="phonitic-line"', 'class="globalVoice"') ||
+    sliceBetween(html, 'class="phonitic-line"', '</h1>');
+  const phRe = /<span class="phontype">([\s\S]*?)<\/span>\s*<span class="Phonitic">([\s\S]*?)<\/span>/gi;
+  let m;
+  while ((m = phRe.exec(phRegion))) {
+    const ph = stripTags(m[2]);
+    if (ph) out.phonetics.push({ label: stripTags(m[1]), ph });
+  }
+
+  /* ---- 释义：英汉-汉英词典 #ExpFCchild（<div class="exp"> 或 <ol><li>） ----
+     结束位置取「下一个分区」的最早出现处：有的词没有近义反义区，
+     若只认 #ExpSYN 会把后面的生词本 / 历史记录等 <li> 也扫进来。 */
+  const fcStart = html.indexOf('id="ExpFCchild"');
+  const fcEnd = fcStart < 0 ? -1 : earliestOf(html, ['id="ExpSYN"', 'id="ExpSPEC"', 'id="ExpLJ"', 'id="SC_trans"'], fcStart + 14);
+  const fc = (fcStart < 0 ? '' : html.slice(fcStart, fcEnd < 0 ? undefined : fcEnd)).replace(
+    /<div id="trans"[\s\S]*?<\/div>/gi,
+    ''
+  );
+  let segs = (fc.match(/<li>[\s\S]*?<\/li>/gi) || []).map((x) =>
+    x.replace(/^<li>/i, '').replace(/<\/li>$/i, '')
+  );
+  if (!segs.length) {
+    segs = (fc.match(/<div class="exp">[\s\S]*?<\/div>/gi) || []).map((x) =>
+      x.replace(/^<div class="exp">/i, '').replace(/<\/div>$/i, '')
+    );
+  }
+  if (!segs.length) {
+    const t = fc.replace(/<!--[\s\S]*?-->/g, '').trim();
+    if (t) segs = [t];
+  }
+
+  let lastPos = '';
+  for (const seg of segs) {
+    let rest = seg;
+    let pos = '';
+    const im = rest.match(/^\s*<i>([^<]*)<\/i>\s*([\s\S]*)$/);
+    if (im && /^[a-z]{1,6}\./i.test(im[1].trim())) {
+      pos = im[1].trim();
+      rest = im[2];
+    }
+    let text = stripTags(markDefImgs(rest));
+    if (!text) continue;
+    if (!pos) {
+      const pm = text.match(/^([A-Za-z]{1,6}\.(?:\s*&\s*[A-Za-z]{1,6}\.)*)\s*(.+)$/);
+      if (pm) {
+        pos = pm[1];
+        text = pm[2].trim();
+      }
+    }
+    if (!pos) pos = lastPos;
+    lastPos = pos || lastPos;
+    if (text) out.definitions.push({ pos: pos.toLowerCase(), text });
+  }
+
+  /* ---- 双语例句：英语例句库 #ExpLJchild ---- */
+  const lj = sliceBetween(html, 'id="ExpLJchild"').slice(0, 40000);
+  const ljRe =
+    /<div class="lj_item"[\s\S]*?<p class="line">([\s\S]*?)<\/p>\s*<p class="exp">([\s\S]*?)<\/p>/gi;
+  let em;
+  while ((em = ljRe.exec(lj))) {
+    const en = stripTags(markDefImgs(em[1]));
+    if (!en) continue;
+    out.examples.push({ en, cn: stripTags(markDefImgs(em[2])) });
+    if (out.examples.length >= 6) break;
+  }
+
+  out.ok = out.definitions.length > 0;
+  return out;
+}
+
+/** 逐位合并两次抓取：占位符的位置用另一份的可用字符补上 */
+function mergeString(a, b) {
+  if (a == null) return b || '';
+  if (b == null) return a || '';
+  if (a === b) return a;
+  if (a.length !== b.length) {
+    return a.split(HOLE).length <= b.split(HOLE).length ? a : b;
+  }
+  /* 占位符和空格都算「没内容」：上游偶尔会把字整个吞掉、只留个空格，
+     这种情况不能拿空格去覆盖另一份里的占位符，否则缺字就永远补不回来。 */
+  const weak = (c) => c === HOLE || c === ' ';
+  let out = '';
+  for (let i = 0; i < a.length; i++) {
+    const ca = a[i];
+    const cb = b[i];
+    if (!weak(ca)) out += ca;
+    else if (!weak(cb)) out += cb;
+    else out += ca === HOLE ? cb : ca;
+  }
+  return out;
+}
+
+function holeCount(r) {
+  let n = 0;
+  const scan = (s) => {
+    n += String(s == null ? '' : s).split(HOLE).length - 1;
+  };
+  if (!r) return 1;
+  r.definitions.forEach((d) => scan(d.text));
+  r.phonetics.forEach((p) => scan(p.ph));
+  r.examples.forEach((e) => {
+    scan(e.en);
+    scan(e.cn);
+  });
+  return n;
+}
+
+function mergeDictRuns(runs) {
+  const ok = (runs || []).filter((r) => r && r.ok);
+  if (!ok.length) return null;
+  const size = (r) => r.definitions.length * 10 + r.phonetics.length;
+  const base = ok.reduce((a, b) => (size(b) > size(a) ? b : a));
+  const out = {
+    ok: true,
+    word: base.word,
+    phonetics: base.phonetics.map((p) => ({ label: p.label, ph: p.ph })),
+    definitions: base.definitions.map((d) => ({ pos: d.pos, text: d.text })),
+    examples: base.examples.map((e) => ({ en: e.en, cn: e.cn })),
+  };
+  for (const r of ok) {
+    if (r === base) continue;
+    out.phonetics = out.phonetics.map((p, i) =>
+      r.phonetics[i] ? { label: p.label || r.phonetics[i].label, ph: mergeString(p.ph, r.phonetics[i].ph) } : p
+    );
+    out.definitions = out.definitions.map((d, i) =>
+      r.definitions[i]
+        ? { pos: d.pos || r.definitions[i].pos, text: mergeString(d.text, r.definitions[i].text) }
+        : d
+    );
+    out.examples = out.examples.map((e, i) =>
+      r.examples[i]
+        ? { en: mergeString(e.en, r.examples[i].en), cn: mergeString(e.cn, r.examples[i].cn) }
+        : e
+    );
+  }
+  return out;
+}
+
+/** 释义里带「过去式 / 复数」注解，说明查到的不是原形，释义质量差 */
+const INFLECTED_NOTE = /(过去式|过去分词|现在分词|复数形式|复数|第三人称单数|的比较级|的最高级|被动式)/;
+
+function isGoodDictResult(r) {
+  if (!r || !r.ok || !r.definitions.length) return false;
+  const total = r.definitions.reduce(
+    (n, d) => n + d.text.split(HOLE).join('').trim().length,
+    0
+  );
+  if (total < 2) return false;
+  return !r.definitions.some((d) => INFLECTED_NOTE.test(d.text));
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* 词条页不加节流会被上游 302 到登录页（它把高频访问当异常），
+   所以所有词条请求串行排队，并保证两次之间至少 DICT_MIN_GAP 毫秒。
+   连续被挡回时再整体退避一小会儿，免得越试越黑、把后面的请求也拖死。 */
+const DICT_MIN_GAP = 300;
+let dictChain = Promise.resolve();
+let dictLastAt = 0;
+let dictBlockStreak = 0;
+let dictCooldownUntil = 0;
+
+function noteDictBlocked() {
+  dictBlockStreak += 1;
+  dictCooldownUntil = Date.now() + Math.min(1200 * dictBlockStreak, 12000);
+}
+
+function noteDictOk() {
+  dictBlockStreak = 0;
+  dictCooldownUntil = 0;
+}
+
+function dictRequest(url) {
+  const task = dictChain.then(async () => {
+    const wait = DICT_MIN_GAP - (Date.now() - dictLastAt);
+    if (wait > 0) await sleep(wait);
+    dictLastAt = Date.now();
+    /* maxRedirects:0 —— 302 一律视为「这次没拿到」，交给上层重试，绝不跟随到登录页 */
+    return fetchRaw(url, { maxRedirects: 0 });
+  });
+  dictChain = task.then(
+    () => {},
+    () => {}
+  );
+  return task;
+}
+
+async function fetchDictOnce(word) {
+  if (Date.now() < dictCooldownUntil) return null; // 正在退避，直接放弃这次尝试
+  try {
+    const res = await dictRequest(DICT_PAGE + encodeURIComponent(word));
+    if (res.status !== 200) {
+      if (res.status >= 300 && res.status < 400) noteDictBlocked();
+      return null;
+    }
+    const parsed = parseDictPage(res.body.toString('utf8'), word);
+    if (parsed.ok) noteDictOk();
+    return parsed;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * 抓词条 + 「多次抓取、逐位合并」。
+ *
+ * 要同时对付上游两个毛病：
+ *   1) 每次请求都会随机把一部分汉字换成图片 → 必须多抓几次、逐位合并补字；
+ *   2) 负载均衡下会有一部分请求被 302 挡回 → 失败要重试。
+ * 所以按「失败不计入」的循环重试，凑够或补全就提前收工，请求数有上限。
+ */
+async function fetchDictMerged(word, maxAttempts = 4) {
+  const runs = [];
+  let merged = null;
+  for (let i = 0; i < maxAttempts; i++) {
+    if (i) await sleep(120);
+    const r = await fetchDictOnce(word);
+    if (!r) continue;
+    runs.push(r);
+    merged = mergeDictRuns(runs);
+    if (merged && holeCount(merged) === 0) break;
+  }
+  return merged;
+}
+
+/** 查词（带缓存、词形还原、缺字合并），查不到返回 null */
+async function lookupWord(rawWord) {
+  const word = String(rawWord || '')
+    .trim()
+    .replace(/^[^A-Za-z]+/, '')
+    .replace(/[^A-Za-z'’-]+$/, '');
+  if (!word) return null;
+
+  const key = 'dict:' + word.toLowerCase();
+  const hit = cacheGet(key);
+  if (hit) return hit;
+
+  let best = await fetchDictMerged(word);
+  if (best) best = Object.assign({}, best, { query: word });
+
+  /* 查到的若是「过去式 / 复数」这类词条，释义质量差，回查原形 */
+  if (!isGoodDictResult(best)) {
+    for (const cand of lemmaCandidates(word).slice(0, 2)) {
+      const r = await fetchDictMerged(cand, 3);
+      if (!r) continue;
+      if (isGoodDictResult(r)) {
+        best = Object.assign({}, r, { query: word, lemma: cand });
+        break;
+      }
+      if (!best || !best.ok) best = Object.assign({}, r, { query: word, lemma: cand });
+    }
+  }
+
+  if (best && best.ok && best.definitions.length) {
+    best = Object.assign({}, best, {
+      /* 海报上放不下太多义项，最多留 4 条 */
+      definitions: best.definitions.slice(0, 4).map((d) => ({
+        pos: d.pos,
+        /* 试到最后仍没补回来的缺字直接丢掉：留个占位符在海报上是块豆腐干，更难看 */
+        text: d.text.split(HOLE).join(''),
+      })),
+      phonetics: best.phonetics.map((p) => ({ label: p.label, ph: p.ph.split(HOLE).join('') })),
+      examples: best.examples.map((e) => ({ en: e.en.split(HOLE).join(''), cn: e.cn.split(HOLE).join('') })),
+    });
+    cacheSet(key, best, 12 * 60 * 60 * 1000);
+    return best;
+  }
+  return null;
 }
 
 /**
@@ -308,16 +717,11 @@ function parseDaily(html) {
     }
   }
 
-  // ---- 兜底：没有解析块时，从英文句子里猜关键词 -------------------------
-  if (!out.word && out.en) {
-    const STOP = new Set(['the', 'a', 'an', 'and', 'but', 'or', 'by', 'of', 'to', 'in', 'on', 'is', 'are', 'not', 'it', 'that', 'this']);
-    const words = out.en.toLowerCase().match(/[a-z][a-z'-]{3,}/g) || [];
-    const cand = words.filter((w) => !STOP.has(w)).sort((a, b) => b.length - a.length)[0];
-    if (cand) {
-      out.word = cand;
-      out.wordGuessed = true;
-    }
-  }
+  // ---- 兜底：上游解析块缺失时，从英文句子里挑候选关键词 -----------------
+  // 不再直接把「最长的词」当关键词（那是错的），只给出候选，由前端决定用哪个，
+  // 并在海报上标出来源，避免把猜出来的词当成权威关键词展示。
+  out.missing = !out.definitions.length;
+  out.candidates = out.missing && out.en ? extractKeywords(out.en, 3) : [];
 
   out.ok = Boolean(out.en || out.cn);
   return out;
@@ -346,6 +750,38 @@ function cacheSet(key, value, ttlMs) {
   }
 }
 
+/**
+ * 上游「解析」块为空时（服务端偶发漏发），用词典页补全音标/释义/例句。
+ * 上游有数据时永远以上游为准，绝不覆盖。
+ */
+async function supplementFromDict(data) {
+  if (!data.missing) return data;
+
+  const list = (data.candidates || []).map((c) => c.word);
+  const target = data.word && !list.includes(data.word) ? data.word : null;
+  const queue = target ? [target].concat(list) : list;
+  if (!queue.length) return data;
+
+  /* 首选候选先单独查；还是没有再补一个候选。全是 302 / 查不到也就算了，
+     宁可回落到「不画单词卡片」，也不要把猜来的词当权威内容展示。 */
+  let hit = null;
+  for (const w of queue.slice(0, 2)) {
+    try {
+      hit = await lookupWord(w);
+    } catch (e) {
+      hit = null;
+    }
+    if (hit) break;
+  }
+
+  if (hit) {
+    data.fallback = hit;
+    data.fallbackWord = hit.query;
+    data.fallbackNote = hit.lemma ? `已按原形 ${hit.lemma} 取释义` : '';
+  }
+  return data;
+}
+
 async function getDaily(force) {
   const key = 'daily';
   if (!force) {
@@ -356,6 +792,7 @@ async function getDaily(force) {
   if (res.status !== 200) throw new Error('上游返回 ' + res.status);
   const data = parseDaily(res.body.toString('utf8'));
   if (!data.ok) throw new Error('页面解析失败');
+  await supplementFromDict(data);
   data.cached = true;
   cacheSet(key, data, 30 * 60 * 1000);
   return data;
@@ -435,6 +872,32 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ---- API：查词（补全上游缺失的音标 / 释义 / 例句）-------------------
+  if (pathname === '/api/lookup') {
+    const w = (u.searchParams.get('word') || '').trim();
+    if (!/^[A-Za-z][A-Za-z'’-]{0,40}$/.test(w)) {
+      return send(res, 400, Buffer.from(JSON.stringify({ ok: false, error: '关键词不合法' })), {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+    }
+    try {
+      const r = await lookupWord(w);
+      const payload = r ? Object.assign({ ok: true }, r) : { ok: false, word: w };
+      return send(res, 200, Buffer.from(JSON.stringify(payload)), {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+    } catch (err) {
+      return send(
+        res,
+        502,
+        Buffer.from(JSON.stringify({ ok: false, error: String(err && err.message ? err.message : err) })),
+        { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }
+      );
+    }
+  }
+
   // ---- API：图片代理 --------------------------------------------------
   if (pathname === '/api/img') {
     let target = u.searchParams.get('u') || '';
@@ -489,4 +952,4 @@ server.listen(PORT, HOST, () => {
   console.log(`[dailysentence] http://localhost:${PORT}  (HOST=${HOST})`);
 });
 
-module.exports = { parseDaily };
+module.exports = { parseDaily, parseDictPage, extractKeywords, lookupWord };

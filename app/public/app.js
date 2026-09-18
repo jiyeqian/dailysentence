@@ -34,7 +34,15 @@ const DEFAULT_RATIOS = { L: 0.0364, T: 0.5934, R: 0.9636, B: 0.8491 };
 
 const state = {
   apiData: null,
-  content: { word: '', phonetic: '', phonetics: [], en: '', cn: '', defs: [], examples: [], usages: [], usagesTitle: '', source: '', date: '', dateCN: '' },
+  candidates: [],       // 上游缺解析时，从句子挑出的关键词候选（Top 3）
+  selectedWord: '',     // 当前选中的候选关键词
+  picking: false,       // 正在查词典，避免重复点击
+  content: {
+    word: '', phonetic: '', phonetics: [], en: '', cn: '',
+    defs: [], examples: [], usages: [], usagesTitle: '', source: '', date: '', dateCN: '',
+    /* '' = 上游原文；'dict' = 词典补全；'guess' = 只是自动选词、没拿到释义 */
+    autoKind: '',
+  },
   bgImage: null,
   template: null,
   ratios: { ...DEFAULT_RATIOS },
@@ -188,24 +196,39 @@ async function loadDaily(force) {
   }
 
   state.apiData = data;
+
+  /* 上游「解析」块偶尔会整段漏发：这时没有关键词也没有释义。
+     不猜「最长的词」当关键词，而是按句意挑几个候选（服务端已带回 Top 3），
+     能查到词典就用词典内容补全，并在海报上标出来源。 */
+  const missing = !!data.missing;
+  const fb = data.fallback || null;
+  state.candidates = Array.isArray(data.candidates) ? data.candidates.slice() : [];
+  const autoWord =
+    data.word || (fb && fb.query) || (state.candidates[0] && state.candidates[0].word) || '';
+  state.selectedWord = autoWord;
+
   state.content = {
-    word: data.word || '',
-    phonetic: data.phonetic || '',
-    phonetics: Array.isArray(data.phonetics) ? data.phonetics.slice() : [],
+    word: autoWord,
+    phonetic: '',
+    phonetics: fb ? (fb.phonetics || []).slice() : (Array.isArray(data.phonetics) ? data.phonetics.slice() : []),
     en: data.en || '',
     cn: data.cn || '',
-    defs: (data.definitions || []).slice(),
-    examples: (data.examples || []).slice(),
+    defs: fb ? (fb.definitions || []).slice() : (data.definitions || []).slice(),
+    examples: fb ? (fb.examples || []).slice() : (data.examples || []).slice(),
     usages: (data.usages || []).slice(),
     usagesTitle: data.usagesTitle || '常用搭配',
     source: (data.source && data.source.author) || '',
     date: data.date || '',
     dateCN: data.dateCN || '',
+    autoKind: missing ? (fb ? 'dict' : (autoWord ? 'guess' : '')) : '',
   };
   /* 便于分享 / 调试：允许用 ?word=&en=&cn= 覆盖文案 */
   ['word', 'en', 'cn', 'source'].forEach((k) => {
     const v = QS.get(k);
-    if (v) state.content[k] = v;
+    if (v) {
+      state.content[k] = v;
+      if (k === 'word') state.content.autoKind = '';
+    }
   });
   /* 调试音标排版：?ph=ˈɪmpʌls（单音标）或 ?ph=英:ɪɡˈzæmpl|美:ɪɡˈzɑːmpl（双音标） */
   const phRaw = QS.get('ph');
@@ -217,12 +240,93 @@ async function loadDaily(force) {
     state.content.phonetic = '';
   }
   fillForm();
+  renderCandidates();
+  if (missing) {
+    const phr = fb && fb.lemma ? '已按原形 ' + fb.lemma + ' 取释义。' : '已用词典补全音标与释义。';
+    setFixNote(
+      fb
+        ? '欧路今天没给出「解析」内容，已按句意自动选词，' + phr + '点其它候选可切换：'
+        : '欧路今天没给出「解析」内容，词典也没查到释义。已按句意自动选词，可点其它候选重试，或在下面手填：'
+    );
+  }
   $('subtitle').textContent =
-    (data.date ? data.date + ' · ' : '') + (data.word ? '关键词 ' + data.word : '今日一句');
+    (data.date ? data.date + ' · ' : '') +
+    (data.word ? '关键词 ' + data.word : autoWord ? '关键词 ' + autoWord : '今日一句');
   $('linkSource').href = data.permalink || 'https://dict.eudic.net/home/dailysentence';
 
   await loadBackground(data.image);
   render();
+}
+
+/* ------------------- 上游缺解析时的关键词补全 ------------------- */
+
+/** 画出候选关键词胶囊；没有候选就整块隐藏 */
+function renderCandidates() {
+  const card = $('fixCard');
+  const list = state.candidates || [];
+  const on = !!(state.apiData && state.apiData.missing && (list.length || state.selectedWord));
+  card.hidden = !on;
+  if (!on) return;
+
+  const seg = $('segWord');
+  seg.innerHTML = '';
+  const items = list.length ? list.slice() : [{ word: state.selectedWord }];
+  if (state.selectedWord && !items.some((c) => c.word === state.selectedWord)) {
+    items.unshift({ word: state.selectedWord });
+  }
+  items.forEach((c) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.v = c.word;
+    b.textContent = c.word;
+    b.classList.toggle('on', c.word === state.selectedWord);
+    seg.appendChild(b);
+  });
+}
+
+function setFixNote(text) {
+  const n = $('fixNote');
+  if (n) n.textContent = text;
+}
+
+/** 选一个候选关键词：重置卡片内容 → 查词典 → 回填音标 / 释义 / 例句 */
+async function selectCandidate(word) {
+  if (!word || state.picking) return;
+  state.picking = true;
+  state.selectedWord = word;
+  const c = state.content;
+  c.word = word;
+  c.phonetic = '';
+  c.phonetics = [];
+  c.defs = [];
+  c.examples = [];
+  c.autoKind = 'guess';
+  renderCandidates();
+  fillForm();
+  scheduleRender();
+  setFixNote('正在查词典补全「' + word + '」…');
+
+  let r = null;
+  try {
+    const res = await fetch('/api/lookup?word=' + encodeURIComponent(word), { cache: 'no-store' });
+    r = await res.json();
+  } catch (e) {
+    r = null;
+  }
+
+  if (r && r.ok) {
+    c.phonetics = Array.isArray(r.phonetics) ? r.phonetics : [];
+    c.defs = Array.isArray(r.definitions) ? r.definitions : [];
+    c.examples = Array.isArray(r.examples) ? r.examples : [];
+    c.autoKind = 'dict';
+    setFixNote(r.lemma ? '已按原形 ' + r.lemma + ' 取到释义。' : '已用词典内容补全。');
+  } else {
+    c.autoKind = 'guess';
+    setFixNote('词典没查到「' + word + '」，海报上只显示关键词，释义可在下面手填。');
+  }
+  state.picking = false;
+  fillForm();
+  scheduleRender();
 }
 
 function safeGet(k) {
@@ -409,7 +513,7 @@ function measureAll(ctx, scale) {
   const textBottom = textTop + text.total;
 
   const panel = buildWordCard(ctx, K, textBottom + GAP_TEXT_PANEL);
-  const panelBottom = panel.y + panel.h;
+  const panelBottom = panel.hidden ? textBottom : panel.y + panel.h;
 
   const card = buildProfileCard(panelBottom + GAP_PANEL_CARD);
 
@@ -497,14 +601,46 @@ function phoneticList() {
 }
 
 
-/** 单词卡片：关键词 + 音标 + 释义（+ 长版海报下的例句与常用搭配），无底部栏 */
+/** 角标文案与配色：关键词不是来自上游原文时，在海报上留个很小的提示 */
+const BADGE = {
+  dict: { text: '词典补全', fg: '#3b73e0', bg: 'rgba(79,141,253,0.12)', bd: 'rgba(79,141,253,0.42)' },
+  guess: { text: '自动选词', fg: '#64748b', bg: 'rgba(148,163,184,0.18)', bd: 'rgba(148,163,184,0.5)' },
+};
+
+const BADGE_FS = 22;
+
+function badgeOf() {
+  return BADGE[state.content.autoKind] || null;
+}
+
+/** 单词卡片：关键词 + 音标 + 释义（+ 长版海报下的例句），无底部栏 */
 function buildWordCard(ctx, K, topY) {
   const r = state.ratios;
   const x = Math.round(r.L * CW);
   const w = Math.round((r.R - r.L) * CW);
+
+  /* 补全失败、连关键词都没有：干脆不画这张卡片，比画一张空卡片体面 */
+  if (!state.content.word) {
+    return {
+      hidden: true, x, y: Math.round(topY), w, h: 0,
+      padX: 0, padY: 0, innerW: 0, wordSize: 0, phSize: 0, phDrawSize: 0,
+      row1H: 0, wordW: 0, defItems: [], defLH: 0, chipSize: 0, defSize: 0,
+      exItems: [], badge: null,
+    };
+  }
+
   const padX = 46;
   const padY = 34;
   const innerW = w - padX * 2;
+
+  /* 右上角角标要占位，标题行可用宽度相应收窄 */
+  const badge = badgeOf();
+  let badgeW = 0;
+  if (badge) {
+    ctx.font = T(BADGE_FS, 600, F_SANS);
+    badgeW = measureSpaced(ctx, badge.text, 1.5) + 36 + 26;
+  }
+  const rowMaxW = innerW - badgeW;
 
   const wordSize = 47 * K;
   const phSize = 31 * K;
@@ -526,7 +662,7 @@ function buildWordCard(ctx, K, topY) {
       const total = phs.reduce((acc, p) => acc + ctx.measureText(p.text).width, 0)
         + Math.max(0, phs.length - 1) * 22;
       phDrawSize = size;
-      if (wordW + 18 + total <= innerW) break;
+      if (wordW + 18 + total <= rowMaxW) break;
     }
   }
 
@@ -564,11 +700,12 @@ function buildWordCard(ctx, K, topY) {
   if (exItems.length) contentH += 12 + exItems.reduce((s, e) => s + e.h + 16, 0);
 
   return {
+    hidden: false,
     x, y: Math.round(topY), w, h: Math.round(padY * 2 + contentH),
     padX, padY, innerW,
     wordSize, phSize, phDrawSize, row1H, wordW,
     defItems, defLH, chipSize, defSize,
-    exItems,
+    exItems, badge, badgeW,
   };
 }
 
@@ -834,6 +971,7 @@ function drawProfileCard(ctx, L) {
 
 function drawWordCard(ctx, L) {
   const P = L.panel;
+  if (P.hidden || P.h <= 0) return;
   const R = 30;
 
   /* 毛玻璃底 */
@@ -950,6 +1088,35 @@ function drawWordCard(ctx, L) {
       y += ex.h + 16;
     }
   }
+
+  drawBadge(ctx, P);
+}
+
+/** 卡片右上角的小角标：说明这张卡片的关键词不是来自上游原文 */
+function drawBadge(ctx, P) {
+  const b = P.badge;
+  if (!b || !P.badgeW) return;
+  const fs = BADGE_FS;
+  const bh = Math.round(fs * 1.9);
+  const bw = Math.round(P.badgeW);
+  const bx = P.x + P.w - bw - 24;
+  const by = P.y + 22;
+
+  ctx.save();
+  roundRect(ctx, bx, by, bw, bh, bh / 2);
+  ctx.fillStyle = b.bg;
+  ctx.fill();
+  ctx.strokeStyle = b.bd;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  ctx.font = T(fs, 600, F_SANS);
+  ctx.fillStyle = b.fg;
+  ctx.textBaseline = 'middle';
+  drawSpaced(ctx, b.text, bx + 18, by + bh / 2 + 1, 1.5);
+  ctx.restore();
 }
 
 function hexA(hex, a) {
@@ -1000,12 +1167,20 @@ function bindUI() {
   let inputTimer = null;
   ['fWord', 'fEn', 'fCn', 'fDefs', 'fSource'].forEach((id) => {
     $(id).addEventListener('input', () => {
+      /* 亲手改过关键词，就不再是「自动选的」了，角标跟着撤掉 */
+      if (id === 'fWord') state.content.autoKind = '';
       clearTimeout(inputTimer);
       inputTimer = setTimeout(() => {
         readForm();
         scheduleRender();
       }, 220);
     });
+  });
+
+  $('segWord').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b || state.picking) return;
+    selectCandidate(b.dataset.v);
   });
 
   $('btnRefresh').addEventListener('click', async () => {
