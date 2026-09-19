@@ -119,11 +119,28 @@ function safeCP(n) {
     return '';
   }
 }
+/* 会另起一行的标签，两侧补一个空格；其余（span / a / b / i / em / img …）一律
+   当内联标签，直接删掉不补空格。
+   上游给关键词套了 <span class="key">，早先「所有标签 → 空格」的做法会在中文里
+   印出「我对他所说的感到 失望 。」这种多余空格（标点前的空格最扎眼），
+   英文因为词间本来就有空格才看不出来。 */
+const BLOCK_TAGS = new Set(
+  (
+    'address article aside blockquote br caption center col colgroup dd details dialog div dl dt ' +
+    'fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hgroup hr iframe legend li ' +
+    'main nav ol p pre section summary table tbody td tfoot th thead tr ul video audio canvas ' +
+    'option select textarea button'
+  ).split(' ')
+);
+
 function stripTags(s) {
   return decodeEntities(
     String(s)
       .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
-      .replace(/<[^>]*>/g, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g, (m, tag) =>
+        BLOCK_TAGS.has(tag.toLowerCase()) ? ' ' : ''
+      )
   )
     .replace(/[\u00a0\u3000]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -493,6 +510,41 @@ async function fetchDictMerged(word, maxAttempts = 4) {
   return merged;
 }
 
+/**
+ * 收尾：把补不回来的缺字从成品里剔除。
+ *
+ * 上游有一部分汉字是「按字固定」替换成图片的（图名 = 该字的稳定指纹），
+ * 同一个字在这页永远缺，多抓几次也补不回来。以前是把这个字直接删掉，
+ * 于是在海报上无声地少一个字——「寂静的」印成「寂的」，看着像错别字。
+ * 现在改成整条剔除：宁可少一条义项 / 一条例句，也不印残缺内容。
+ */
+const hasHole = (s) => String(s == null ? '' : s).indexOf(HOLE) >= 0;
+
+/* 例句库里混着论坛帖，翻译位置填的是帖子元信息（「1 个新帖 （共 1 个） Dr.…」），
+   中英根本配不上对，一并丢掉 */
+const FORUM_META = /(个新帖|个回复|条回复)/;
+
+function finalizeDict(best) {
+  const phonetics = best.phonetics
+    .filter((p) => p.ph && !hasHole(p.ph))
+    .map((p) => ({ label: p.label, ph: p.ph }));
+
+  /* 海报上放不下太多义项，最多留 4 条 */
+  const definitions = best.definitions
+    .slice(0, 4)
+    .filter((d) => d.text && !hasHole(d.text))
+    .map((d) => ({ pos: d.pos, text: d.text }));
+
+  /* 释义全被剔掉就没什么可显示的了，视作「没查到」，前端会退回只放关键词 */
+  if (!definitions.length) return null;
+
+  const examples = best.examples
+    .filter((e) => e.en && !hasHole(e.en) && !hasHole(e.cn) && !FORUM_META.test(e.cn))
+    .map((e) => ({ en: e.en, cn: e.cn }));
+
+  return Object.assign({}, best, { phonetics, definitions, examples });
+}
+
 /** 查词（带缓存、词形还原、缺字合并），查不到返回 null */
 async function lookupWord(rawWord) {
   const word = String(rawWord || '')
@@ -522,18 +574,11 @@ async function lookupWord(rawWord) {
   }
 
   if (best && best.ok && best.definitions.length) {
-    best = Object.assign({}, best, {
-      /* 海报上放不下太多义项，最多留 4 条 */
-      definitions: best.definitions.slice(0, 4).map((d) => ({
-        pos: d.pos,
-        /* 试到最后仍没补回来的缺字直接丢掉：留个占位符在海报上是块豆腐干，更难看 */
-        text: d.text.split(HOLE).join(''),
-      })),
-      phonetics: best.phonetics.map((p) => ({ label: p.label, ph: p.ph.split(HOLE).join('') })),
-      examples: best.examples.map((e) => ({ en: e.en.split(HOLE).join(''), cn: e.cn.split(HOLE).join('') })),
-    });
-    cacheSet(key, best, 12 * 60 * 60 * 1000);
-    return best;
+    const clean = finalizeDict(best);
+    if (clean) {
+      cacheSet(key, clean, 12 * 60 * 60 * 1000);
+      return clean;
+    }
   }
   return null;
 }
@@ -948,8 +993,11 @@ const server = http.createServer(async (req, res) => {
   serveStatic(req, res, pathname);
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`[dailysentence] http://localhost:${PORT}  (HOST=${HOST})`);
-});
+/* 被 require 进测试脚本时不要抢端口 */
+if (require.main === module) {
+  server.listen(PORT, HOST, () => {
+    console.log(`[dailysentence] http://localhost:${PORT}  (HOST=${HOST})`);
+  });
+}
 
-module.exports = { parseDaily, parseDictPage, extractKeywords, lookupWord };
+module.exports = { parseDaily, parseDictPage, extractKeywords, lookupWord, finalizeDict, stripTags };
