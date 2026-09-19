@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no,interactive-widget=resizes-content">
 <meta name="theme-color" content="#0b0f17">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -17,7 +17,16 @@
 </head>
 <body>
 
-<header class="appbar">
+<!-- 海报舞台：铺满整屏，控件全部浮层化 -->
+<div id="stage">
+  <div class="canvas-wrap">
+    <canvas id="poster" width="1080" height="1920"></canvas>
+    <div id="overlay" class="overlay"><div class="spinner"></div><span id="overlayText">加载中…</span></div>
+  </div>
+</div>
+
+<!-- 顶部浮条：品牌 + 预览开关 + 刷新 -->
+<header class="topbar">
   <div class="brand">
     <span class="dot"></span>
     <div>
@@ -25,70 +34,72 @@
       <p id="subtitle">正在获取今日句子…</p>
     </div>
   </div>
-  <button id="btnRefresh" class="icon-btn" title="重新获取">↻</button>
+  <div class="topbar-actions">
+    <button id="btnEye" class="icon-btn" title="预览模式（隐藏全部控件）">👁</button>
+    <button id="btnRefresh" class="icon-btn" title="重新获取">↻</button>
+  </div>
 </header>
 
-<main>
-  <section class="stage">
-    <div class="canvas-wrap">
-      <canvas id="poster" width="1080" height="1920"></canvas>
-      <div id="overlay" class="overlay"><div class="spinner"></div><span id="overlayText">加载中…</span></div>
-    </div>
-    <p class="hint" id="hint">长按图片即可保存到相册</p>
-  </section>
+<!-- 关键词补全：悬浮胶囊条（仅今日原文缺解析时出现） -->
+<section class="fixbar" id="fixCard" hidden>
+  <p class="note" id="fixNote">欧路今天没给出「解析」内容，已按句意自动选词，可点其它候选切换：</p>
+  <div class="chips" id="segWord"></div>
+</section>
 
-  <div class="actions">
-    <button id="btnTemplate" class="btn ghost">更换模板</button>
-    <button id="btnSave" class="btn primary">保存海报</button>
-    <button id="btnPlay" class="btn ghost">朗读</button>
-    <button id="btnSource" class="btn ghost">原文</button>
-    <input id="fTemplate" type="file" accept="image/*" hidden>
+<!-- 快捷按钮排：常驻，不随抽屉展开消失 -->
+<nav class="quickbar">
+  <button id="btnSave" class="qbtn primary">保存海报</button>
+  <button id="btnPlay" class="qbtn">朗读</button>
+  <button id="btnSource" class="qbtn">原文</button>
+  <button id="btnTemplate" class="qbtn">换模板</button>
+  <input id="fTemplate" type="file" accept="image/*" hidden>
+</nav>
+
+<!-- 底部抽屉：三标签页（文案 / 背景 / 微调），默认收起只露标签栏 -->
+<section class="drawer" id="drawer">
+  <button class="grip" id="btnGrip" aria-label="展开或收起面板"><i></i></button>
+  <nav class="tabs" id="tabs">
+    <button class="tab on" data-tab="copy">文案</button>
+    <button class="tab" data-tab="bg">背景</button>
+    <button class="tab" data-tab="tune">微调</button>
+  </nav>
+  <div class="panes">
+
+    <div class="pane on" data-pane="copy">
+      <label class="field"><span>关键词</span><input id="fWord" type="text" placeholder="如 never，改完自动重查词典"></label>
+      <label class="field"><span>英文</span><textarea id="fEn" rows="2"></textarea></label>
+      <label class="field"><span>中文</span><textarea id="fCn" rows="2"></textarea></label>
+      <label class="field"><span>释义</span><textarea id="fDefs" rows="3" placeholder="每行一条，如：n.冲动；脉冲"></textarea></label>
+      <label class="field"><span>出处</span><input id="fSource" type="text" placeholder="如 文森特·威廉·梵高"></label>
+    </div>
+
+    <div class="pane" data-pane="bg">
+      <p class="note">背景图取自今日配图；「换模板」按钮在下方快捷排，用来上传个人信息卡模板。</p>
+      <h2>背景图</h2>
+      <div class="seg" id="segBg">
+        <button data-v="natural" class="on">原比例</button>
+        <button data-v="cover">铺满</button>
+      </div>
+      <footer class="foot">
+        <p>内容来源 · 欧路词典「英语每日一句」 · <a id="linkSource" href="https://dict.eudic.net/home/dailysentence" target="_blank" rel="noopener">打开原网页</a></p>
+      </footer>
+    </div>
+
+    <div class="pane" data-pane="tune">
+      <h2>信息卡微调<span class="tag">自动识别</span></h2>
+      <label class="field range"><span>上边距</span><input id="rTop" type="range" min="25" max="80" value="59"><b id="vTop">59%</b></label>
+      <label class="field range"><span>卡片高度</span><input id="rH" type="range" min="10" max="40" value="26"><b id="vH">26%</b></label>
+      <label class="field range"><span>左右边距</span><input id="rM" type="range" min="0" max="12" value="4"><b id="vM">4%</b></label>
+      <h2>排版微调</h2>
+      <label class="field range"><span>字号</span><input id="rFont" type="range" min="80" max="120" value="100"><b id="vFont">100%</b></label>
+      <label class="switch"><input id="cDate" type="checkbox" checked><span>日期标签</span></label>
+      <label class="switch"><input id="cRule" type="checkbox" checked><span>标题分隔线</span></label>
+      <label class="switch"><input id="cSource" type="checkbox" checked><span>显示出处</span></label>
+      <label class="switch"><input id="cLong" type="checkbox"><span>长版海报</span></label>
+    </div>
+
   </div>
-
-  <section class="card" id="fixCard" hidden>
-    <h2>关键词补全<span class="tag">今日原文缺解析</span></h2>
-    <p class="note" id="fixNote">欧路今天没给出「解析」内容，已按句意自动选词，可点其它候选切换：</p>
-    <div class="chips" id="segWord"></div>
-  </section>
-
-  <section class="card">
-    <h2>文案<span class="tag">可直接改</span></h2>
-    <label class="field"><span>关键词</span><input id="fWord" type="text" placeholder="如 never，改完自动重查词典"></label>
-    <label class="field"><span>英文</span><textarea id="fEn" rows="2"></textarea></label>
-    <label class="field"><span>中文</span><textarea id="fCn" rows="2"></textarea></label>
-    <label class="field"><span>释义</span><textarea id="fDefs" rows="3" placeholder="每行一条，如：n.冲动；脉冲"></textarea></label>
-    <label class="field"><span>出处</span><input id="fSource" type="text" placeholder="如 文森特·威廉·梵高"></label>
-  </section>
-
-  <section class="card">
-    <h2>背景图</h2>
-    <div class="seg" id="segBg">
-      <button data-v="natural" class="on">原比例</button>
-      <button data-v="cover">铺满</button>
-    </div>
-  </section>
-
-  <section class="card">
-    <h2>信息卡微调<span class="tag">自动识别</span></h2>
-    <label class="field range"><span>上边距</span><input id="rTop" type="range" min="25" max="80" value="59"><b id="vTop">59%</b></label>
-    <label class="field range"><span>卡片高度</span><input id="rH" type="range" min="10" max="40" value="26"><b id="vH">26%</b></label>
-    <label class="field range"><span>左右边距</span><input id="rM" type="range" min="0" max="12" value="4"><b id="vM">4%</b></label>
-  </section>
-
-  <section class="card">
-    <h2>排版微调</h2>
-    <label class="field range"><span>字号</span><input id="rFont" type="range" min="80" max="120" value="100"><b id="vFont">100%</b></label>
-    <label class="switch"><input id="cDate" type="checkbox" checked><span>日期标签</span></label>
-    <label class="switch"><input id="cRule" type="checkbox" checked><span>标题分隔线</span></label>
-    <label class="switch"><input id="cSource" type="checkbox" checked><span>显示出处</span></label>
-    <label class="switch"><input id="cLong" type="checkbox"><span>长版海报</span></label>
-  </section>
-
-  <footer class="foot">
-    <p>内容来源 · 欧路词典「英语每日一句」</p>
-    <p><a id="linkSource" href="https://dict.eudic.net/home/dailysentence" target="_blank" rel="noopener">打开原网页</a></p>
-  </footer>
-</main>
+</section>
 
 <div id="toast" class="toast"></div>
 

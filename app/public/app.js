@@ -272,6 +272,8 @@ function renderCandidates() {
   const list = state.candidates || [];
   const on = !!(state.apiData && state.apiData.missing && (list.length || state.selectedWord));
   card.hidden = !on;
+  /* 胶囊条出现时让海报舞台多留一点底部空间，别盖住信息卡 */
+  document.body.classList.toggle('has-fixbar', on);
   if (!on) return;
 
   const seg = $('segWord');
@@ -1341,6 +1343,49 @@ function bindUI() {
     const url = (state.apiData && state.apiData.permalink) || 'https://dict.eudic.net/home/dailysentence';
     window.open(url, '_blank', 'noopener');
   });
+
+  /* ---------- 浮层编排：标签页 / 抽屉开合 / 预览模式 ---------- */
+  $('tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('.tab');
+    if (!b) return;
+    setTab(b.dataset.tab, true);
+  });
+
+  $('btnGrip').addEventListener('click', () => {
+    document.body.classList.toggle('drawer-open');
+  });
+
+  $('btnEye').addEventListener('click', () => {
+    const zen = document.body.classList.toggle('zen');
+    $('btnEye').classList.toggle('on', zen);
+    toast(zen ? '预览模式：点右上角眼睛退出' : '已退出预览模式');
+  });
+
+  /* 点进抽屉里的输入框时自动展开抽屉 */
+  $('drawer').addEventListener('focusin', (e) => {
+    if (e.target.matches('input, textarea')) document.body.classList.add('drawer-open');
+  });
+}
+
+/** 切换抽屉标签页；open = 同时展开抽屉 */
+function setTab(name, open) {
+  document.querySelectorAll('#tabs .tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
+  document.querySelectorAll('.pane').forEach((p) => p.classList.toggle('on', p.dataset.pane === name));
+  if (open) document.body.classList.add('drawer-open');
+}
+
+/** 键盘高度写入 CSS 变量 --kb，弹出时强制展开抽屉，避免输入框被键盘盖住 */
+function watchKeyboard() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const apply = () => {
+    const kb = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+    document.documentElement.style.setProperty('--kb', kb + 'px');
+    if (kb > 140) document.body.classList.add('drawer-open');
+  };
+  vv.addEventListener('resize', apply);
+  vv.addEventListener('scroll', apply);
+  apply();
 }
 
 /* ------------------------------ 保存 ------------------------------- */
@@ -1400,6 +1445,7 @@ function setOverlay(show, text) {
   if (bg) state.opts.bgStyle = bg === 'cover' ? 'cover' : 'natural';  /* 旧参数 band/card 归入原比例 */
   if (qs.get('long') === '1' || qs.get('ex') === '1') state.opts.longPoster = true;
   bindUI();
+  watchKeyboard();
   [...$('segBg').children].forEach((b) => b.classList.toggle('on', b.dataset.v === state.opts.bgStyle));
   $('cLong').checked = state.opts.longPoster;
   updateRangeLabels();
