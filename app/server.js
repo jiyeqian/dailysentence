@@ -762,6 +762,23 @@ function parseDaily(html) {
     }
   }
 
+  // ---- 出处兜底：上游把「——作者」直接附在中文译文末尾时，摘出来当出处 ----
+  // 今天（2026-09-19）an-info 整块退化成一段 CSS，出处变成了
+  // 「……是我们自己。——让-雅克·卢梭」。解析块的「本句出自」仍然优先，走到这里
+  // 说明 source 是空的；只认「短小、不含句读」的人名，防止把
+  // 「成功不是终点——失败也非末日。」这类解释性破折号误当成出处。
+  if (!out.source.author && !out.source.title && !out.source.desc && out.cn) {
+    const am = out.cn.match(/(?:—|–|--){1,2}\s*([^—–]+)\s*$/);
+    if (am) {
+      const raw = am[1].trim();
+      const name = (raw.match(/^([^（(]+)/) || ['', raw])[1].trim();
+      if (name && name.length <= 25 && !/[。！？；，、?]/.test(name)) {
+        out.source.author = name;
+        out.cn = out.cn.slice(0, am.index).replace(/[\s—–-]+$/, '').trim();
+      }
+    }
+  }
+
   // ---- 兜底：上游解析块缺失时，从英文句子里挑候选关键词 -----------------
   // 不再直接把「最长的词」当关键词（那是错的），只给出候选，由前端决定用哪个，
   // 并在海报上标出来源，避免把猜出来的词当成权威关键词展示。
