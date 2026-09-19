@@ -708,18 +708,26 @@ function buildWordCard(ctx, K, topY) {
   const badge = badgeOf();
   const rowMaxW = innerW;
 
-  const wordSize = 47 * K;
+  /* 关键词可能是短语（上游会给「get something done」这类词组），
+     先按最长能放进一行来定字号，再排音标 */
   const phSize = 31 * K;
+  const phs = phoneticList();
+  const word = state.content.word || '';
+  let wordSize = 47 * K;
+  ctx.font = T(wordSize, 600, F_SANS);
+  let wordW = ctx.measureText(word).width;
+  for (let s = 1; s >= 0.58 && wordW > rowMaxW; s -= 0.04) {
+    wordSize = 47 * K * s;
+    ctx.font = T(wordSize, 600, F_SANS);
+    wordW = ctx.measureText(word).width;
+  }
   const row1H = wordSize * 1.3;
 
   const defSize = 36 * K;
   const defLH = defSize * 1.62;
   const chipSize = 25 * K;
 
-  /* 关键词 + 音标：可能是「英 /…/ 美 /…/」，放不下就逐档缩小音标字号 */
-  ctx.font = T(wordSize, 600, F_SANS);
-  const wordW = ctx.measureText(state.content.word || '').width;
-  const phs = phoneticList();
+  /* 音标（可能是「英 /…/ 美 /…/」）与关键词挤在一行，放不下就逐档缩小音标字号 */
   let phDrawSize = phSize;
   if (phs.length) {
     for (let s = 1; s >= 0.6; s -= 0.05) {

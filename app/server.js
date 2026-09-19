@@ -583,15 +583,34 @@ async function lookupWord(rawWord) {
   return null;
 }
 
+/** 行首序号：`1. ` / `1、` / `(1)` / `① ` —— 上游换着花样加 */
+function stripEnum(s) {
+  return String(s == null ? '' : s)
+    .replace(/^\s*[（(]?\d{1,2}\s*[)）.、．:：]\s*/, '')
+    .replace(/^\s*[①②③④⑤⑥⑦⑧⑨⑩⑪⑫]\s*/, '')
+    .trim();
+}
+
+/** 带序号的条目（`① …` / `1. 中文…`） */
+const ENUM_HEAD = /^(?:[①②③④⑤⑥⑦⑧⑨⑩⑪⑫]|[（(]?\d{1,2}\s*[)）.、．]\s*[\u4e00-\u9fff])/;
+
+/**
+ * 「解析」类分组的第一行是「词（+ 音标）（+ 释义）」的合体行。
+ * 词与释义的切分点：有音标时是第一个音标，没有音标时是第一个汉字 / 全角标点。
+ */
+const HEAD_SPLIT = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/;
+
 /**
  * 解析「关键词行」，兼容上游的几种写法：
  *   impulse  /ˈɪmpʌls/                      单个音标（无语言标签）
  *   example  英 /ɪɡˈzæmpl/                  只有英式
  *   example  英 /ɪɡˈzæmpl/  美 /ɪɡˈzɑːmpl/  英式 + 美式（2026-09-18 起出现）
- * 返回 { word, phonetics: [{ label, ph }] }
+ *   1. get something done 使某事被完成       词与释义同行、无音标（2026-09-20 起出现）
+ * 返回 { word, phonetics: [{ label, ph }], rest }
+ *   rest = 词后面剩下的中文（没有音标时就是同行释义），交给调用方当释义用
  */
 function parseWordLine(raw) {
-  const s = String(raw == null ? '' : raw).replace(/\s+/g, ' ').trim();
+  const s = stripEnum(String(raw == null ? '' : raw)).replace(/\s+/g, ' ').trim();
   const marks = [];
   const re = /(?:(英式|美式|英|美)\s*)?\/([^/]{1,80}?)\//g;
   let m;
@@ -601,13 +620,20 @@ function parseWordLine(raw) {
       marks.push({ label: m[1] || '', ph, start: m.index, end: m.index + m[0].length });
     }
   }
-  let word = s;
-  if (marks.length) {
-    word = (s.slice(0, marks[0].start) + ' ' + s.slice(marks[marks.length - 1].end)).trim();
-  }
+
+  /* 词的右边界：优先第一个音标；没有音标就找第一个汉字 */
+  const cut = marks.length ? marks[0].start : s.search(HEAD_SPLIT);
+  let word = cut > 0 ? s.slice(0, cut) : (cut < 0 ? s : s);
+  word = word.replace(/[\s·、,，;；:：]+$/, '').trim();
+
+  const tailFrom = marks.length
+    ? marks[marks.length - 1].end
+    : (cut > 0 ? cut : s.length);
+  const rest = s.slice(tailFrom).replace(/^[\s·、,，;；:：-]+/, '').trim();
+
   /* 兜底清掉残留在单词里的语言标签（如「example 英」） */
   word = word.replace(/[\s·、,，]*(英式|美式|英|美)$/, '').trim();
-  return { word, phonetics: marks.map(({ label, ph }) => ({ label, ph })) };
+  return { word, phonetics: marks.map(({ label, ph }) => ({ label, ph })), rest };
 }
 
 /** 上游已知的分组小标题词表 */
@@ -628,6 +654,26 @@ function isSectionHeader(text, isDetailHeader, blankBefore) {
   if (HEADER_WORDS.test(s)) return true;
   if (blankBefore && /^[\u4e00-\u9fff]{2,6}$/.test(s)) return true;
   return false;
+}
+
+/** 「解析」类标题：第一行是词行 */
+const ANATOMY_LABEL = /^解析|^词汇|^单词|^释义|^词义|^短语|^词组|^表达/;
+/** 「用法」类标题：里面的编号条目是用法说明，不是释义 */
+const USAGE_LABEL = /用法|搭配|短语|词组|句式|表达/;
+
+/**
+ * 是不是「用法说明」的编号条目（`① 安排或让别人做某事（…）。`）。
+ *
+ * 2026-09-20 起上游把用法拆成 ① ② 编号条目，且后一条会排在
+ * 「例句：」之后，从位置上已经看不出它属于用法段，只能靠行首编号 + 长度/句读
+ * 认出来。刻意要求「够长或有句读」：短条目（`1. 使某事被完成`）更像释义，
+ * 漏判成用法就会让释义为空、触发整条词典补全链路，代价更大。
+ */
+function isUsageBullet(text) {
+  const s = String(text == null ? '' : text).trim();
+  if (!ENUM_HEAD.test(s)) return false;
+  const body = stripEnum(s);
+  return body.length > 12 || /[。！；;]/.test(body);
 }
 
 /* ------------------------------------------------------------------ */
@@ -683,6 +729,9 @@ function parseDaily(html) {
   const sections = [];
   let cur = null;
   let blankBefore = false; // 上一项是否空行（上游用空行把小标题与正文分开）
+  /* 「用法详解」段：① ② 这类编号条目全部并到这里，哪怕它们被「例句：」
+     隔开在另一头（2026-09-20 起的写法就是 ①→例句→②→例句）。 */
+  let usageSec = null;
   for (const it of items) {
     if (!it.text) {
       blankBefore = true;
@@ -695,9 +744,18 @@ function parseDaily(html) {
     }
     const isHeader = isSectionHeader(it.text, it.header, blankBefore);
     blankBefore = false;
+    /* 词行（解析段的第一行）永远留在解析段，哪怕它也带序号 */
+    const isAnatomyHead = !!cur && ANATOMY_LABEL.test(cur.label || '') && !cur.lines.length;
     if (isHeader) {
       cur = { label: it.text.replace(/[:：]\s*$/, '').trim(), lines: [] };
       sections.push(cur);
+      if (USAGE_LABEL.test(cur.label)) usageSec = cur;
+    } else if (!isAnatomyHead && isUsageBullet(it.text)) {
+      if (!usageSec) {
+        usageSec = { label: '常用用法', lines: [] };
+        sections.push(usageSec);
+      }
+      usageSec.lines.push(stripEnum(it.text));
     } else {
       if (!cur) {
         cur = { label: '', lines: [] };
@@ -725,17 +783,21 @@ function parseDaily(html) {
       const am = tail.match(/^([^（(]+)/);
       out.source.author = (am ? am[1] : tail).trim();
       out.source.desc = lines.join(' ').trim();
-    } else if (/^解析|^词汇|^单词|^释义|^词义/.test(label)) {
+    } else if (ANATOMY_LABEL.test(label)) {
       if (lines.length) {
         const parsed = parseWordLine(lines.shift());
         out.word = parsed.word;
         out.phonetics = parsed.phonetics;
         /* 兼容字段：只有一个音标时给字符串，双音标交给 phonetics */
         out.phonetic = parsed.phonetics.length === 1 ? parsed.phonetics[0].ph : '';
+        /* 词与释义挤在同一行时（2026-09-20 起），后半截就是第一条释义 */
+        if (parsed.rest) out.definitions.push({ pos: '', text: parsed.rest });
         for (const l of lines) {
-          const pm = l.match(/^([a-zA-Z]{1,6}\.)\s*(.+)$/);
+          const t = stripEnum(l);
+          if (!t) continue;
+          const pm = t.match(/^([a-zA-Z]{1,6}\.)\s*(.+)$/);
           if (pm) out.definitions.push({ pos: pm[1].toLowerCase(), text: pm[2].trim() });
-          else out.definitions.push({ pos: '', text: l });
+          else out.definitions.push({ pos: '', text: t });
         }
       }
     } else if (/^例句|^例/.test(label)) {
@@ -753,9 +815,15 @@ function parseDaily(html) {
         }
       }
       if (pendingEn) out.examples.push({ en: pendingEn, cn: '' });
-    } else if (/用法|搭配|短语|词组|句式|表达/.test(label)) {
-      out.usages = lines.slice();
-      out.usagesTitle = label || '常用搭配';
+    } else if (USAGE_LABEL.test(label)) {
+      /* 用法可能被拆成多段（「用法详解」+ 散落在例句之后的编号条目），逐段累加 */
+      const txt = lines.filter(Boolean);
+      if (txt.length) {
+        out.usages = out.usages.concat(txt);
+        if (!out.usagesTitle) out.usagesTitle = label || '常用用法';
+      } else if (!out.usagesTitle) {
+        out.usagesTitle = label || '常用用法';
+      }
     } else if (!out.source.desc && lines.length) {
       out.source.title = out.source.title || sec.label;
       out.source.desc = lines.join(' ').trim();

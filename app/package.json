@@ -6,7 +6,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "check:parse": "node parse-check.js",
+    "check:ui": "node ui-check.js"
   },
   "engines": {
     "node": ">=18"
