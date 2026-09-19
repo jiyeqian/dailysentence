@@ -34,6 +34,8 @@ const DEFAULT_RATIOS = { L: 0.0364, T: 0.5934, R: 0.9636, B: 0.8491 };
 
 const state = {
   apiData: null,
+  layout: null,         // 最近一次渲染的版面（点击命中用）
+  regions: [],          // 可点区域表（画布坐标）
   candidates: [],       // 上游缺解析时，从句子挑出的关键词候选（Top 3）
   selectedWord: '',     // 当前选中的候选关键词
   picking: false,       // 正在查词典，避免重复点击
@@ -192,7 +194,6 @@ async function loadDaily(force) {
       toast('网络不可用，已使用上次缓存的内容');
     } else {
       setOverlay(false);
-      $('subtitle').textContent = '获取失败：' + err.message;
       toast('获取失败：' + err.message);
       return;
     }
@@ -255,9 +256,6 @@ async function loadDaily(force) {
         : '欧路今天没给出「解析」内容，词典也没查到释义。已按句意自动选词，可点其它候选重试，或在下面手填：'
     );
   }
-  $('subtitle').textContent =
-    (data.date ? data.date + ' · ' : '') +
-    (data.word ? '关键词 ' + data.word : autoWord ? '关键词 ' + autoWord : '今日一句');
   $('linkSource').href = data.permalink || 'https://dict.eudic.net/home/dailysentence';
 
   await loadBackground(data.image);
@@ -271,9 +269,8 @@ function renderCandidates() {
   const card = $('fixCard');
   const list = state.candidates || [];
   const on = !!(state.apiData && state.apiData.missing && (list.length || state.selectedWord));
+  if (!card) return;
   card.hidden = !on;
-  /* 胶囊条出现时让海报舞台多留一点底部空间，别盖住信息卡 */
-  document.body.classList.toggle('has-fixbar', on);
   if (!on) return;
 
   const seg = $('segWord');
@@ -816,6 +813,16 @@ function render() {
   drawTopText(ctx, L);
   drawWordCard(ctx, L);
   drawProfileCard(ctx, L);
+
+  /* 版面即「可点区域地图」：留下坐标供点击命中与引导框使用 */
+  state.layout = L;
+  state.regions = buildHitRegions(L);
+  if (guide.active) guide.repaint();
+  /* 正在编辑时版面变了（比如改了句子），让高亮框跟着元素走 */
+  if (popId && isPopOpen()) {
+    const follow = (state.regions || []).find((r) => r.id === popId);
+    if (follow) { popAnchor = follow; showMark(follow); }
+  }
   return L;
 }
 
@@ -1269,8 +1276,8 @@ function bindUI() {
   $('segBg').addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (!b) return;
-    [...$('segBg').children].forEach((x) => x.classList.toggle('on', x === b));
     state.opts.bgStyle = b.dataset.v;
+    syncBgUI();
     scheduleRender();
   });
 
@@ -1339,54 +1346,403 @@ function bindUI() {
     new Audio(url).play().catch(() => toast('发音播放失败'));
   });
 
-  $('btnSource').addEventListener('click', () => {
-    const url = (state.apiData && state.apiData.permalink) || 'https://dict.eudic.net/home/dailysentence';
-    window.open(url, '_blank', 'noopener');
+  /* ---------- 顶栏：背景比例切换 ---------- */
+  $('btnBg').addEventListener('click', () => {
+    state.opts.bgStyle = state.opts.bgStyle === 'cover' ? 'natural' : 'cover';
+    syncBgUI();
+    scheduleRender();
   });
 
-  /* ---------- 浮层编排：标签页 / 抽屉开合 / 预览模式 ---------- */
-  $('tabs').addEventListener('click', (e) => {
-    const b = e.target.closest('.tab');
-    if (!b) return;
-    setTab(b.dataset.tab, true);
+  $('popClose').addEventListener('click', () => closePopover());
+
+  /* 输入框获得焦点 → 浮框切到键盘上方；失去焦点 → 回到锚点 */
+  $('pop').addEventListener('focusin', (e) => {
+    if (e.target.matches('input, textarea')) setKbMode(true);
+  });
+  $('pop').addEventListener('focusout', () => {
+    setTimeout(() => {
+      if (!$('pop').contains(document.activeElement)) setKbMode(false);
+    }, 60);
   });
 
-  $('btnGrip').addEventListener('click', () => {
-    document.body.classList.toggle('drawer-open');
-  });
+  bindGestures();
+  watchKeyboard();
+}
 
-  $('btnEye').addEventListener('click', () => {
-    const zen = document.body.classList.toggle('zen');
-    $('btnEye').classList.toggle('on', zen);
-    toast(zen ? '预览模式：点右上角眼睛退出' : '已退出预览模式');
-  });
+/* ======================== 点击即改：命中 / 浮框 / 手势 ======================== */
 
-  /* 点进抽屉里的输入框时自动展开抽屉 */
-  $('drawer').addEventListener('focusin', (e) => {
-    if (e.target.matches('input, textarea')) document.body.classList.add('drawer-open');
+/** 可点区域表：坐标是画布坐标，顺序即优先级（后画的、更靠上的元素在前） */
+function buildHitRegions(L) {
+  const R = [];
+  const c = state.content;
+  const maxW = CW - 2 * MX;
+  const push = (id, x, y, w, h) => {
+    if (w > 0 && h > 0) R.push({ id, x, y, w, h });
+  };
+
+  /* 单词卡：关键词行 / 释义区 分开命中 */
+  if (!L.panel.hidden && L.panel.h > 0) {
+    const P = L.panel;
+    const rowH = P.padY + P.row1H + 12;
+    push('word', P.x, P.y, P.w, Math.min(P.h, rowH));
+    push('defs', P.x, P.y + rowH, P.w, Math.max(0, P.h - rowH));
+  }
+
+  /* 个人信息卡 */
+  push('card', L.card.x, L.card.y, L.card.w, L.card.h);
+
+  /* 出处 */
+  if (L.source.on) {
+    push('source', MX - 16, L.textTop + L.source.y - 12, maxW * 0.72, L.source.size * 1.4 + 20);
+  }
+
+  /* 句子（英文 + 中文） */
+  push(
+    'text',
+    MX - 16,
+    L.textTop + L.en.y - 14,
+    maxW + 32,
+    (L.cn.y + L.cn.lines.length * L.cn.lh) - L.en.y + 20
+  );
+
+  /* 标题（关键词）——放最后，避免挡住下面更具体的区域 */
+  push('word', MX - 16, L.textTop - 12, Math.min(maxW + 32, L.title.size * 6.2), L.title.h + 24);
+
+  /* 日期徽标 → 背景与版式（含日期开关） */
+  if (state.opts.showDate && c.date) {
+    push('page', CW - MX - L.title.badgeW - 6, L.textTop - 8, L.title.badgeW + 20, 62);
+  }
+  return R;
+}
+
+/** 画布坐标 → 命中的区域（都没中就是「配图 / 空白」） */
+function hitTest(x, y) {
+  const regions = state.regions || [];
+  for (const r of regions) {
+    if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return r;
+  }
+  return null;
+}
+
+/** 画布坐标 → 屏幕坐标（用于给浮框和引导框定位） */
+function toClient(x, y) {
+  const rect = cvs.getBoundingClientRect();
+  const s = rect.width / CW;
+  return { x: rect.left + x * s, y: rect.top + y * s };
+}
+
+const POP_META = {
+  word:   { kit: 'word',   title: '关键词',   hint: '改完自动重查词典 · 长按海报可以保存' },
+  text:   { kit: 'text',   title: '中英文句子', hint: '直接改，画面立即重排 · 长按海报可以保存' },
+  source: { kit: 'source', title: '出处',     hint: '留空则不显示出处' },
+  defs:   { kit: 'defs',   title: '释义',     hint: '每行一条，行首写词性（如 n. v. adj.）会显示成彩色标签' },
+  card:   { kit: 'card',   title: '个人信息卡', hint: '上传你在乐词 App 里的卡片截图，自动识别位置' },
+  page:   { kit: 'page',   title: '背景与版式', hint: '点一下画面空白也能打开这里' },
+};
+
+const kitGroups = {};     /* { word: [节点…] } 浮框关闭时节点回到 #kit */
+let popAnchor = null;     /* 当前浮框锚点（画布坐标矩形） */
+let popId = '';           /* 当前浮框对应的区域类型 */
+
+function stashKitGroups() {
+  document.querySelectorAll('#kit .k').forEach((k) => {
+    kitGroups[k.dataset.k] = [...k.children];
   });
 }
 
-/** 切换抽屉标签页；open = 同时展开抽屉 */
-function setTab(name, open) {
-  document.querySelectorAll('#tabs .tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
-  document.querySelectorAll('.pane').forEach((p) => p.classList.toggle('on', p.dataset.pane === name));
-  if (open) document.body.classList.add('drawer-open');
+/** 把所有控件节点收进仓库；已经搬回原位的跳过 */
+function returnNodesToKit() {
+  Object.entries(kitGroups).forEach(([key, nodes]) => {
+    const k = document.querySelector('#kit .k[data-k="' + key + '"]');
+    if (!k) return;
+    nodes.forEach((n) => { if (n.parentNode !== k) k.appendChild(n); });
+  });
 }
 
-/** 键盘高度写入 CSS 变量 --kb，弹出时强制展开抽屉，避免输入框被键盘盖住 */
+function openPopover(id, anchor) {
+  const meta = POP_META[id];
+  const nodes = meta && kitGroups[meta.kit];
+  if (!nodes) return;
+  popAnchor = anchor;
+  popId = id;
+
+  $('popTitle').textContent = meta.title;
+  $('popHint').textContent = meta.hint || '';
+
+  /* 先把上一组控件收回仓库，再搬这一组进来（节点始终在文档里，事件绑定不会丢） */
+  returnNodesToKit();
+  const body = $('popBody');
+  nodes.forEach((n) => body.appendChild(n));
+
+  const pop = $('pop');
+  pop.hidden = false;
+  pop.classList.remove('kb');
+  positionPop(anchor);
+  showMark(anchor);
+  renderCandidates();
+}
+
+function closePopover() {
+  const pop = $('pop');
+  if (pop.hidden) return;
+  pop.hidden = true;
+  pop.classList.remove('kb');
+  $('mark').hidden = true;
+  returnNodesToKit();
+  popAnchor = null;
+  popId = '';
+}
+
+/** 给正在编辑的区域描一圈边，四角轻微压暗 */
+function showMark(anchor) {
+  const m = $('mark');
+  const a = toClient(anchor.x, anchor.y);
+  const b = toClient(anchor.x + anchor.w, anchor.y + anchor.h);
+  m.style.left = Math.round(a.x - 6) + 'px';
+  m.style.top = Math.round(a.y - 6) + 'px';
+  m.style.width = Math.max(20, Math.round(b.x - a.x + 12)) + 'px';
+  m.style.height = Math.max(20, Math.round(b.y - a.y + 12)) + 'px';
+  m.hidden = false;
+}
+
+function isPopOpen() {
+  return !$('pop').hidden;
+}
+
+/** 浮框定位：优先贴在区域下方，放不下就翻到上方，左右自动避让屏幕边缘 */
+function positionPop(anchor) {
+  const pop = $('pop');
+  const vv = window.visualViewport;
+  const vw = vv ? vv.width : window.innerWidth;
+  const vh = vv ? vv.height : window.innerHeight;
+  const M = 12;
+
+  const a = toClient(anchor.x, anchor.y);
+  const aRight = toClient(anchor.x + anchor.w, anchor.y).x;
+  const aBottom = toClient(anchor.x, anchor.y + anchor.h).y;
+
+  const pr = pop.getBoundingClientRect();
+  let top = aBottom + 10;
+  if (top + pr.height > vh - M) top = a.y - pr.height - 10;
+  if (top < M) top = Math.min(aBottom + 10, Math.max(M, vh - pr.height - M));
+  let left = a.x + (aRight - a.x) / 2 - pr.width / 2;
+  left = Math.max(M, Math.min(left, vw - M - pr.width));
+
+  pop.style.top = Math.round(top) + 'px';
+  pop.style.left = Math.round(left) + 'px';
+}
+
+/** 正在输入时，浮框贴到键盘上方（否则会被键盘盖住） */
+function setKbMode(on) {
+  const pop = $('pop');
+  if (pop.hidden) return;
+  pop.classList.toggle('kb', on);
+  if (on) {
+    pop.style.top = '';
+    pop.style.left = '';
+  } else if (popAnchor) {
+    positionPop(popAnchor);
+  }
+}
+
+function kbHeight() {
+  const vv = window.visualViewport;
+  if (!vv) return 0;
+  return Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+}
+
+/** 键盘高度写入 CSS 变量 --kb；正在输入时把浮框顶到键盘上方 */
 function watchKeyboard() {
   const vv = window.visualViewport;
-  if (!vv) return;
   const apply = () => {
-    const kb = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+    const kb = kbHeight();
     document.documentElement.style.setProperty('--kb', kb + 'px');
-    if (kb > 140) document.body.classList.add('drawer-open');
+    if (kb > 100 && document.activeElement && $('pop').contains(document.activeElement)) setKbMode(true);
+    else if (kb < 100) setKbMode(false);
+    if (!vv) return;
   };
+  apply();
+  if (!vv) return;
   vv.addEventListener('resize', apply);
   vv.addEventListener('scroll', apply);
-  apply();
+  window.addEventListener('orientationchange', () => setTimeout(apply, 240));
 }
+
+/* ------------------------------ 手势 ------------------------------ */
+
+const PRESS = { moved: 8, maxMs: 620, holdMs: 520 };
+
+function bindGestures() {
+  const stage = $('stage');
+  let start = null;
+  let holdTimer = null;
+  let longFired = false;
+
+  const clear = () => {
+    clearTimeout(holdTimer);
+    holdTimer = null;
+    start = null;
+    longFired = false;
+  };
+
+  stage.addEventListener('pointerdown', (e) => {
+    if (e.button && e.button !== 0) return;
+    if (e.target.closest('.topbar') || e.target.closest('.pop')) return;
+    guide.stop();
+    wakeTopbar();
+    start = { x: e.clientX, y: e.clientY, t: Date.now() };
+    longFired = false;
+    clearTimeout(holdTimer);
+    /* 长按 = 保存海报 */
+    holdTimer = setTimeout(() => {
+      longFired = true;
+      if (navigator.vibrate) navigator.vibrate(12);
+      savePoster();
+    }, PRESS.holdMs);
+  });
+
+  stage.addEventListener('pointermove', (e) => {
+    if (!start) return;
+    if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > PRESS.moved) clear();
+  });
+
+  stage.addEventListener('pointerup', (e) => {
+    if (!start) return;
+    const moved = Math.hypot(e.clientX - start.x, e.clientY - start.y) > PRESS.moved;
+    const spent = Date.now() - start.t;
+    const wasLong = longFired;
+    clear();
+    if (wasLong || moved || spent > PRESS.maxMs) return;
+    handleTap(e.clientX, e.clientY);
+  });
+
+  stage.addEventListener('pointercancel', clear);
+  stage.addEventListener('contextmenu', (e) => e.preventDefault());
+}
+
+/** 单击：命中什么就弹什么；点画面空白弹版式；点海报以外收起 */
+function handleTap(clientX, clientY) {
+  const rect = cvs.getBoundingClientRect();
+  if (!rect.width) return;
+  const s = rect.width / CW;
+  const x = (clientX - rect.left) / s;
+  const y = (clientY - rect.top) / s;
+  /* 点在海报之外：只把浮框收起 */
+  if (x < 0 || y < 0 || x > CW || y > CH) {
+    if (isPopOpen()) closePopover();
+    return;
+  }
+
+  const hit = hitTest(x, y);
+  if (!hit) {
+    /* 配图 / 空白：已经有浮框就收起，否则打开「背景与版式」 */
+    if (isPopOpen()) closePopover();
+    else openPopover('page', { x: CW * 0.5 - 160, y: CH * 0.34, w: 320, h: 60 });
+    return;
+  }
+  openPopover(hit.id, hit);
+}
+
+/* ------------------------------ 顶栏淡出 ------------------------------ */
+
+let topbarTimer = null;
+function wakeTopbar() {
+  const bar = $('topbar');
+  bar.classList.remove('dim');
+  clearTimeout(topbarTimer);
+  topbarTimer = setTimeout(() => {
+    if (!isPopOpen()) bar.classList.add('dim');
+  }, 3200);
+}
+
+function syncBgUI() {
+  $('bgLabel').textContent = state.opts.bgStyle === 'cover' ? '铺满' : '原比例';
+  const seg = $('segBg');
+  if (seg) [...seg.children].forEach((b) => b.classList.toggle('on', b.dataset.v === state.opts.bgStyle));
+}
+
+/* ------------------------------ 首访引导 ------------------------------ */
+/* 每次进入都放一遍：四个可编辑区域依次呼吸闪烁，配一句说明，几秒后自动退场。 */
+
+const guide = {
+  active: false,
+  step: 0,
+  steps: [],
+  timer: null,
+  frames: [],
+  start() {
+    if (this.active) return;
+    this.active = true;
+    this.step = 0;
+    this.build();
+    this.show();
+    this.schedule();
+  },
+  build() {
+    const L = state.layout;
+    if (!L) return;
+    const of = (id) => (state.regions || []).find((r) => r.id === id);
+    const word = of('word');
+    const card = of('card');
+    const pick = (id, fallback) => of(id) || fallback;
+    this.steps = [
+      { rect: word, text: '点这里的单词，就地改关键词' },
+      { rect: pick('text', { x: MX - 16, y: 320, w: CW - 2 * MX + 32, h: 260 }), text: '点句子，改中英文' },
+      { rect: pick('defs', { x: 84, y: 1180, w: CW - 168, h: 160 }), text: '点释义，改词条解释' },
+      { rect: card, text: '点卡片，换你的个人信息卡模板' },
+      { rect: { x: 0, y: 0, w: CW, h: Math.max(1, (state.bgImage && state.opts.bgStyle === 'natural') ? naturalImageH() : CH * 0.3) }, text: '点配图或空白，调背景与版式' },
+    ].filter((s) => s.rect);
+  },
+  schedule() {
+    clearTimeout(this.timer);
+    const next = () => {
+      if (!this.active) return;
+      if (this.step >= this.steps.length) return this.finish();
+      this.show();
+      this.timer = setTimeout(next, 1450);
+      this.step++;
+    };
+    this.timer = setTimeout(next, 900);
+  },
+  show() {
+    const s = this.steps[this.step];
+    if (!s) return;
+    this.repaint();
+    const tip = $('tip');
+    tip.hidden = false;
+    tip.classList.remove('hide');
+    $('tipText').textContent = s.text;
+  },
+  repaint() {
+    const wrap = $('frames');
+    wrap.innerHTML = '';
+    const s = this.steps[this.step];
+    if (!s || !this.active) return;
+    const a = toClient(s.rect.x, s.rect.y);
+    const b = toClient(s.rect.x + s.rect.w, s.rect.y + s.rect.h);
+    const d = document.createElement('div');
+    d.className = 'frame';
+    d.style.left = Math.round(a.x) + 'px';
+    d.style.top = Math.round(a.y) + 'px';
+    d.style.width = Math.max(24, Math.round(b.x - a.x)) + 'px';
+    d.style.height = Math.max(24, Math.round(b.y - a.y)) + 'px';
+    wrap.appendChild(d);
+  },
+  finish() {
+    this.stop();
+    if (isPopOpen()) return;
+    const tip = $('tip');
+    tip.classList.add('hide');
+    setTimeout(() => { if (tip.classList.contains('hide')) tip.hidden = true; }, 300);
+  },
+  stop() {
+    if (!this.active) return;
+    this.active = false;
+    clearTimeout(this.timer);
+    $('frames').innerHTML = '';
+    $('tip').hidden = true;
+  },
+};
 
 /* ------------------------------ 保存 ------------------------------- */
 
@@ -1446,7 +1802,8 @@ function setOverlay(show, text) {
   if (qs.get('long') === '1' || qs.get('ex') === '1') state.opts.longPoster = true;
   bindUI();
   watchKeyboard();
-  [...$('segBg').children].forEach((b) => b.classList.toggle('on', b.dataset.v === state.opts.bgStyle));
+  stashKitGroups();
+  syncBgUI();
   $('cLong').checked = state.opts.longPoster;
   updateRangeLabels();
 
@@ -1469,5 +1826,13 @@ function setOverlay(show, text) {
   if (!state.apiData) {
     setOverlay(false);
     render();
+  }
+  wakeTopbar();
+  /* 每次进入都放一遍引导：可编辑区域依次呼吸闪烁，几秒后自动退场 */
+  if (!document.body.classList.contains('raw')) setTimeout(() => guide.start(), 500);
+
+  /* 调试/回归用具：?debug=1 时把命中表与坐标换算暴露出来 */
+  if (qs.get('debug') === '1') {
+    window.__ds = { state, hitTest, toClient, openPopover, closePopover, guide };
   }
 })();
