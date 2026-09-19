@@ -42,6 +42,9 @@ const state = {
   lookupSeq: 0,         // 查词序号：晚到的旧结果直接丢掉
   defsWord: '',         // 当前释义属于哪个关键词（用来判断改词后是否过期）
   defsManual: false,    // 释义被手改过，就别再自动覆盖
+  viewDate: '',         // 正在看哪一天（''=今天）；往日数据来自服务端存档
+  archived: false,      // 这份数据是从存档来的（不是上游实时）
+  archiveOnly: false,   // 上游挂了，整份海报都是存档顶上的
   content: {
     word: '', phonetic: '', phonetics: [], en: '', cn: '',
     defs: [], examples: [], usages: [], usagesTitle: '', source: '', date: '', dateCN: '',
@@ -178,17 +181,43 @@ function fmtDateBadge(date, dateISO) {
   return dateISO || '';
 }
 
-async function loadDaily(force) {
-  setOverlay(true, '正在获取今日句子…');
+/** 客户端视角的「今天」（本地时区，用来判断是不是在看往日） */
+function todayISO() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+/** '2026-09-19' → '9月19日'；今天则给「今天」 */
+function dateLabel(iso) {
+  if (!iso) return '今天';
+  if (iso === todayISO()) return '今天';
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? Number(m[2]) + '月' + Number(m[3]) + '日' : iso;
+}
+
+/**
+ * 取一天的数据。date 省略 = 今天（上游实时，服务端会在上游故障时用存档顶上）；
+ * 传日期 = 那一天的存档（上游只提供当天，往日只能靠存档）。
+ */
+async function loadDaily(force, date) {
+  const iso = date || '';
+  setOverlay(true, iso && iso !== todayISO() ? '正在读取存档…' : '正在获取今日句子…');
   let data = null;
   try {
-    const r = await fetch('/api/daily' + (force ? '?refresh=1' : ''), { cache: 'no-store' });
+    const q = [];
+    if (force) q.push('refresh=1');
+    if (iso) q.push('date=' + encodeURIComponent(iso));
+    const r = await fetch('/api/daily' + (q.length ? '?' + q.join('&') : ''), { cache: 'no-store' });
     const j = await r.json();
     if (!j || !j.ok) throw new Error((j && j.error) || '接口异常');
     data = j;
-    try { localStorage.setItem('ds:last', JSON.stringify(j)); } catch (e) {}
+    /* 只有「今天」才配叫上次缓存 —— 往日数据是存档来的，别把缓存覆盖成老数据 */
+    if (!iso) {
+      try { localStorage.setItem('ds:last', JSON.stringify(j)); } catch (e) {}
+    }
   } catch (err) {
-    const cached = safeGet('ds:last');
+    const cached = !iso && safeGet('ds:last');
     if (cached) {
       data = cached;
       toast('网络不可用，已使用上次缓存的内容');
@@ -200,13 +229,24 @@ async function loadDaily(force) {
   }
 
   state.apiData = data;
+  state.archived = !!data.fromArchive;
+  state.archiveOnly = !!data.archiveOnly;
+  state.viewDate = data.fromArchive ? (data.archiveDate || iso) : '';
+
+  /* 上游挂了、拿存档顶上时，如实说清楚在看哪一天，别让人以为这是今天那句 */
+  if (data.archiveOnly) {
+    toast('上游暂时取不到，「' + dateLabel(data.archiveDate) + '」的内容来自存档');
+  }
 
   /* 上游「解析」块偶尔会整段漏发：这时没有关键词也没有释义。
      不猜「最长的词」当关键词，而是按句意挑几个候选（服务端已带回 Top 3），
-     能查到词典就用词典内容补全，并在海报上标出来源。 */
+     能查到词典就用词典内容补全，并在海报上标出来源。
+     往日存档不重跑这条链路：那是当时抓到的样子，重查词典既没意义也慢。 */
   const missing = !!data.missing;
   const fb = data.fallback || null;
-  state.candidates = Array.isArray(data.candidates) ? data.candidates.slice() : [];
+  state.candidates = state.archived
+    ? []
+    : (Array.isArray(data.candidates) ? data.candidates.slice() : []);
   const autoWord =
     data.word || (fb && fb.query) || (state.candidates[0] && state.candidates[0].word) || '';
   state.selectedWord = autoWord;
@@ -248,7 +288,8 @@ async function loadDaily(force) {
   }
   fillForm();
   renderCandidates();
-  if (missing) {
+  updateSrcTag();
+  if (missing && !state.archived) {
     const phr = fb && fb.lemma ? '已按原形 ' + fb.lemma + ' 取释义。' : '已用词典补全音标与释义。';
     setFixNote(
       fb
@@ -268,7 +309,7 @@ async function loadDaily(force) {
 function renderCandidates() {
   const card = $('fixCard');
   const list = state.candidates || [];
-  const on = !!(state.apiData && state.apiData.missing && (list.length || state.selectedWord));
+  const on = !state.archived && !!(state.apiData && state.apiData.missing && (list.length || state.selectedWord));
   if (!card) return;
   card.hidden = !on;
   if (!on) return;
@@ -1276,9 +1317,18 @@ function bindUI() {
   });
 
   $('btnRefresh').addEventListener('click', async () => {
+    const past = !!(state.viewDate && state.viewDate !== todayISO());
     $('btnRefresh').classList.add('spin');
     await loadDaily(true);
     $('btnRefresh').classList.remove('spin');
+    if (past) toast('已回到今天');
+  });
+
+  /* 顶栏小标 / 日期徽标 → 往期存档 */
+  $('srcTag').addEventListener('click', openArchive);
+  $('archList').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (b) gotoDate(b.dataset.date || '');
   });
 
   $('segBg').addEventListener('click', (e) => {
@@ -1416,9 +1466,9 @@ function buildHitRegions(L) {
   /* 标题（关键词）——放最后，避免挡住下面更具体的区域 */
   push('word', MX - 16, L.textTop - 12, Math.min(maxW + 32, L.title.size * 6.2), L.title.h + 24);
 
-  /* 日期徽标 → 背景与版式（含日期开关） */
+  /* 日期徽标 → 往期存档（想在版式里关日期标签，点空白进「背景与版式」） */
   if (state.opts.showDate && c.date) {
-    push('page', CW - MX - L.title.badgeW - 6, L.textTop - 8, L.title.badgeW + 20, 62);
+    push('archive', CW - MX - L.title.badgeW - 6, L.textTop - 8, L.title.badgeW + 20, 62);
   }
   return R;
 }
@@ -1440,12 +1490,13 @@ function toClient(x, y) {
 }
 
 const POP_META = {
-  word:   { kit: 'word',   title: '关键词',   hint: '改完自动重查词典 · 长按海报可以保存' },
-  text:   { kit: 'text',   title: '中英文句子', hint: '直接改，画面立即重排 · 长按海报可以保存' },
-  source: { kit: 'source', title: '出处',     hint: '留空则不显示出处' },
-  defs:   { kit: 'defs',   title: '释义',     hint: '每行一条，行首写词性（如 n. v. adj.）会显示成彩色标签' },
-  card:   { kit: 'card',   title: '个人信息卡', hint: '上传你在乐词 App 里的卡片截图，自动识别位置' },
-  page:   { kit: 'page',   title: '背景与版式', hint: '点一下画面空白也能打开这里' },
+  word:    { kit: 'word',    title: '关键词',   hint: '改完自动重查词典 · 长按海报可以保存' },
+  text:    { kit: 'text',    title: '中英文句子', hint: '直接改，画面立即重排 · 长按海报可以保存' },
+  source:  { kit: 'source',  title: '出处',     hint: '留空则不显示出处' },
+  defs:    { kit: 'defs',    title: '释义',     hint: '每行一条，行首写词性（如 n. v. adj.）会显示成彩色标签' },
+  card:    { kit: 'card',    title: '个人信息卡', hint: '上传你在乐词 App 里的卡片截图，自动识别位置' },
+  page:    { kit: 'page',    title: '背景与版式', hint: '点一下画面空白也能打开这里' },
+  archive: { kit: 'archive', title: '往期存档', hint: '每天第一次打开会自动把这天的基础数据存下来' },
 };
 
 const kitGroups = {};     /* { word: [节点…] } 浮框关闭时节点回到 #kit */
@@ -1487,6 +1538,7 @@ function openPopover(id, anchor) {
   pop.classList.remove('kb');
   positionPop(anchor);
   showMark(anchor);
+  if (id === 'archive') renderArchiveList();
   renderCandidates();
 }
 
@@ -1515,6 +1567,108 @@ function showMark(anchor) {
 
 function isPopOpen() {
   return !$('pop').hidden;
+}
+
+/* ------------------------ 往期存档（服务端 data/） ------------------------ */
+
+/** 顶栏「你在看哪一天」的小标：平时不显示，往日或走存档时才出现 */
+function updateSrcTag() {
+  const tag = $('srcTag');
+  if (!tag) return;
+  if (state.archiveOnly) {
+    tag.textContent = dateLabel(state.viewDate) + ' · 存档';
+    tag.hidden = false;
+  } else if (state.viewDate && state.viewDate !== todayISO()) {
+    tag.textContent = dateLabel(state.viewDate) + ' · 往期';
+    tag.hidden = false;
+  } else if (state.archived) {
+    tag.textContent = '今天 · 存档';
+    tag.hidden = false;
+  } else {
+    tag.hidden = true;
+  }
+}
+
+/** 日期徽标那块画布坐标 —— 浮框和引导框都锚在它旁边 */
+function archiveAnchor() {
+  const r = (state.regions || []).find((x) => x.id === 'archive');
+  return r || { x: CW - MX - 240, y: 40, w: 220, h: 56 };
+}
+
+function openArchive() {
+  openPopover('archive', archiveAnchor());
+}
+
+/** 拉取存档列表并画成「一行一天」；没有归档时给出说明而不是空白 */
+async function renderArchiveList() {
+  const note = $('archNote');
+  const list = $('archList');
+  if (!note || !list) return;
+  note.textContent = '正在读取存档…';
+  list.innerHTML = '';
+
+  let days = [];
+  let writable = true;
+  try {
+    const r = await fetch('/api/archive', { cache: 'no-store' });
+    const j = await r.json();
+    days = (j && j.days) || [];
+    writable = !j || j.writable !== false;
+  } catch (e) {
+    note.textContent = '存档列表读取失败：' + (e && e.message ? e.message : e);
+    return;
+  }
+
+  const today = todayISO();
+  const hasToday = days.some((d) => d.dateISO === today);
+  /* 「今天」永远排第一：即使今天还没归档，也能从这里回到实时 */
+  const rows = [{ dateISO: today, date: '', word: '', today: true }].concat(
+    days.filter((d) => d.dateISO !== today)
+  );
+
+  if (!days.length) {
+    note.textContent = writable
+      ? '还没有往期归档。每天第一次打开海报，就会自动把这天的内容存下来。'
+      : '存档目录不可写（线上容器可能不留盘），本功能只在你自己跑服务时有效。';
+  } else {
+    note.textContent = '已归档 ' + days.length + ' 天' + (writable ? '' : '（存档目录不可写）');
+  }
+
+  const cur = state.viewDate || (state.archived ? '' : todayISO());
+  rows.forEach((d) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.date = d.today ? '' : d.dateISO;
+
+    const lab = document.createElement('span');
+    lab.className = 'd';
+    lab.textContent = d.today ? '今天' : dateLabel(d.dateISO);
+    b.appendChild(lab);
+
+    const w = document.createElement('span');
+    w.className = 'w';
+    w.textContent = d.today && !d.word ? (hasToday ? '' : '还没获取') : (d.word || d.en || '');
+    b.appendChild(w);
+
+    if (d.missing) {
+      const t = document.createElement('span');
+      t.className = 't';
+      t.textContent = '无解析';
+      b.appendChild(t);
+    }
+    b.classList.toggle('on', d.today ? cur === todayISO() : cur === d.dateISO);
+    list.appendChild(b);
+  });
+}
+
+/** 切到某一天；date 为空 = 回到今天（重新走上游） */
+async function gotoDate(date) {
+  closePopover();
+  guide.stop();
+  await loadDaily(false, date);
+  if (state.viewDate && state.viewDate !== todayISO()) {
+    toast('正在看 ' + dateLabel(state.viewDate) + ' 的存档');
+  }
 }
 
 /** 浮框定位：优先贴在区域下方，放不下就翻到上方，左右自动避让屏幕边缘 */
@@ -1698,6 +1852,7 @@ const guide = {
       { rect: pick('text', { x: MX - 16, y: 320, w: CW - 2 * MX + 32, h: 260 }), text: '点句子，改中英文' },
       { rect: pick('defs', { x: 84, y: 1180, w: CW - 168, h: 160 }), text: '点释义，改词条解释' },
       { rect: card, text: '点卡片，换你的个人信息卡模板' },
+      { rect: pick('archive', archiveAnchor()), text: '点日期，翻看往期（每天自动存一份）' },
       { rect: { x: 0, y: 0, w: CW, h: Math.max(1, (state.bgImage && state.opts.bgStyle === 'natural') ? naturalImageH() : CH * 0.3) }, text: '点配图或空白，调背景与版式' },
     ].filter((s) => s.rect);
   },

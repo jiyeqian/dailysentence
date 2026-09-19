@@ -30,8 +30,9 @@
 <div id="mark" class="mark" hidden aria-hidden="true"></div>
 <p id="tip" class="tip" hidden><span id="tipText"></span></p>
 
-<!-- 顶栏：只有四个动作 -->
+<!-- 顶栏：只有四个动作（外加“你在看哪一天”的小标） -->
 <header class="topbar" id="topbar">
+  <button id="srcTag" class="src-tag" hidden title="往期存档" aria-label="往期存档">今天</button>
   <button id="btnPlay" class="icon-btn" title="朗读" aria-label="朗读">
     <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 8.2v3.6h2.7L10.5 15V5L6.7 8.2H4z" fill="currentColor"/><path d="M13.5 8a4.6 4.6 0 0 1 0 4.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
   </button>
@@ -79,6 +80,11 @@
     <label class="switch"><input id="cLong" type="checkbox"><span>长版海报（附例句）</span></label>
     <button id="btnTemplate" class="btn ghost full">更换个人信息卡模板</button>
     <input id="fTemplate" type="file" accept="image/*" hidden>
+  </div>
+
+  <div class="k" data-k="archive">
+    <p class="note" id="archNote"></p>
+    <div class="archlist" id="archList"></div>
   </div>
 
   <div class="k" data-k="page">

@@ -20,3 +20,6 @@ yarn-error.log*
 
 # UI 回归截图输出
 app/shots/
+
+# 每日一句存档（运行时生成，不入库）
+app/data/

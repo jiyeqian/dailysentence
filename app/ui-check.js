@@ -49,6 +49,12 @@ const BASE = 'http://127.0.0.1:8787/?debug=1';
   }
 
   const log = (label, v) => console.log(label + ' → ' + (v || '(空)'));
+  /* hidden 的元素 textContent 照样有值，判断「露没露」必须看 hidden */
+  const srcTag = (p) =>
+    p.evaluate(() => {
+      const t = document.getElementById('srcTag');
+      return t.hidden ? '(隐藏)' : t.textContent;
+    });
 
   /* ---------- 手机 ---------- */
   let p = await page({ width: 390, height: 844 });
@@ -95,6 +101,43 @@ const BASE = 'http://127.0.0.1:8787/?debug=1';
   await p.mouse.click(6, 420);                      // 海报之外
   await p.waitForTimeout(400);
   log('点海报外', (await popTitle(p)) || '(已收起)');
+
+  /* 往期存档：点日期徽标 → 列表 → 切到往期 → 回到今天 */
+  await tapRegion(p, 'archive', 0);
+  log('点日期徽标', await popTitle(p));
+  const archRows = await p.$$eval('#archList button', (bs) =>
+    bs.map((b) => b.textContent.trim().replace(/\s+/g, ' '))
+  );
+  console.log('  存档列表', archRows.join(' | ') || '(空)');
+  await shot(p, 'm10-archive-list');
+
+  const picked = await p.evaluate(() => {
+    const b = [...document.querySelectorAll('#archList button')].find((x) => x.dataset.date);
+    if (!b) return '';
+    b.click();
+    return b.dataset.date;
+  });
+  await p.waitForTimeout(1400);
+  log('切到往期', picked);
+  log('  顶栏小标', await srcTag(p));
+  log('  画布日期', await p.evaluate(() => window.__ds.state.content.date));
+  await shot(p, 'm11-past-day');
+
+  if (picked) {
+    await p.click('#srcTag');
+    await p.waitForTimeout(700);
+    log('点顶栏小标', await popTitle(p));
+    const back = await p.evaluate(() => {
+      const b = [...document.querySelectorAll('#archList button')].find((x) => !x.dataset.date);
+      if (!b) return false;
+      b.click();
+      return true;
+    });
+    await p.waitForTimeout(1400);
+    log('回到今天', await p.evaluate(() => window.__ds.state.content.date) + ' (点中今天的行: ' + back + ')');
+    log('  顶栏小标', await srcTag(p));
+    await shot(p, 'm12-back-today');
+  }
 
   /* 长按 → 保存 */
   await p.mouse.move(195, 200);

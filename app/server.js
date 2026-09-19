@@ -6,7 +6,11 @@
  *   1) 抓取并解析 欧路词典「英语每日一句」页面  https://dict.eudic.net/home/dailysentence
  *   2) 以 JSON 返回：中英文、配图地址、关键词/音标/释义、例句、出处、发音音频
  *   3) 代理白名单内的图片（规避跨域 / http 混合内容问题）
- *   4) 托管 public/ 下的静态前端
+ *   4) 把每天的基础数据存档到 data/，供往期回看与上游故障时兜底
+ *   5) 托管 public/ 下的静态前端
+ *
+ * 接口：GET /api/daily[?refresh=1][?date=YYYY-MM-DD]、GET /api/archive、
+ *       GET /api/lookup?word=、GET /api/img?u=
  *
  * 环境变量：PORT（默认 8787）、HOST（默认 0.0.0.0）
  */
@@ -21,7 +25,8 @@ const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '0.0.0.0';
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
-const DAILY_PAGE = 'https://dict.eudic.net/home/dailysentence';
+/* 上游地址可用环境变量覆盖：方便调试「上游挂了」时的存档兜底 */
+const DAILY_PAGE = process.env.DS_DAILY_PAGE || 'https://dict.eudic.net/home/dailysentence';
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
@@ -929,6 +934,241 @@ async function getDaily(force) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 存档：把每天抓到的基础数据落盘                                        */
+/* ------------------------------------------------------------------ */
+/*
+ * 存的是「海报要用到的那份基础数据」（句子、关键词、释义、例句、出处、配图、
+ * 链接、音频），不含任何只在当次请求有意义的东西。两个用途：
+ *   1) 往期回看 —— 上游只提供当天，以前的句子过一天就没了，只能靠存档；
+ *   2) 兜底 —— 上游改版/抽风时，海报仍能用存档渲染出来。
+ * 写盘失败（比如只读容器）只记一条日志，绝不影响出图。
+ */
+
+const DATA_ROOT = process.env.DS_DATA_DIR
+  ? path.resolve(process.env.DS_DATA_DIR)
+  : path.join(__dirname, 'data');
+const DAILY_DIR = path.join(DATA_ROOT, 'daily');
+const INDEX_FILE = path.join(DATA_ROOT, 'index.json');
+
+let archiveWarned = false;
+function archiveLog(e) {
+  if (archiveWarned) return;
+  archiveWarned = true;
+  console.warn(
+    '[archive] 存档不可用，功能自动降级：' + (e && e.message ? e.message : e)
+  );
+}
+
+/** 服务器可能在 UTC，做的是给中文用户看的海报 —— 按北京时间算「今天」 */
+function todayISO() {
+  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+/**
+ * 只挑基础字段并固定顺序 —— 顺序固定是为了「内容没变就别写盘」的比对能成立。
+ */
+function contentOf(d) {
+  const s = d.source || {};
+  const a = d.audio || {};
+  return {
+    v: 1,
+    date: d.date || '',
+    dateISO: d.dateISO || '',
+    dateCN: d.dateCN || '',
+    en: d.en || '',
+    cn: d.cn || '',
+    source: { title: s.title || '', author: s.author || '', desc: s.desc || '' },
+    word: d.word || '',
+    phonetic: d.phonetic || '',
+    phonetics: d.phonetics || [],
+    definitions: d.definitions || [],
+    examples: d.examples || [],
+    usages: d.usages || [],
+    usagesTitle: d.usagesTitle || '',
+    notice: d.notice || '',
+    imageRaw: d.imageRaw || '',
+    image: d.image || '',
+    permalink: d.permalink || '',
+    audio: { normal: a.normal || '', slow: a.slow || '' },
+    missing: !!d.missing,
+    candidates: d.candidates || [],
+    fallback: d.fallback || null,
+  };
+}
+
+/** 内容完整度：抓得全的那一份赢 */
+function contentScore(c) {
+  const fb = c.fallback && c.fallback.definitions ? c.fallback.definitions.length : 0;
+  return c.definitions.length * 10 + c.examples.length * 2 + c.phonetics.length + (c.word ? 1 : 0) + fb;
+}
+
+/**
+ * 同一天会被反复抓（上游偶发漏字段、缺字要靠重试补），所以按
+ * 「更完整的那份为主、缺的字段用另一份补」合并，而不是简单覆盖。
+ */
+function mergeContent(oldc, fresh) {
+  const main = contentScore(fresh) >= contentScore(oldc) ? fresh : oldc;
+  const alt = main === fresh ? oldc : fresh;
+  const out = Object.assign({}, main);
+  ['date', 'dateISO', 'dateCN', 'en', 'cn', 'word', 'phonetic', 'notice', 'usagesTitle',
+    'imageRaw', 'image', 'permalink'].forEach((k) => {
+    if (!out[k]) out[k] = alt[k] || '';
+  });
+  ['phonetics', 'definitions', 'examples', 'usages', 'candidates'].forEach((k) => {
+    if (!out[k] || !out[k].length) out[k] = alt[k] || [];
+  });
+  if (!out.source.author && !out.source.title) out.source = alt.source || out.source;
+  if (!out.fallback) out.fallback = alt.fallback || null;
+  if (!out.audio.normal) out.audio = alt.audio || out.audio;
+  /* 只要有一份拿到了释义，这一天就不算「上游没给解析」 */
+  out.missing = !(out.definitions.length || (out.fallback && (out.fallback.definitions || []).length));
+  return out;
+}
+
+function recordPath(iso) {
+  return path.join(DAILY_DIR, iso + '.json');
+}
+
+function readRecord(iso) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(iso || ''))) return null;
+  try {
+    return JSON.parse(fs.readFileSync(recordPath(iso), 'utf8'));
+  } catch (e) {
+    return null;
+  }
+}
+
+let writableCache = null;
+/** 存档目录可不可写（只在第一次真正探测，之后用缓存） */
+function archiveWritable() {
+  if (writableCache !== null) return writableCache;
+  try {
+    fs.mkdirSync(DAILY_DIR, { recursive: true });
+    const probe = path.join(DATA_ROOT, '.probe');
+    fs.writeFileSync(probe, String(Date.now()));
+    fs.unlinkSync(probe);
+    writableCache = true;
+  } catch (e) {
+    archiveLog(e);
+    writableCache = false;
+  }
+  return writableCache;
+}
+
+function indexEntry(rec) {
+  return {
+    dateISO: rec.dateISO,
+    date: rec.date,
+    dateCN: rec.dateCN,
+    word: rec.word,
+    en: rec.en,
+    missing: !!rec.missing,
+    updatedAt: rec.updatedAt,
+  };
+}
+
+/** 存档列表（新 → 旧）。索引文件丢了就从 daily/ 目录重建，不信单一副本。 */
+function listDays() {
+  let days = null;
+  try {
+    const j = JSON.parse(fs.readFileSync(INDEX_FILE, 'utf8'));
+    if (j && Array.isArray(j.days)) days = j.days;
+  } catch (e) {
+    /* 索引不存在 / 坏了：走重建 */
+  }
+  if (!days) {
+    days = [];
+    try {
+      for (const f of fs.readdirSync(DAILY_DIR)) {
+        const m = f.match(/^(\d{4}-\d{2}-\d{2})\.json$/);
+        if (!m) continue;
+        const r = readRecord(m[1]);
+        if (r) days.push(indexEntry(r));
+      }
+    } catch (e) {
+      /* 还没有目录，就是空的 */
+    }
+  }
+  return days.filter((d) => d && d.dateISO).sort((a, b) => (a.dateISO < b.dateISO ? 1 : -1));
+}
+
+function updateIndex(rec) {
+  const days = listDays().filter((d) => d.dateISO !== rec.dateISO);
+  days.push(indexEntry(rec));
+  days.sort((a, b) => (a.dateISO < b.dateISO ? 1 : -1));
+  fs.writeFileSync(INDEX_FILE, JSON.stringify({ v: 1, updatedAt: new Date().toISOString(), days }));
+}
+
+/**
+ * 抓取成功就归档一次。内容没变不写盘；变了先写 .tmp 再改名，避免留下半个文件。
+ * 返回落盘后的记录（写不成返回 null，调用方不用管）。
+ */
+function archiveDaily(data) {
+  const iso = data && data.dateISO;
+  if (!data || !data.ok || !/^\d{4}-\d{2}-\d{2}$/.test(String(iso || ''))) return null;
+  if (!archiveWritable()) return null;
+  try {
+    const fresh = contentOf(data);
+    const old = readRecord(iso);
+    if (old && JSON.stringify(contentOf(old)) === JSON.stringify(fresh)) return old;
+    const content = old ? mergeContent(contentOf(old), fresh) : fresh;
+    const now = new Date().toISOString();
+    const rec = Object.assign({}, content, {
+      firstSeenAt: (old && old.firstSeenAt) || now,
+      updatedAt: now,
+      rev: ((old && old.rev) || 0) + 1,
+    });
+    const tmp = recordPath(iso) + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(rec, null, 2));
+    fs.renameSync(tmp, recordPath(iso));
+    updateIndex(rec);
+    return rec;
+  } catch (e) {
+    archiveLog(e);
+    return null;
+  }
+}
+
+/** 存档里的记录 → 前端用的数据（补上标记字段） */
+function recordToData(rec, iso) {
+  return Object.assign({}, rec, {
+    ok: true,
+    cached: false,
+    fromArchive: true,
+    archiveDate: iso || rec.dateISO,
+  });
+}
+
+/**
+ * 取「今天」的数据。
+ * 上游挂掉时用存档顶上：今天的存档→最近一天的存档，并如实标明是哪一天的内容，
+ * 免得用户以为这就是今天那句。都没有才把错误抛出去。
+ */
+async function getToday(force) {
+  try {
+    const data = await getDaily(force);
+    archiveDaily(data);
+    return data;
+  } catch (err) {
+    const iso = todayISO();
+    let used = iso;
+    let rec = readRecord(iso);
+    if (!rec) {
+      const last = listDays()[0];
+      if (last) {
+        rec = readRecord(last.dateISO);
+        used = last.dateISO;
+      }
+    }
+    if (!rec) throw err;
+    const out = recordToData(rec, used);
+    out.archiveOnly = true;
+    out.upstreamError = String(err && err.message ? err.message : err);
+    return out;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 静态文件                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -985,9 +1225,27 @@ const server = http.createServer(async (req, res) => {
   const pathname = u.pathname;
 
   // ---- API：每日一句 --------------------------------------------------
+  // 不带参数 = 今天的（上游实时，失败时自动退到存档）
+  // ?date=YYYY-MM-DD = 某一天的存档；问的就是今天则仍走实时
   if (pathname === '/api/daily') {
+    const date = (u.searchParams.get('date') || '').trim();
     try {
-      const data = await getDaily(u.searchParams.get('refresh') === '1');
+      if (date && date !== todayISO()) {
+        const rec = readRecord(date);
+        if (!rec) {
+          return send(
+            res,
+            404,
+            Buffer.from(JSON.stringify({ ok: false, error: '没有 ' + date + ' 这一天的存档' })),
+            { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }
+          );
+        }
+        return send(res, 200, Buffer.from(JSON.stringify(recordToData(rec, date))), {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        });
+      }
+      const data = await getToday(u.searchParams.get('refresh') === '1');
       return send(res, 200, Buffer.from(JSON.stringify(data)), {
         'Content-Type': 'application/json; charset=utf-8',
         'Cache-Control': 'no-store',
@@ -1000,6 +1258,18 @@ const server = http.createServer(async (req, res) => {
         { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }
       );
     }
+  }
+
+  // ---- API：存档列表 --------------------------------------------------
+  if (pathname === '/api/archive') {
+    return send(
+      res,
+      200,
+      Buffer.from(
+        JSON.stringify({ ok: true, today: todayISO(), writable: archiveWritable(), days: listDays() })
+      ),
+      { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }
+    );
   }
 
   // ---- API：查词（补全上游缺失的音标 / 释义 / 例句）-------------------
@@ -1085,4 +1355,18 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseDaily, parseDictPage, extractKeywords, lookupWord, finalizeDict, stripTags };
+module.exports = {
+  parseDaily,
+  parseDictPage,
+  extractKeywords,
+  lookupWord,
+  finalizeDict,
+  stripTags,
+  /* 存档（供回归脚本直接调用） */
+  todayISO,
+  contentOf,
+  mergeContent,
+  archiveDaily,
+  listDays,
+  readRecord,
+};
