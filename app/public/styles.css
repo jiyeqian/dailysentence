@@ -78,6 +78,10 @@ body { position: fixed; inset: 0; overflow: hidden; touch-action: manipulation; 
 }
 body:not(.raw) #stage { touch-action: none; }
 
+/* 自适应画布（手机 / PWA）：位图就是设备分辨率，海报要真正贴边 —— 安全区已经
+   画进画布内部（顶部图片顶到屏幕顶、信息卡让开 Home 指示条），所以这里不再留边距 */
+body.adaptive:not(.raw) #stage { padding: 0; }
+
 .overlay {
   position: absolute; inset: 0;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;

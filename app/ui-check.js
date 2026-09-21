@@ -155,7 +155,14 @@ function ok(label, cond, extra) {
   ok('浮框 / 控件仓库 / 引导已从 DOM 移除', gone.length === 0, gone.length ? '仍存在: ' + gone.join(',') : '');
 
   let d = await info(p);
-  ok('画布恒 1080×1920', d.canvas.w === 1080 && d.canvas.h === 1920, d.canvas.w + '×' + d.canvas.h);
+  const H0 = d.canvas.h;   /* 设备长边换算出的设计高度（桌面固定 1080×1920 → 1920） */
+  ok('画布宽恒为设计基准 1080（设计坐标 = 标注通道的契约）', d.canvas.w === 1080, 'w=' + d.canvas.w);
+  ok('手机自适应：位图按屏幕比例，且不低于基准宽 1080',
+    d.canvas.adaptive === true && d.canvas.physW === 1080 && d.canvas.physH === 2338,
+    JSON.stringify(d.canvas));
+  ok('设计高 = 位图高 ÷ U（比 1920 更高 → 句子活动区更大）',
+    d.canvas.h > 1920 && d.text.band.h > 576,
+    `设计高 ${Math.round(d.canvas.h)}，活动区 ${Math.round(d.text.band.h)}`);
   ok('标准版元素 = bg/badge-date/en/cn/source/card',
     JSON.stringify(ids(d)) === JSON.stringify(['bg', 'badge-date', 'en', 'cn', 'source', 'card']),
     ids(d).join(','));
@@ -164,9 +171,11 @@ function ok(label, cond, extra) {
   const cb = box(d, 'card');
   const mLeft = cb[0];
   const mRight = 1080 - (cb[0] + cb[2]);
-  const mBottom = 1920 - (cb[1] + cb[3]);
-  ok('信息卡三边等距 48', mLeft === 48 && mRight === 48 && mBottom === 48,
-    `左${mLeft} 右${mRight} 底${mBottom}`);
+  const mBottom = d.canvas.h - (cb[1] + cb[3]);
+  /* 底边用画布高算，且给 0.2 容差 —— 标注表里的坐标是四舍五入到 0.1 的 */
+  ok('信息卡三边等距 48',
+    mLeft === 48 && mRight === 48 && Math.abs(mBottom - 48) < 0.2,
+    `左${mLeft} 右${mRight} 底${mBottom.toFixed(2)}`);
 
   ok('正文左线 = 信息卡左线 48',
     box(d, 'en')[0] === 48 && box(d, 'cn')[0] === 48 && box(d, 'source')[0] === 48,
@@ -217,7 +226,7 @@ function ok(label, cond, extra) {
     `lastSpeakAt ${speakBeforeDbl} → ${speakAt(d)}`);
   ok('开始操作后手势提示收起',
     await p.evaluate(() => { const h = document.getElementById('hint'); return !h || h.hidden; }));
-  ok('隐藏后画布仍是 1920', d.canvas.h === 1920);
+  ok('隐藏后画布尺寸不变', d.canvas.h === H0);
   ok('隐藏后其余内容自动上移', box(d, 'en')[1] < enY0, `en.y ${enY0} → ${box(d, 'en')[1]}`);
   ok('隐藏后信息卡位置不变（贴底）', JSON.stringify(box(d, 'card')) === JSON.stringify(cb));
   await shot(p, 's2-hide-date');
@@ -235,7 +244,7 @@ function ok(label, cond, extra) {
     ok('双击 ' + id + ' 后消失', !ids(d).includes(id));
   }
   ok('四个都隐藏后只剩图片与卡片', JSON.stringify(ids(d)) === JSON.stringify(['bg', 'card']), ids(d).join(','));
-  ok('空文字块时画布仍是 1920', d.canvas.h === 1920);
+  ok('空文字块时画布尺寸不变', d.canvas.h === H0);
   await shot(p, 's3-all-hidden');
 
   await p.reload({ waitUntil: 'load' });
@@ -303,7 +312,7 @@ function ok(label, cond, extra) {
   await (await chooser).setFiles(TEMPLATE);
   await p.waitForTimeout(800);
   d = await info(p);
-  ok('换成竖图后画布仍是 1920', d.canvas.h === 1920, 'h=' + d.canvas.h);
+  ok('换成竖图后画布尺寸不变', d.canvas.h === H0, 'h=' + d.canvas.h);
   ok('换成竖图后图片区仍是 648', box(d, 'bg')[3] === 648);
   /* 这条是本轮修的 bug：竖图原来会一路画到中部区域，把文字背景糊掉 */
   ok('竖图被裁到 648 高（不再溢出污染中部）',
@@ -344,8 +353,8 @@ function ok(label, cond, extra) {
   await pinchOn(p, imgPt.x, imgPt.y, 1.8);
   d = await info(p);
   ok('双指捏合放大了图片', d.fits.img.scale > 1.1, 'scale=' + d.fits.img.scale.toFixed(2));
-  ok('放大后画布仍是 1920、图片区仍是 648',
-    d.canvas.h === 1920 && box(d, 'bg')[3] === 648);
+  ok('放大后画布尺寸不变、图片区仍是 648（设计值）',
+    d.canvas.h === H0 && box(d, 'bg')[3] === 648);
 
   /* 单指拖动 = 平移（把图片别处露出来），且不许把窗口拖出白边 */
   const fit0 = (await info(p)).fits.img;
@@ -367,7 +376,10 @@ function ok(label, cond, extra) {
   await p.waitForTimeout(800);
   d = await info(p);
   ok('选自新图后调整目标切到该块', !!d.edit && d.edit.target === 'card', JSON.stringify(d.edit));
-  ok('换信息卡后三边仍是 48', box(d, 'card')[0] === 48 && 1920 - (box(d, 'card')[1] + box(d, 'card')[3]) === 48);
+  ok('换信息卡后三边仍是 48',
+    box(d, 'card')[0] === 48 &&
+    Math.abs(d.canvas.h - (box(d, 'card')[1] + box(d, 'card')[3]) - 48) < 0.2,
+    `左${box(d, 'card')[0]} 底${(d.canvas.h - (box(d, 'card')[1] + box(d, 'card')[3])).toFixed(2)}`);
   ok('新卡片的调整从头开始（scale=1，顺着自动识别的位置）',
     d.fits.card.scale === 1 && d.fits.card.ox === 0 && d.fits.card.oy === 0, JSON.stringify(d.fits.card));
   ok('之前对图片的调整结果仍在', d.fits.img.scale > 1.1, 'scale=' + d.fits.img.scale.toFixed(2));
@@ -479,14 +491,14 @@ function ok(label, cond, extra) {
   await tap(p, 'img');
   await (await fc2).setFiles(TEMPLATE);
   await p.waitForTimeout(800);
-  await dragBy(p, 'img', 0, -160);            /* 调整模式：挪一下图 */
+  await pinchOn(p, (await pointOf(p, 'img')).x, (await pointOf(p, 'img')).y, 1.5);   /* 调整模式：放大一下 */
   await finishAdjust(p);                      /* 退出调整模式 */
   await dragY(p, 'en', -120);
   const messy = await info(p);
   ok('（准备）状态已改乱',
     messy.meta.hidden.date === true && messy.text.zoom > 1 &&
-    messy.bg.clipped === true && messy.fits.img.oy !== 0,
-    `hidden.date=${messy.meta.hidden.date} zoom=${messy.text.zoom} clipped=${messy.bg.clipped} oy=${messy.fits.img.oy}`);
+    messy.bg.clipped === true && messy.fits.img.scale > 1.1,
+    `hidden.date=${messy.meta.hidden.date} zoom=${messy.text.zoom} clipped=${messy.bg.clipped} scale=${messy.fits.img.scale.toFixed(2)}`);
 
   await pullY(p, 'img', 150);                 /* 图片区向下拉 = 更新 */
   await p.waitForTimeout(2600);
@@ -502,17 +514,71 @@ function ok(label, cond, extra) {
   ok('六个元素都回来了',
     JSON.stringify(ids(back)) === JSON.stringify(['bg', 'badge-date', 'en', 'cn', 'source', 'card']),
     ids(back).join(','));
-  ok('下拉更新后画布仍 1920', back.canvas.h === 1920);
+  ok('下拉更新后画布尺寸不变', back.canvas.h === H0);
   await shot(p, 's8-after-pull');
+  await p.close();
 
-  /* ---------------- 桌面视口 ---------------- */
-  console.log('桌面视口');
-  const dp = await open(BASE + '/?debug=1', { width: 1280, height: 900 });
+  /* ---------------- 桌面：必须是「非触摸」上下文，走固定 1080×1920 的基准路径 ---------------- */
+  console.log('桌面视口（真桌面：无触摸）');
+  const dp = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1 });
+  dp.on('pageerror', (e) => errors.push('desktop pageerror: ' + e.message));
+  await dp.goto(BASE + '/?debug=1', { waitUntil: 'load' });
+  await dp.waitForFunction(() => window.__ds && window.__ds.state.layout);
   await dp.waitForTimeout(600);
   await shot(dp, 'd1-standard');
-  ok('桌面下画布仍是 1080×1920', (await info(dp)).canvas.h === 1920);
+  const dd = await info(dp);
+  ok('桌面：画布就是 1080×1920（自适应关闭）',
+    dd.canvas.adaptive === false && dd.canvas.w === 1080 && dd.canvas.h === 1920 &&
+    dd.canvas.physW === 1080 && dd.canvas.physH === 1920,
+    JSON.stringify(dd.canvas));
+  ok('桌面：U = 1（版面与改造前逐像素一致）', dd.canvas.u === 1, 'u=' + dd.canvas.u);
+  ok('桌面：三段尺寸仍是 648 / 496 / 576',
+    Math.round(box(dd, 'bg')[3]) === 648 && Math.round(box(dd, 'card')[3]) === 496 &&
+    Math.round(dd.text.band.h) === 576,
+    `${box(dd, 'bg')[3]} / ${box(dd, 'card')[3]} / ${Math.round(dd.text.band.h)}`);
   await dp.close();
-  await p.close();
+
+  /* ---------------- 手机自适应画布（位图 = 设备分辨率） ---------------- */
+  console.log('手机自适应画布');
+  const mobileCtx = await browser.newContext({ ...devices['iPhone 15 Pro'] });   /* dpr 3，别覆盖 */
+  const mp = await mobileCtx.newPage();
+  mp.on('pageerror', (e) => errors.push('mobile pageerror: ' + e.message));
+  await mp.goto(BASE + '/?debug=1', { waitUntil: 'load' });
+  await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await mp.waitForTimeout(700);
+  const md = await info(mp);
+  ok('手机：位图 = 设备短边 × 长边 × dpr',
+    md.canvas.adaptive === true && md.canvas.physW === 1180 && md.canvas.physH === 1978,
+    JSON.stringify(md.canvas));
+  ok('手机：设计坐标仍是 1080 基准、U > 1（部件等比放大）',
+    md.canvas.w === 1080 && md.canvas.u > 1, `w=${md.canvas.w} u=${md.canvas.u}`);
+  ok('手机：canvas 元素尺寸 = 位图（保存即设备原生分辨率）',
+    await mp.evaluate(() => {
+      const c = document.getElementById('poster');
+      const d = window.__ds.inspect().canvas;
+      return c.width === d.physW && c.height === d.physH;
+    }));
+  ok('手机：海报贴边（body.adaptive → #stage 无内边距）',
+    await mp.evaluate(() => document.body.classList.contains('adaptive') &&
+      getComputedStyle(document.getElementById('stage')).padding === '0px'));
+  ok('手机：安全区可读（Chromium 下为 0，真机为刘海 / Home 条）',
+    Number.isFinite(md.canvas.safe.top) && Number.isFinite(md.canvas.safe.bottom),
+    JSON.stringify(md.canvas.safe));
+  await shot(mp, 'm1-phone');
+
+  /* 旋转：画布尺寸与版式都不许跟着变（横屏暂不单独设计版面） */
+  const beforePhys = md.canvas.physW + 'x' + md.canvas.physH;
+  await mp.setViewportSize({ width: 659, height: 393 });
+  await mp.waitForTimeout(800);
+  const rd = await info(mp);
+  ok('旋转后画布尺寸不变（版式不跟着跳）',
+    rd.canvas.physW === md.canvas.physW && rd.canvas.physH === md.canvas.physH,
+    `${beforePhys} → ${rd.canvas.physW}x${rd.canvas.physH}`);
+  ok('旋转后设计高与句子活动区不变',
+    Math.round(rd.canvas.h) === Math.round(md.canvas.h) &&
+    Math.round(rd.text.band.h) === Math.round(md.text.band.h),
+    `设计高 ${Math.round(md.canvas.h)} → ${Math.round(rd.canvas.h)}`);
+  await mobileCtx.close();
 
   /* ---------------- 长版：本阶段必须没被动过 ---------------- */
   console.log('长版（应保持旧版面）');

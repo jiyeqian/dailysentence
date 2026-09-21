@@ -7,9 +7,12 @@
 
 /* ----------------------------- 基本常量 ------------------------------ */
 
+/* 版面一律用「设计坐标」书写：宽恒为 CW = 1080、高为 CH（设计值）。
+ * 实际位图 = 设计坐标 × U，绘制统一靠 render() 里一次 ctx.setTransform(U,0,0,U,0,0) 完成缩放，
+ * 所以下面所有尺寸 / 字号 / 间距都**不用**乘比例 —— 改版式时按 1080 基准写就行。 */
 const CW = 1080;
-const CH_MIN = 1920;      // 标准版海报高度
-let CH = CH_MIN;          // 实际画布高度，开启「长版海报」时会按内容伸展
+let CH_MIN = 1920;        // 标准版画布高（设计坐标）；手机上是「设备长边」换算过来的
+let CH = CH_MIN;          // 实际画布高，开启「长版海报」时会按内容伸展
 
 const F_SANS =
   '"AppSans","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",-apple-system,sans-serif';
@@ -27,6 +30,91 @@ const IMG_BLOCK_H = 648;      // 顶部图片区高度：图片在这一块里 c
 const CARD_PAD = 48;          // 信息卡距左 / 右 / 底，三边等距
 const CARD_H = 496;           // 信息卡高度（沿用模板比例换算出的大小）
 const TEXT_X = CARD_PAD;      // 标准版正文左基线 = 卡片左线（同一条纵向边线）
+
+/* ------------------ 设备与实际位图（自适应画布） ------------------
+ * 桌面（鼠标 / 非触摸）：U = 1，位图就是 1080×1920 —— 与改造前逐像素一致。
+ * 手机 / PWA：位图 = 设备「短边 × 长边」× dpr（iPhone 15 Pro → 1179×2556），
+ *   U = 位图宽 / 1080 → 全部件等比放大，而且**保存出来的就是设备原生分辨率的竖版海报**。
+ * 取「短边 × 长边」而不是当前视口宽高：旋转屏幕时画布尺寸不变，版式就不会跟着跳
+ *   （横屏等比缩小居中，暂不为横屏单独设计版面）。
+ */
+let U = 1;                            // 比例单位：设计值 × U = 位图像素
+let PHYS = { w: CW, h: CH_MIN };      // 实际位图尺寸
+let ADAPTIVE = false;                 // 是否走自适应画布（移动设备）
+let SAFE = { top: 0, bottom: 0 };     // 设备安全区（已折算成设计坐标）
+
+/**
+ * 移动设备判定：纯触摸、无 hover，**且物理短边够宽**。
+ * 加后一条是因为 1x 屏幕（触屏模拟、老式低分屏）拿到「设备分辨率」只有几百像素宽，
+ * 出图反而更糊 —— 那种情况继续用 1080×1920 更清楚。桌面鼠标 / 触屏笔记本都算桌面。
+ */
+function isMobileDevice(dpr) {
+  const mq = window.matchMedia && window.matchMedia('(pointer: coarse) and (hover: none)').matches;
+  if (!mq) return false;
+  const vv = window.visualViewport;
+  const shortCss = Math.min(vv ? vv.width : window.innerWidth, vv ? vv.height : window.innerHeight);
+  return shortCss * dpr >= 640;
+}
+
+/** 读安全区的实际像素：用探针元素量 env(safe-area-inset-*)，比解析字符串可靠 */
+function readSafeArea() {
+  const d = document.createElement('div');
+  d.style.cssText = 'position:fixed;left:-9999px;top:0;width:0;height:0;' +
+    'padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)';
+  document.body.appendChild(d);
+  const cs = getComputedStyle(d);
+  const top = parseFloat(cs.paddingTop) || 0;
+  const bottom = parseFloat(cs.paddingBottom) || 0;
+  d.remove();
+  return { top, bottom };
+}
+
+/**
+ * 按设备算出位图尺寸与比例单位 U。返回「尺寸是否变了」，供 resize 时决定要不要重排。
+ * 宽度取偶数（避免半像素），U 由实际宽度反推 → CW × U 正好是整数。
+ */
+function computeCanvasSize() {
+  const vv = window.visualViewport;
+  const vw = Math.round(vv ? vv.width : window.innerWidth);
+  const vh = Math.round(vv ? vv.height : window.innerHeight);
+  const dpr = window.devicePixelRatio || 1;
+
+  ADAPTIVE = isMobileDevice(dpr);
+  let w = CW;
+  let h = CH_MIN;
+  if (ADAPTIVE) {
+    const short = Math.max(240, Math.min(vw, vh));
+    const long = Math.max(short, Math.max(vw, vh));
+    /* 位图宽取「设备物理宽」，但**不低于设计基准 1080**：2x 屏幕的手机物理宽只有 750
+       左右，直接用会比现在的 1080 还糊；按比例放大到 1080 则等于超采样，更清晰。
+       关键是**比例保持屏幕比例** → 显示时仍然贴满全屏、不出现黑边。 */
+    w = 2 * Math.round(Math.max(CW, short * dpr) / 2);
+    h = 2 * Math.round((w * (long / short)) / 2);
+  }
+
+  const changed = w !== PHYS.w || h !== PHYS.h;
+  PHYS = { w, h };
+  U = w / CW;
+  CH_MIN = h / U;                     /* 设计坐标下的画布高（手机上比 1920 更高） */
+  const safe = ADAPTIVE ? readSafeArea() : { top: 0, bottom: 0 };
+  SAFE = { top: (safe.top * dpr) / U, bottom: (safe.bottom * dpr) / U };
+  document.body.classList.toggle('adaptive', ADAPTIVE);
+  return changed;
+}
+
+/** 视口变化（旋转 / 工具栏收起 / 窗口缩放）→ 防抖后按新尺寸重排 */
+function watchViewport() {
+  let t = null;
+  const onResize = () => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      if (computeCanvasSize()) scheduleRender();
+    }, 300);
+  };
+  window.addEventListener('resize', onResize);
+  window.addEventListener('orientationchange', onResize);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', onResize);
+}
 
 /* 中部区域：日期胶囊固定在顶部靠右，英文 + 中文 + 出处在其下方的活动区里居中铺满 */
 const DATE_TOP_PAD = 24;      // 日期胶囊距顶部图片区底
@@ -457,31 +545,43 @@ function computeLayout(ctx) {
 function computeLayoutStandard(ctx) {
   CH = CH_MIN;
 
-  /* 信息卡：尺寸固定，距左 / 右 / 底三边等距 */
+  /* 信息卡高度：设计值 496 与「不超过画布 28%」取小（宽屏设备上别占太多） */
+  const cardH = Math.min(CARD_H, CH * 0.28);
+  const cardBottomPad = CARD_PAD + SAFE.bottom;   /* 底边还要让开 Home 指示条 */
+
+  /* 日期胶囊：不依赖图片区高度，先算它，「固定占用」才准 */
+  let date = { on: false, x: CW - TEXT_X, y: 0, w: 0, h: DATE_H };
+  if (!state.hidden.date && state.content.date) {
+    ctx.font = T(25, 600, F_SANS);
+    const dw = measureSpaced(ctx, state.content.date, 2.5) + 56;
+    date = { on: true, x: CW - TEXT_X - dw, y: 0, w: dw, h: DATE_H };
+  }
+
+  /* 除图片区以外、版面固定要占掉的高度（间距 + 日期行 + 卡片 + 底边距） */
+  const chrome = DATE_TOP_PAD + (date.on ? DATE_H + GAP_DATE_BAND : 0) +
+    GAP_TEXT_CARD + cardBottomPad + cardH;
+
+  /* 图片区高度：设计值 648 与「不超过画布 45%」取小；若这样会把句子区挤到不足画布
+     的 28%，就继续压图片区 —— 平板 / 折叠屏这类宽屏设备靠这一步保住句子区。
+     手机 0.46 的比例下两条都不触发，桌面（U=1）与改造前逐像素一致。 */
+  let imgH = Math.min(IMG_BLOCK_H, CH * 0.45);
+  const need = imgH + chrome + CH * 0.28 - CH;
+  if (need > 0) imgH = Math.max(120, imgH - need);
+
+  const dateTop = imgH + DATE_TOP_PAD;
+  date.y = dateTop;
+
+  /* 信息卡：距左 / 右 / 底三边等距（底边另加安全区） */
   const card = {
     x: CARD_PAD,
-    y: CH - CARD_PAD - CARD_H,
+    y: CH - cardBottomPad - cardH,
     w: CW - 2 * CARD_PAD,
-    h: CARD_H,
+    h: cardH,
     shifted: false,
   };
 
-  /* 日期胶囊：固定在中部区域顶部靠右，不参与居中 */
-  const dateTop = IMG_BLOCK_H + DATE_TOP_PAD;
-  let date = { on: false, x: CW - TEXT_X, y: dateTop, w: 0, h: DATE_H };
-  if (!state.hidden.date && state.content.date) {
-    ctx.font = T(25, 600, F_SANS);
-    date = {
-      on: true,
-      x: CW - TEXT_X - (measureSpaced(ctx, state.content.date, 2.5) + 56),
-      y: dateTop,
-      w: measureSpaced(ctx, state.content.date, 2.5) + 56,
-      h: DATE_H,
-    };
-  }
-
   /* 文字活动区：日期胶囊之下、信息卡之上；日期被删掉就把那一行还给句子 */
-  const bandTop = date.on ? dateTop + DATE_H + GAP_DATE_BAND : IMG_BLOCK_H + DATE_TOP_PAD;
+  const bandTop = date.on ? dateTop + DATE_H + GAP_DATE_BAND : imgH + DATE_TOP_PAD;
   const bandBottom = card.y - GAP_TEXT_CARD;
   const bandH = bandBottom - bandTop;
 
@@ -512,7 +612,7 @@ function computeLayoutStandard(ctx) {
     panel: { hidden: true, x: card.x, y: card.y, w: card.w, h: 0, padX: 0, padY: 0, row1H: 0, wordW: 0, defItems: [], exItems: [], badge: null },
     card,
     ch: CH,
-    imgBlock: { y: 0, h: IMG_BLOCK_H },
+    imgBlock: { y: 0, h: imgH },
   };
 }
 
@@ -1075,7 +1175,15 @@ function inspect() {
   }
 
   return {
-    canvas: { w: CW, h: CH },
+    /* w/h = 设计坐标（恒以 1080 为基准，标注通道与回归都用它）；
+       physW/physH = 实际位图 = 设备分辨率（手机自适应时的真实出图尺寸） */
+    canvas: {
+      w: CW, h: CH,
+      u: Math.round(U * 10000) / 10000,
+      physW: PHYS.w, physH: PHYS.h,
+      adaptive: ADAPTIVE,
+      safe: { top: Math.round(SAFE.top), bottom: Math.round(SAFE.bottom) },
+    },
     items,
     gaps: buildGaps(L),
     opts: Object.assign({}, state.opts),
@@ -1109,16 +1217,18 @@ function inspect() {
 
 function render() {
   const ctx = cvs.getContext('2d');
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-  /* 版面确定后才知道画布多高（长版海报会变高） */
+  /* 版面确定后才知道画布多高（长版海报会变高）；设计坐标 → 位图的换算见 computeCanvasSize */
   const L = computeLayout(ctx);
+  const w = PHYS.w;
+  const h = Math.max(2, 2 * Math.round((CH * U) / 2));
 
-  if (cvs.width !== CW || cvs.height !== CH) {
-    cvs.width = CW;
-    cvs.height = CH;
+  /* 给 width/height 赋值会重置 2D 上下文，所以缩放变换必须在 resize 之后重设 */
+  if (cvs.width !== w || cvs.height !== h) {
+    cvs.width = w;
+    cvs.height = h;
   }
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.setTransform(U, 0, 0, U, 0, 0);
   ctx.clearRect(0, 0, CW, CH);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
@@ -2384,6 +2494,9 @@ function setOverlay(show, text) {
   /* longPoster 先定，背景比例的默认值要按版本取（标准版铺满 / 长版原比例） */
   if (qs.get('long') === '1' || qs.get('ex') === '1') state.opts.longPoster = true;
   state.opts.bgStyle = initialBgStyle();
+  /* 先定设备位图与比例单位：后面所有版面尺寸都建立在它上面 */
+  computeCanvasSize();
+  watchViewport();
   bindInputs();
 
   /* 字体度量必须先就绪，否则折行与居中会算错 */
