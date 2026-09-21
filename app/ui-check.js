@@ -359,6 +359,20 @@ function ok(label, cond, extra) {
   ok('拖动没有改变其它元素', JSON.stringify(box(d, 'card')) === JSON.stringify(cb));
   await shot(p, 's10-adjust-img');
 
+  /* 调整模式下单击**另一块**也是单击即开相册（不必先「完成」再点第二下） */
+  const swapChooser = p.waitForEvent('filechooser', { timeout: 5000 });
+  await tap(p, 'card');
+  ok('调整模式下单击信息卡一次即唤起相册', !!(await swapChooser));
+  await (await swapChooser).setFiles(TEMPLATE);
+  await p.waitForTimeout(800);
+  d = await info(p);
+  ok('选自新图后调整目标切到该块', !!d.edit && d.edit.target === 'card', JSON.stringify(d.edit));
+  ok('换信息卡后三边仍是 48', box(d, 'card')[0] === 48 && 1920 - (box(d, 'card')[1] + box(d, 'card')[3]) === 48);
+  ok('新卡片的调整从头开始（scale=1，顺着自动识别的位置）',
+    d.fits.card.scale === 1 && d.fits.card.ox === 0 && d.fits.card.oy === 0, JSON.stringify(d.fits.card));
+  ok('之前对图片的调整结果仍在', d.fits.img.scale > 1.1, 'scale=' + d.fits.img.scale.toFixed(2));
+  await shot(p, 's5-new-card');
+
   /* 点被调区域以外 = 完成（且不触发朗读） */
   await finishAdjust(p);
   d = await info(p);
@@ -367,20 +381,6 @@ function ok(label, cond, extra) {
   ok('退出后提示收起',
     await p.evaluate(() => { const h = document.getElementById('hint'); return !h || h.hidden || h.classList.contains('hide'); }));
   ok('调整结果被保留（退出不等于复原）', d.fits.img.scale > 1.1, 'scale=' + d.fits.img.scale.toFixed(2));
-
-  /* 信息卡：一样是「换完即进调整模式」，且从此等比不再拉伸 */
-  chooser = p.waitForEvent('filechooser', { timeout: 5000 });
-  await tap(p, 'card');
-  ok('单击信息卡唤起相册', !!(await chooser));
-  await (await chooser).setFiles(TEMPLATE);
-  await p.waitForTimeout(800);
-  d = await info(p);
-  ok('换信息卡后三边仍是 48', box(d, 'card')[0] === 48 && 1920 - (box(d, 'card')[1] + box(d, 'card')[3]) === 48);
-  ok('换信息卡后也立刻进入调整模式', !!d.edit && d.edit.target === 'card', JSON.stringify(d.edit));
-  ok('卡片默认 scale=1（顺着自动识别的位置，不跳变）', d.fits.card.scale === 1,
-    JSON.stringify(d.fits.card));
-  await shot(p, 's5-new-card');
-  await finishAdjust(p);
 
   /* ---------------- 长按保存（界面无按钮，保存只能靠长按） ---------------- */
   console.log('标准版 · 长按保存');

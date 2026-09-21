@@ -115,6 +115,18 @@ body:not(.raw) #stage { touch-action: none; }
   max-width: 92vw; overflow: hidden; text-overflow: ellipsis;
 }
 .hint.hide { opacity: 0; }
+/* 调整模式的操作说明更长（还要说明「点图片换一张」），一行放不下 → 允许折行。
+   普通提示仍是一行 nowrap，不受影响。 */
+.hint.wrap {
+  /* pre-line：认文本里的 \n（断行位置由 JS 定，免得浏览器把「换一张」拦腰断）；
+     left:50% 会让收缩后的可用宽度只剩半屏，用 max-content 撑开 */
+  white-space: pre-line;
+  text-align: center;
+  line-height: 1.55;
+  width: max-content;
+  max-width: 86vw;
+  border-radius: 16px;
+}
 
 /* ---------------- 提示 / 保存反馈 ---------------- */
 .toast {

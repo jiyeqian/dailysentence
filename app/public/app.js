@@ -1489,9 +1489,9 @@ function startEdit(target) {
   if (target === 'img' && !state.bgImage) return;
   if (target === 'card' && !state.template) return;
   state.edit = { target, moved: false };
-  showHint(target === 'img'
-    ? '调图：双指缩放 · 单指拖动 · 点别处完成'
-    : '调卡片：双指缩放 · 单指拖动 · 点别处完成', true);
+  const what = target === 'img' ? '图片' : '卡片';
+  /* 换行位置写死在前半句之后（样式是 pre-line），免得窄屏把「换一张」拦腰断 */
+  showHint('调' + what + '：双指缩放 · 单指拖动\n点' + what + '换一张 · 点别处完成', true);
   scheduleRender();
 }
 
@@ -2135,7 +2135,16 @@ function bindGestures() {
       }
       if (!rec || rec.moved) return;
       const hit = hitTestAt(e.clientX, e.clientY);
-      if (!hit || hit.id !== state.edit.target) finishEdit();
+      /* 单击图片 / 信息卡 = 选图，调整模式里也一样 —— 否则「换另一块」要先点一下
+         完成、再点一下才开相册，别扭。选完图（change 事件）会按新目标重新进调整模式。 */
+      if (hit && (hit.id === 'img' || hit.id === 'card')) {
+        if (Date.now() - pickerAt < 400) return;
+        pickerAt = Date.now();
+        openPicker(hit.id);
+        return;
+      }
+      /* 其它地方 = 完成 */
+      finishEdit();
       return;
     }
 
@@ -2235,6 +2244,8 @@ function showHint(text, sticky) {
   if (!el) return;
   clearTimeout(hintTimer);
   hintSticky = !!sticky;
+  /* 常驻（调整模式）的说明更长，允许折行；普通提示保持一行 */
+  el.classList.toggle('wrap', hintSticky);
   if (text) el.textContent = text;
   el.hidden = false;
   el.classList.remove('hide');
