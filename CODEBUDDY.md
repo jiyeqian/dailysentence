@@ -27,6 +27,24 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
 
 出现「本该在 A 字段的内容跑到 B」时，几乎都是分隔符 / 小标题识别退化，
 先跑解析器打印各字段，别急着怀疑渲染层。
+- **上游多出来的字段：解析要兼容，展示要克制**（`usages` 就是例子：服务端照旧解析返回，
+  前端不画 —— 曾「顺手补上」搭配区，价值有限却明显拉长画布，已回退）。
+
+## 铁律：上游抓取（改 `server.js` 抓取前必读）
+
+- **词条页请求必须串行**，间隔 ≥ `DICT_MIN_GAP`（300ms）：上游把释义里的汉字**随机**换成
+  `<img class="dictimgtoword">`，并发常拿到同一批替换、合并无增量；串行才叠加 keep-alive 收益。
+- **二级源一律 `maxRedirects: 0`**：高频请求会 302 到 `/Account/Login`，跟随跳转会把登录页
+  HTML 当正文，表现为「解析不到」而不是报错。
+- **缺字两种成因**：按字固定替换（重试救不回，只能整条剔除）/ 按请求随机抽（多次请求逐位合并
+  可还原）；`HOLE`（`\u0001`）与空格都算「没内容」。补不回的按条剔除（`finalizeDict`），
+  义项全被剔掉等同「没查到」。
+- **`stripTags` 区分内联 / 块级**：内联换空串、块级（`BLOCK_TAGS`）才换空格，否则中文露馅
+  （「我对他所说的感到 失望 。」），英文两种写法看不出差别 → **改完必须抽查中文**。
+- **分区结束位置取最早标记**：`#ExpFCchild` 后未必有 `#ExpSYN`，只认后者会把生词本 /
+  历史记录的 `<li>` 扫进来当假释义。上游**不支持按日期取历史**（`?date=` 等都返回今天），
+  往日内容只能靠我们自己的存档。
+- 本机 IP 连发 ~20 个请求会被限流（持续 302）→ 调试别把限流当解析 bug。
 
 ## 界面原则（2026-09-21 无按钮化后）
 
@@ -83,6 +101,16 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
 - `state.regions` 的 id、`window.__ds.inspect()` 的字段形状（含 `text.autoScale/zoom/K`、`bg`），
   是 `inspect.js` 与 `ui-check.js` 的契约，改交互时别改这两处的对外形状。
 
+## Canvas 渲染的坑（改 `render()` 前必读）
+
+- 给 `cvs.width` / `cvs.height` 赋值会**重置整个 2D 上下文**（transform / font / baseline /
+  imageSmoothing 全回默认）。长版会按内容改画布高度 → resize 之后必须重设这些，
+  **现有代码就是这么写的，改渲染时别把那两段删掉**。
+- 图片下缘渐隐的目标色必须取**海报底渐变在该处的实际色**（当前 `rgba(17,28,46,1)`），
+  写纯黑会露色带；「把图片底边拉伸模糊向下渗透」试过会起雾带、压低文字对比度，已弃用。
+- 无头截图校对：页面高度是动态的，先读 `#poster` 的真实 `height` 再按 `height+40` 开窗口，
+  否则会被截断（本项目的正解是 `app/inspect.js --full` 整页截图）。
+
 ## 存档与部署
 
 - 存档 `app/data/daily/YYYY-MM-DD.json` + `app/data/index.json`（gitignore）。
@@ -94,6 +122,27 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   换链接只能新建应用，存档会归零。
 - 部署是**覆盖式上传**：整目录压缩上传，只排除 `node_modules` / `.git` /
   构建产物（`data/` 不在排除之列，本地存档会跟着传上去）。
+- 沙箱**只有**「一个 HTTP 端口 + 一个可写应用目录」，没有数据库 / 缓存 / 对象存储 →
+  持久化只能写应用目录（`data/`）：这是该环境下的正解路径，不是妥协。
+- **`data/` 会跟着上传 → 可能覆盖线上同名文件**（合并只发生在进程写盘时 `mergeContent`，
+  上传不做合并）→ 上线前必须比存档，见下节。
+- `createNewApp: true` 另开沙箱（换链接、存档从零），别拿它做常规更新。
+
+## 上线前检查（「用本地内容更新上线」的固定动作）
+
+上线只在 WorkBuddy 侧执行（见文末「环境说明」）；CodeBuddy 侧要把绿色点与存档比对做扎实：
+
+- `git log --oneline` 看 HEAD 是否已前进；`git status --short` 必须干净
+- `node app/parse-check.js`（50 passed）+ 语法检查；界面改动再加 `ui-check`
+- **存档比对（每次必做）**：本地 `app/data/daily/*.json` 与线上 `/api/archive` + 逐日
+  `/api/daily?date=` 比 `score`（释义数 ×10 + 例句数 ×2 + 音标 + 词），同分才敢覆盖
+- 部署参数固定 `updateExistingApp: true` + 固定 appId（复用沙箱 → 链接与存档都延续；
+  appId 记在 `.workbuddy/memory/`，**不写进公开仓库**）
+- 复核四点：首页 200 / `archive` 的 `writable=true` 且 `days` 正确 / 两日 score 未变 /
+  线上 `app.js` 命中新代码关键词（`curl -s 线上/app.js | grep -c <新函数名>`）
+
+**坑**：`/api/daily` 是**平铺字段**（没有 `content` 子对象）。比对脚本按 `content` 取会全读成 0，
+误判成「线上存档丢了」。
 
 ## 协作约定
 
@@ -104,6 +153,8 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   坐标清单给 AI 读，两边共用一套编号（命名表见 `app/README.md`）；改完用 `--diff`
   自证改动范围。界面改动不靠识图，报编号 + id。
 - 优先零依赖方案；涉及云服务 / 计费资源时不擅自开通。
+- **同一文件不要并行调用编辑工具**（后写赢、会静默丢改动）：本项目出过一批 5 条编辑只活下
+  1 条，CodeBuddy 会话里也出现过文件被写回旧内容。一律串行编辑 + 改完复查。
 
 ### 提交节奏（2026-09-22 立）：每子任务自动 commit + 即 push
 
