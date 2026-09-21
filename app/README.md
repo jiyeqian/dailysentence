@@ -252,8 +252,12 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
 node app/inspect.js --diff before after
 ```
 
-常用参数：`--tag <名>`（输出后缀，默认 latest）、`--raw`（只截海报）、`--desktop`（桌面视口）、
-`--long`（长版）、`--word/--en/--cn/--source`（固定文案）、`--base`（服务地址）、`--no-shot`。
+常用参数：`--tag <名>`（输出后缀，默认 latest）、`--raw`（只截海报）、`--full`（整页截图，
+海报比视口高时必须加）、`--desktop`（桌面视口）、`--long`（长版）、`--bg`（背景模式）、
+`--word/--en/--cn/--source`（固定文案）、`--base`（服务地址）、`--no-shot`。
+
+完整使用说明（就位检查、示例图、报修改句式、排查表）见
+[`../docs/标注通道-使用手册.md`](../docs/标注通道-使用手册.md)。
 
 产物在 `app/shots/`（已 gitignore）：
 

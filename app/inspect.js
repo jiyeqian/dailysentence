@@ -14,6 +14,7 @@
      --long          长版海报（带例句）
      --word/--en/--cn/--source  固定文案，保证两次导出可比
      --base <url>    服务地址，默认 http://127.0.0.1:8787
+     --full          整页截图：海报比视口高时（长版 / 加高版面）也能截全
      --no-shot       只出 JSON，不截图
 
    产物落在 app/shots/（已 gitignore）：
@@ -206,7 +207,8 @@ async function main() {
     if (!has('no-shot')) {
       await page.evaluate(overlaySource, data.items);
       const shotPath = path.join(OUT, 'annot-' + tag + '.png');
-      await page.screenshot({ path: shotPath });
+      /* 海报比视口高时（长版 / 内容挤到加高）必须整页截，否则下半张会丢 */
+      await page.screenshot({ path: shotPath, fullPage: has('full') });
       console.log('标注图   ' + shotPath);
     }
 

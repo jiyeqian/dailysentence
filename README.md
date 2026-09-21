@@ -140,6 +140,10 @@ PORT=3000 node server.js  # 自定义端口
 │       └── assets/template.jpg  # 默认模板
 └── docs/
     ├── preview.png            # 成品预览
+    ├── 标注通道-使用手册.md    # 改界面前先读这个：编号标注图用法 + 命名表
+    ├── annot-guide.jpg        #   示例图：标准版编号标注
+    ├── annot-long.jpg         #   示例图：长版（含例句块）
+    ├── annot-desktop.jpg      #   示例图：桌面视口
     └── reference/             # 设计参考素材
 ```
 
