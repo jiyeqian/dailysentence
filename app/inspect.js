@@ -194,9 +194,6 @@ async function main() {
       null,
       { timeout: 20000 }
     );
-    /* 引导呼吸框会盖在画面上，标注图里不要它 */
-    await page.evaluate(() => { try { window.__ds.guide.stop(); } catch (e) {} });
-
     const data = await page.evaluate(() => window.__ds.inspect());
     if (!fs.existsSync(OUT)) fs.mkdirSync(OUT, { recursive: true });
 

@@ -17,7 +17,7 @@
 </head>
 <body>
 
-<!-- 舞台：海报铺满整屏，可点即改 -->
+<!-- 舞台：整屏只有海报。单击图片 / 信息卡 = 从相册选图；双击句子 = 隐藏；长按 = 保存 -->
 <div id="stage">
   <div class="canvas-wrap">
     <canvas id="poster" width="1080" height="1920"></canvas>
@@ -25,14 +25,8 @@
   </div>
 </div>
 
-<!-- 引导呼吸框（叠加在 canvas 上，pointer-events: none） -->
-<div id="frames" class="frames" aria-hidden="true"></div>
-<div id="mark" class="mark" hidden aria-hidden="true"></div>
-<p id="tip" class="tip" hidden><span id="tipText"></span></p>
-
-<!-- 顶栏：只有四个动作（外加“你在看哪一天”的小标） -->
+<!-- 顶栏：只有四个动作 -->
 <header class="topbar" id="topbar">
-  <button id="srcTag" class="src-tag" hidden title="往期存档" aria-label="往期存档">今天</button>
   <button id="btnPlay" class="icon-btn" title="朗读" aria-label="朗读">
     <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 8.2v3.6h2.7L10.5 15V5L6.7 8.2H4z" fill="currentColor"/><path d="M13.5 8a4.6 4.6 0 0 1 0 4.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
   </button>
@@ -45,64 +39,9 @@
   </button>
 </header>
 
-<!-- 就地浮框：内容从下面的控件仓库按需搬进来 -->
-<div id="pop" class="pop" hidden>
-  <div class="pop-head"><b id="popTitle">关键词</b><button id="popClose" class="pop-close" aria-label="关闭">✕</button></div>
-  <div class="pop-body" id="popBody"></div>
-  <p class="pop-hint" id="popHint"></p>
-</div>
-
-<!-- 控件仓库：不显示，浮框打开时把对应那一组搬进 #popBody -->
-<div id="kit" hidden>
-
-  <div class="k" data-k="word">
-    <label class="field"><span>关键词</span><input id="fWord" type="text" placeholder="如 never，改完自动重查词典"></label>
-    <div id="fixCard" hidden>
-      <p class="note" id="fixNote"></p>
-      <div class="chips" id="segWord"></div>
-    </div>
-  </div>
-
-  <div class="k" data-k="text">
-    <label class="field"><span>英文</span><textarea id="fEn" rows="2"></textarea></label>
-    <label class="field"><span>中文</span><textarea id="fCn" rows="2"></textarea></label>
-  </div>
-
-  <div class="k" data-k="source">
-    <label class="field"><span>出处</span><input id="fSource" type="text" placeholder="如 文森特·威廉·梵高"></label>
-  </div>
-
-  <div class="k" data-k="defs">
-    <label class="field"><span>释义</span><textarea id="fDefs" rows="3" placeholder="每行一条，如：n.冲动；脉冲"></textarea></label>
-  </div>
-
-  <div class="k" data-k="card">
-    <label class="switch"><input id="cLong" type="checkbox"><span>长版海报（附例句）</span></label>
-    <button id="btnTemplate" class="btn ghost full">更换个人信息卡模板</button>
-    <input id="fTemplate" type="file" accept="image/*" hidden>
-  </div>
-
-  <div class="k" data-k="archive">
-    <p class="note" id="archNote"></p>
-    <div class="archlist" id="archList"></div>
-  </div>
-
-  <div class="k" data-k="page">
-    <div class="seg" id="segBg">
-      <button data-v="natural" class="on">原比例</button>
-      <button data-v="cover">铺满</button>
-    </div>
-    <label class="field range"><span>字号</span><input id="rFont" type="range" min="80" max="120" value="100"><b id="vFont">100%</b></label>
-    <label class="field range"><span>上边距</span><input id="rTop" type="range" min="25" max="80" value="59"><b id="vTop">59%</b></label>
-    <label class="field range"><span>卡片高度</span><input id="rH" type="range" min="10" max="40" value="26"><b id="vH">26%</b></label>
-    <label class="field range"><span>左右边距</span><input id="rM" type="range" min="0" max="12" value="4"><b id="vM">4%</b></label>
-    <label class="switch"><input id="cDate" type="checkbox" checked><span>日期标签</span></label>
-    <label class="switch"><input id="cRule" type="checkbox" checked><span>标题分隔线</span></label>
-    <label class="switch"><input id="cSource" type="checkbox" checked><span>显示出处</span></label>
-    <footer class="foot"><a id="linkSource" href="https://dict.eudic.net/home/dailysentence" target="_blank" rel="noopener">打开欧路词典原网页</a></footer>
-  </div>
-
-</div>
+<!-- 相册选图入口：单击海报上的顶部图片 / 信息卡时由 JS 触发 -->
+<input id="fBgImage" type="file" accept="image/*" hidden>
+<input id="fCardImage" type="file" accept="image/*" hidden>
 
 <div id="toast" class="toast"></div>
 

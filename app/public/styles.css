@@ -24,7 +24,7 @@
   --accent-2: #22d3ee;
   --sat: env(safe-area-inset-top);
   --sab: env(safe-area-inset-bottom);
-  --kb: 0px;                 /* 键盘高度，JS 依据 VisualViewport 写入 */
+  --kb: 0px;                 /* 键盘高度；界面无输入框后恒为 0，保留给 toast 定位 */
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -42,7 +42,7 @@ html, body {
 body { position: fixed; inset: 0; overflow: hidden; touch-action: manipulation; }
 [hidden] { display: none !important; }
 
-/* ---------------- 舞台：海报铺满整屏 ---------------- */
+/* ---------------- 舞台：整屏只有海报 ---------------- */
 #stage {
   position: absolute;
   inset: 0;
@@ -69,7 +69,7 @@ body { position: fixed; inset: 0; overflow: hidden; touch-action: manipulation; 
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
   touch-action: manipulation;
 }
-/* 长按是「保存」，必须压住系统的图片菜单与文本选择 */
+/* 长按是「保存」，双击是「隐藏」，必须压住系统的图片菜单与文本选择 */
 #stage, .canvas-wrap, #poster {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
@@ -104,30 +104,6 @@ body { position: fixed; inset: 0; overflow: hidden; touch-action: manipulation; 
 }
 .topbar.dim { opacity: 0.3; }
 
-/* 「你在看哪一天」的小标：只在往日 / 走存档时出现，平时完全不占地方 */
-.src-tag {
-  height: 40px;
-  padding: 0 13px;
-  margin-right: 2px;
-  display: flex; align-items: center; gap: 6px;
-  border-radius: 999px;
-  border: 1px solid rgba(79, 141, 253, 0.45);
-  background: rgba(16, 22, 35, 0.72);
-  color: #cfe0ff;
-  font-family: inherit; font-size: 12.5px; font-weight: 600;
-  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-  white-space: nowrap;
-  cursor: pointer;
-  transition: transform 0.12s;
-}
-.src-tag:active { transform: scale(0.95); }
-.src-tag::before {
-  content: "";
-  width: 6px; height: 6px; border-radius: 50%;
-  background: #4f8dfd;
-}
-.src-tag[hidden] { display: none; }
-
 .icon-btn {
   width: 40px; height: 40px;
   display: flex; align-items: center; justify-content: center;
@@ -149,179 +125,6 @@ body { position: fixed; inset: 0; overflow: hidden; touch-action: manipulation; 
   color: #fff;
   box-shadow: 0 8px 22px rgba(79, 141, 253, 0.4);
 }
-
-/* ---------------- 引导：呼吸闪烁的可编辑区域框 ---------------- */
-.frames { position: fixed; inset: 0; pointer-events: none; z-index: 25; }
-.frame {
-  position: absolute;
-  border: 1.5px solid rgba(79, 141, 253, 0.9);
-  border-radius: 14px;
-  box-shadow: 0 0 0 1px rgba(79, 141, 253, 0.2), 0 0 20px rgba(79, 141, 253, 0.32);
-  animation: breathe 1.25s ease-in-out infinite;
-}
-@keyframes breathe {
-  0%, 100% { opacity: 0.26; transform: scale(1); }
-  50% { opacity: 1; transform: scale(1.014); }
-}
-.tip {
-  position: fixed;
-  left: 50%;
-  bottom: calc(var(--sab) + 26px);
-  transform: translateX(-50%);
-  z-index: 44;
-  margin: 0;
-  padding: 10px 18px;
-  border-radius: 999px;
-  background: rgba(21, 29, 44, 0.94);
-  border: 1px solid var(--line);
-  color: var(--text);
-  font-size: 13px;
-  white-space: nowrap;
-  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-  transition: opacity 0.25s;
-}
-.tip.hide { opacity: 0; }
-
-/* 正在编辑的区域：一圈细描边 + 轻微压暗四周，让人知道这个框在改哪儿 */
-.mark {
-  position: fixed;
-  z-index: 26;
-  border: 1.5px solid rgba(79, 141, 253, 0.85);
-  border-radius: 14px;
-  box-shadow: 0 0 0 9999px rgba(6, 10, 18, 0.22);
-  pointer-events: none;
-  animation: markIn 0.22s ease-out;
-}
-@keyframes markIn { from { opacity: 0; } to { opacity: 1; } }
-
-/* ---------------- 就地浮框 ---------------- */
-.pop {
-  position: fixed;
-  z-index: 45;
-  width: min(360px, calc(100vw - 24px));
-  max-height: calc(100dvh - 24px);
-  overflow-y: auto;
-  padding: 12px 14px 10px;
-  border-radius: 16px;
-  background: rgba(21, 29, 44, 0.84);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow: 0 20px 52px rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(18px) saturate(1.25);
-  -webkit-backdrop-filter: blur(18px) saturate(1.25);
-  animation: popIn 0.16s ease-out;
-}
-@keyframes popIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-/* 键盘态：贴到键盘上方，保证正在输入的东西看得见 */
-.pop.kb {
-  left: 12px !important;
-  right: 12px;
-  top: auto !important;
-  bottom: calc(var(--kb) + 10px);
-  width: auto;
-  max-height: 58dvh;
-  overflow-y: auto;
-}
-.pop-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
-.pop-head b { font-size: 14px; font-weight: 650; letter-spacing: 0.2px; }
-.pop-close {
-  width: 26px; height: 26px; flex: none;
-  border-radius: 50%; border: 1px solid var(--line);
-  background: transparent; color: var(--muted);
-  font-size: 12px; line-height: 1; cursor: pointer;
-}
-.pop-close:active { transform: scale(0.92); }
-.pop-hint { margin: 10px 0 0; font-size: 11px; color: var(--muted); line-height: 1.6; }
-
-/* ---------------- 表单控件 ---------------- */
-.field { display: block; margin-bottom: 10px; }
-.field:last-child { margin-bottom: 4px; }
-.field > span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-input[type="text"], textarea {
-  width: 100%;
-  background: rgba(9, 13, 22, 0.72);
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  color: var(--text);
-  font-family: inherit;
-  font-size: 16px;          /* ≥16px，避免 iOS 聚焦时自动放大 */
-  line-height: 1.5;
-  padding: 10px 12px;
-  resize: none;
-  outline: none;
-}
-input[type="text"]:focus, textarea:focus { border-color: rgba(79, 141, 253, 0.7); }
-
-.seg { display: flex; gap: 8px; margin-bottom: 12px; }
-.seg button {
-  flex: 1; padding: 10px 6px; border-radius: 12px; cursor: pointer;
-  background: rgba(9, 13, 22, 0.72); color: var(--muted);
-  border: 1px solid var(--line); font-family: inherit; font-size: 13px; font-weight: 600;
-}
-.seg button.on { background: rgba(79, 141, 253, 0.18); border-color: rgba(79, 141, 253, 0.55); color: #cfe0ff; }
-
-.chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-.chips button {
-  padding: 8px 14px; border-radius: 999px; cursor: pointer;
-  background: rgba(9, 13, 22, 0.72); color: var(--muted);
-  border: 1px solid var(--line); font-family: inherit; font-size: 13px; font-weight: 600;
-}
-.chips button.on { background: rgba(79, 141, 253, 0.18); border-color: rgba(79, 141, 253, 0.55); color: #cfe0ff; }
-.chips button:disabled { opacity: 0.5; cursor: default; }
-
-.note { margin: 2px 0 0; font-size: 11.5px; line-height: 1.65; color: var(--muted); }
-
-/* 往期列表：一行一天，正在看的那天高亮 */
-.archlist {
-  display: flex; flex-direction: column; gap: 6px;
-  max-height: 236px; overflow-y: auto;
-  margin-top: 8px;
-  -webkit-overflow-scrolling: touch;
-}
-.archlist button {
-  display: flex; align-items: baseline; gap: 10px;
-  width: 100%; padding: 9px 11px;
-  border-radius: 9px;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text);
-  font-family: inherit; font-size: 13px;
-  text-align: left; cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
-}
-.archlist button:hover { background: rgba(255, 255, 255, 0.08); }
-.archlist button.on {
-  background: rgba(79, 141, 253, 0.16);
-  border-color: rgba(79, 141, 253, 0.5);
-  color: #cfe0ff;
-}
-.archlist .d { flex: 0 0 76px; font-variant-numeric: tabular-nums; }
-.archlist .w {
-  flex: 1; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 12px; color: var(--muted);
-}
-.archlist button.on .w { color: #a9c6ff; }
-.archlist .t { flex: 0 0 auto; font-size: 11px; color: var(--muted); }
-
-.field.range { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
-.field.range > span { flex: 0 0 60px; margin: 0; }
-.field.range input[type="range"] { flex: 1; accent-color: var(--accent); }
-.field.range b { flex: 0 0 42px; text-align: right; font-size: 12px; color: var(--muted); font-weight: 500; }
-
-.switch { display: flex; align-items: center; gap: 10px; padding: 7px 0; font-size: 13.5px; cursor: pointer; }
-.switch input { width: 40px; height: 23px; accent-color: var(--accent); }
-
-.btn {
-  border: 0; border-radius: 13px; padding: 12px 14px;
-  font-family: inherit; font-size: 13.5px; font-weight: 600;
-  cursor: pointer; transition: transform 0.12s;
-}
-.btn:active { transform: scale(0.98); }
-.btn.ghost { background: rgba(9, 13, 22, 0.72); color: var(--text); border: 1px solid var(--line); }
-.btn.full { width: 100%; margin-top: 8px; }
-
-.foot { margin-top: 12px; text-align: center; font-size: 11.5px; }
-.foot a { color: var(--accent); text-decoration: none; }
 
 /* ---------------- 提示 / 保存反馈 ---------------- */
 .toast {
@@ -351,10 +154,6 @@ body.raw #poster {
   box-shadow: none;
 }
 body.raw .topbar,
-body.raw .pop,
-body.raw .mark,
-body.raw .frames,
-body.raw .tip,
 body.raw .overlay,
 body.raw .toast { display: none !important; }
 

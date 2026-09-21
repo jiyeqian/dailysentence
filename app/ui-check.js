@@ -1,6 +1,16 @@
-/* 交互回归：引导 / 点击即改 / 长按保存 / 顶栏按钮 / raw
+/* 交互回归（2026-09-21 标准版重构后重写）
+   断言的是新版面与新交互：
+     1) 浮框 / 控件仓库 / 引导 都不存在了（DOM 里查不到）
+     2) 标准版画布恒 1080×1920；长版仍按内容长高
+     3) 标准版元素固定为 bg / badge-date / en / cn / source / card
+     4) 信息卡距左 / 右 / 底三边等距 48
+     5) 双击句子元素 → 该元素从海报消失、其余上移，画布尺寸不变（不可逆，刷新恢复）
+     6) 单击顶部图片 / 信息卡 → 唤起相册选图；换图后版面几何不变
+     7) 长按海报 → 保存（toast 出现）
+     8) 顶栏四个按钮都在，背景比例可切换
+
    跑法：先 node server.js（8787），再
-   NODE_PATH=<node workspace>/node_modules node app/ui-check.js  */
+     NODE_PATH=<node workspace>/node_modules node app/ui-check.js  */
 const path = require('path');
 
 /* playwright 是外挂工具（不在 package.json 里），找不到就说明怎么借，而不是崩 */
@@ -17,179 +27,177 @@ try {
 }
 
 const OUT = path.join(__dirname, 'shots');
-const BASE = 'http://127.0.0.1:8787/?debug=1';
+const BASE = 'http://127.0.0.1:8787';
+const TEMPLATE = path.join(__dirname, 'public/assets/template.jpg');   /* 1179×2098 竖图 */
+
+let fails = 0;
+function ok(label, cond, extra) {
+  console.log((cond ? '  ✓ ' : '  ✗ ') + label + (extra ? '   ' + extra : ''));
+  if (!cond) fails++;
+}
 
 (async () => {
   const browser = await chromium.launch();
   const errors = [];
 
-  async function page(viewport) {
+  async function open(url, viewport = { width: 390, height: 844 }) {
     const p = await browser.newPage({ viewport, deviceScaleFactor: 2 });
     p.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-    p.on('pageerror', (e) => errors.push('pageerror: ' + e.message + '\n' + (e.stack || '').split('\n').slice(0, 4).join('\n')));
-    await p.goto(BASE, { waitUntil: 'networkidle' });
-    await p.waitForTimeout(2600);
+    p.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+    await p.goto(url, { waitUntil: 'load' });
+    await p.waitForFunction(() => window.__ds && window.__ds.state.layout, null, { timeout: 15000 });
     return p;
   }
 
-  const shot = (p, name) => p.screenshot({ path: path.join(OUT, name + '.png') });
+  const shot = (p, name) => p.screenshot({ path: path.join(OUT, name + '.png'), fullPage: true });
+  const info = (p) => p.evaluate(() => window.__ds.inspect());
+  const ids = (d) => d.items.map((it) => it.id);
+  const box = (d, id) => (d.items.find((it) => it.id === id) || {}).box;
 
-  const popTitle = (p) => p.evaluate(() => {
-    const pop = document.getElementById('pop');
-    return pop.hidden ? '' : document.getElementById('popTitle').textContent;
-  });
-
-  async function closePop(p) {
-    if (await p.isVisible('#popClose')) await p.click('#popClose');
-    await p.waitForTimeout(200);
-  }
-
-  /* 依据命中表算出某个区域的屏幕中心点，然后真的点下去 */
-  async function tapRegion(p, id, index = 0) {
-    await closePop(p);
+  /* 按命中表反查屏幕坐标，再真的点下去（画布坐标 → 屏幕坐标由页面自己换算） */
+  async function tap(p, regionId, index = 0, dbl = false) {
     const pt = await p.evaluate(({ id, index }) => {
       const list = (window.__ds.state.regions || []).filter((r) => r.id === id);
       const r = list[index];
       if (!r) return null;
       const c = window.__ds.toClient(r.x + r.w / 2, r.y + r.h / 2);
       return { x: Math.round(c.x), y: Math.round(c.y) };
-    }, { id, index });
-    if (!pt) throw new Error('找不到区域 ' + id);
-    await p.mouse.click(pt.x, pt.y);
-    await p.waitForTimeout(400);
+    }, { id: regionId, index });
+    if (!pt) throw new Error('找不到区域 ' + regionId);
+    if (dbl) await p.mouse.dblclick(pt.x, pt.y);
+    else await p.mouse.click(pt.x, pt.y);
+    await p.waitForTimeout(420);
     return pt;
   }
 
-  const log = (label, v) => console.log(label + ' → ' + (v || '(空)'));
-  /* hidden 的元素 textContent 照样有值，判断「露没露」必须看 hidden */
-  const srcTag = (p) =>
-    p.evaluate(() => {
-      const t = document.getElementById('srcTag');
-      return t.hidden ? '(隐藏)' : t.textContent;
-    });
+  /* ---------------- 标准版：结构与尺寸 ---------------- */
+  console.log('标准版 · 结构与尺寸');
+  let p = await open(BASE + '/?debug=1');
+  await p.waitForTimeout(600);
+  await shot(p, 's1-standard');
 
-  /* ---------- 手机 ---------- */
-  let p = await page({ width: 390, height: 844 });
-  await shot(p, 'm1-guide');                        // 首访引导：第一个呼吸框
-  await p.waitForTimeout(1700);
-  await shot(p, 'm2-guide-step2');
-  await p.waitForTimeout(3200);
-  await shot(p, 'm3-guide-step4');
-
-  let pt = await tapRegion(p, 'word', 0);
-  log('点标题关键词', await popTitle(p));
-  await shot(p, 'm4-pop-word');
-  console.log('  锚点屏幕坐标', JSON.stringify(pt));
-
-  await tapRegion(p, 'defs', 0);
-  log('点释义', await popTitle(p));
-  await shot(p, 'm5-pop-defs');
-
-  await tapRegion(p, 'card', 0);
-  log('点个人信息卡', await popTitle(p));
-  await shot(p, 'm6-pop-card');
-
-  await tapRegion(p, 'text', 0);
-  log('点句子', await popTitle(p));
-  await shot(p, 'm7-pop-text');
-
-  await closePop(p);
-  const blank = await p.evaluate(() => {
-    for (let y = 30; y < 1900; y += 20) {
-      for (const x of [540, 200, 880]) {
-        if (!window.__ds.hitTest(x, y)) {
-          const c = window.__ds.toClient(x, y);
-          return { x: Math.round(c.x), y: Math.round(c.y), cx: x, cy: y };
-        }
-      }
-    }
-    return null;
-  });
-  console.log('  空白点（画布坐标）', blank ? blank.cx + ',' + blank.cy : '没找到');
-  await p.mouse.click(blank.x, blank.y);
-  await p.waitForTimeout(400);
-  log('画面空白', (await popTitle(p)) || '(已收起)');
-  await shot(p, 'm8-pop-page');
-  await p.mouse.click(6, 420);                      // 海报之外
-  await p.waitForTimeout(400);
-  log('点海报外', (await popTitle(p)) || '(已收起)');
-
-  /* 往期存档：点日期徽标 → 列表 → 切到往期 → 回到今天 */
-  await tapRegion(p, 'archive', 0);
-  log('点日期徽标', await popTitle(p));
-  const archRows = await p.$$eval('#archList button', (bs) =>
-    bs.map((b) => b.textContent.trim().replace(/\s+/g, ' '))
+  const gone = await p.evaluate(() =>
+    ['pop', 'kit', 'frames', 'tip', 'mark', 'srcTag', 'segBg'].filter((id) => document.getElementById(id))
   );
-  console.log('  存档列表', archRows.join(' | ') || '(空)');
-  await shot(p, 'm10-archive-list');
+  ok('浮框 / 控件仓库 / 引导已从 DOM 移除', gone.length === 0, gone.length ? '仍存在: ' + gone.join(',') : '');
 
-  const picked = await p.evaluate(() => {
-    const b = [...document.querySelectorAll('#archList button')].find((x) => x.dataset.date);
-    if (!b) return '';
-    b.click();
-    return b.dataset.date;
-  });
-  await p.waitForTimeout(1400);
-  log('切到往期', picked);
-  log('  顶栏小标', await srcTag(p));
-  log('  画布日期', await p.evaluate(() => window.__ds.state.content.date));
-  await shot(p, 'm11-past-day');
+  let d = await info(p);
+  ok('画布恒 1080×1920', d.canvas.w === 1080 && d.canvas.h === 1920, d.canvas.w + '×' + d.canvas.h);
+  ok('标准版元素 = bg/badge-date/en/cn/source/card',
+    JSON.stringify(ids(d)) === JSON.stringify(['bg', 'badge-date', 'en', 'cn', 'source', 'card']),
+    ids(d).join(','));
+  ok('顶部图片区固定 648', box(d, 'bg')[3] === 648, 'h=' + box(d, 'bg')[3]);
 
-  if (picked) {
-    await p.click('#srcTag');
-    await p.waitForTimeout(700);
-    log('点顶栏小标', await popTitle(p));
-    const back = await p.evaluate(() => {
-      const b = [...document.querySelectorAll('#archList button')].find((x) => !x.dataset.date);
-      if (!b) return false;
-      b.click();
-      return true;
-    });
-    await p.waitForTimeout(1400);
-    log('回到今天', await p.evaluate(() => window.__ds.state.content.date) + ' (点中今天的行: ' + back + ')');
-    log('  顶栏小标', await srcTag(p));
-    await shot(p, 'm12-back-today');
+  const cb = box(d, 'card');
+  const mLeft = cb[0];
+  const mRight = 1080 - (cb[0] + cb[2]);
+  const mBottom = 1920 - (cb[1] + cb[3]);
+  ok('信息卡三边等距 48', mLeft === 48 && mRight === 48 && mBottom === 48,
+    `左${mLeft} 右${mRight} 底${mBottom}`);
+
+  /* ---------------- 双击隐藏 ---------------- */
+  console.log('标准版 · 双击隐藏');
+  const enY0 = box(d, 'en')[1];
+  await tap(p, 'badge-date', 0, true);
+  d = await info(p);
+  ok('双击日期胶囊后它从海报消失', !ids(d).includes('badge-date'));
+  ok('隐藏后画布仍是 1920', d.canvas.h === 1920);
+  ok('隐藏后其余内容自动上移', box(d, 'en')[1] < enY0, `en.y ${enY0} → ${box(d, 'en')[1]}`);
+  ok('隐藏后信息卡位置不变（贴底）', JSON.stringify(box(d, 'card')) === JSON.stringify(cb));
+  await shot(p, 's2-hide-date');
+
+  for (const id of ['en', 'cn', 'source']) {
+    await tap(p, id, 0, true);
+    d = await info(p);
+    ok('双击 ' + id + ' 后消失', !ids(d).includes(id));
   }
+  ok('四个都隐藏后只剩图片与卡片', JSON.stringify(ids(d)) === JSON.stringify(['bg', 'card']), ids(d).join(','));
+  ok('空文字块时画布仍是 1920', d.canvas.h === 1920);
+  await shot(p, 's3-all-hidden');
 
-  /* 长按 → 保存 */
-  await p.mouse.move(195, 200);
-  await p.mouse.down();
-  await p.waitForTimeout(720);
-  await p.mouse.up();
+  await p.reload({ waitUntil: 'load' });
+  await p.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  d = await info(p);
+  ok('刷新后回到初始状态', ids(d).length === 6, ids(d).join(','));
+
+  /* ---------------- 单击选图 ---------------- */
+  console.log('标准版 · 单击选图');
+  let chooser = p.waitForEvent('filechooser', { timeout: 5000 });
+  await tap(p, 'img');
+  ok('单击顶部图片唤起相册', !!(await chooser));
+  await (await chooser).setFiles(TEMPLATE);
   await p.waitForTimeout(700);
+  d = await info(p);
+  ok('换成竖图后画布仍是 1920', d.canvas.h === 1920, 'h=' + d.canvas.h);
+  ok('换成竖图后图片区仍是 648', box(d, 'bg')[3] === 648);
+  ok('换成竖图后信息卡没有被挤走', JSON.stringify(box(d, 'card')) === JSON.stringify(cb));
+  await shot(p, 's4-tall-photo');
+
+  chooser = p.waitForEvent('filechooser', { timeout: 5000 });
+  await tap(p, 'card');
+  ok('单击信息卡唤起相册', !!(await chooser));
+  await (await chooser).setFiles(TEMPLATE);
+  await p.waitForTimeout(700);
+  d = await info(p);
+  ok('换信息卡后三边仍是 48', box(d, 'card')[0] === 48 && 1920 - (box(d, 'card')[1] + box(d, 'card')[3]) === 48);
+  await shot(p, 's5-new-card');
+
+  /* ---------------- 长按保存 / 顶栏 ---------------- */
+  console.log('标准版 · 保存与顶栏');
+  const mid = await p.evaluate(() => {
+    const c = window.__ds.toClient(540, 1300);   /* 句子与卡片之间的空白处 */
+    return { x: Math.round(c.x), y: Math.round(c.y) };
+  });
+  await p.mouse.move(mid.x, mid.y);
+  await p.mouse.down();
+  await p.waitForTimeout(760);
+  await p.mouse.up();
+  await p.waitForTimeout(600);
   const toastText = await p.evaluate(() => {
     const t = document.getElementById('toast');
     return t.className.includes('show') ? t.textContent : '';
   });
-  log('长按海报', toastText);
-  await shot(p, 'm9-longpress');
+  ok('长按海报触发保存', !!toastText, toastText);
+  await shot(p, 's6-longpress');
 
-  /* 顶栏：朗读 / 背景比例 / 刷新 / 保存 都在 */
-  log('背景按钮文案', await p.textContent('#bgLabel'));
-  await p.close();
-
-  /* ---------- 桌面 ---------- */
-  p = await page({ width: 1280, height: 900 });
-  await shot(p, 'd1-guide');
-  await tapRegion(p, 'word', 0);
-  log('桌面点关键词', await popTitle(p));
-  await shot(p, 'd2-pop-word');
-  await tapRegion(p, 'defs', 0);
-  await shot(p, 'd3-pop-defs');
+  const btns = await p.evaluate(() => ['btnPlay', 'btnBg', 'btnRefresh', 'btnSave'].map((id) => !!document.getElementById(id)));
+  ok('顶栏四个按钮都在', btns.every(Boolean), btns.join(','));
+  const bg0 = await p.textContent('#bgLabel');
   await p.click('#btnBg');
-  await p.waitForTimeout(600);
-  log('顶栏切背景', await p.textContent('#bgLabel'));
-  await shot(p, 'd4-bg-cover');
+  await p.waitForTimeout(500);
+  const bg1 = await p.textContent('#bgLabel');
+  ok('背景比例可切换', bg0 !== bg1, bg0 + ' → ' + bg1);
+  ok('铺满模式下画布仍是 1920', (await info(p)).canvas.h === 1920);
+
+  /* ---------------- 桌面视口 ---------------- */
+  console.log('桌面视口');
+  const dp = await open(BASE + '/?debug=1', { width: 1280, height: 900 });
+  await dp.waitForTimeout(600);
+  await shot(dp, 'd1-standard');
+  ok('桌面下画布仍是 1080×1920', (await info(dp)).canvas.h === 1920);
+  await dp.close();
   await p.close();
 
-  /* ---------- raw ---------- */
+  /* ---------------- 长版：本阶段必须没被动过 ---------------- */
+  console.log('长版（应保持旧版面）');
+  const lp = await open(BASE + '/?debug=1&long=1');
+  await lp.waitForTimeout(800);
+  const ld = await info(lp);
+  ok('长版仍有单词卡与关键词', ids(ld).includes('panel') && ids(ld).includes('title'), ids(ld).join(','));
+  ok('长版仍按内容长高（≥1920）', ld.canvas.h >= 1920, 'h=' + ld.canvas.h);
+  await shot(lp, 'l1-long');
+  await lp.close();
+
+  /* ---------------- raw ---------------- */
   const rp = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
   rp.on('pageerror', (e) => errors.push('raw pageerror: ' + e.message));
-  await rp.goto('http://127.0.0.1:8787/?raw=1', { waitUntil: 'networkidle' });
+  await rp.goto(BASE + '/?raw=1', { waitUntil: 'load' });
   await rp.waitForTimeout(2600);
   await shot(rp, 'raw');
   await rp.close();
 
   await browser.close();
-  console.log(errors.length ? 'CONSOLE ERRORS:\n' + errors.join('\n') : 'no console errors');
+  console.log(errors.length ? '\nCONSOLE ERRORS:\n' + errors.join('\n') : '\nno console errors');
+  console.log(fails ? `\nFAIL: ${fails} 项断言未通过` : '\n全部断言通过');
+  process.exit(fails || errors.length ? 1 : 0);
 })().catch((e) => { console.error('FAIL', e); process.exit(1); });

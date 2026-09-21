@@ -19,8 +19,17 @@ const F_MONO = 'ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospac
 const MX = 84;            // 文字左右安全边距
 const TOP_PAD = 96;       // 文字块距海报顶端
 const BOTTOM_PAD = 84;    // 信息卡距海报底端
-const GAP_TEXT_PANEL = 56;  // 文字块 → 单词卡片
-const GAP_PANEL_CARD = 46;  // 单词卡片 → 信息卡
+const GAP_TEXT_PANEL = 56;  // 文字块 → 单词卡片（长版）
+const GAP_PANEL_CARD = 46;  // 单词卡片 → 信息卡（长版）
+
+/* 标准版固定版面：三段式（顶部图片 → 句子 → 信息卡），画布恒 1080×1920 */
+const IMG_BLOCK_H = 648;      // 顶部图片区高度：图片在这一块里 cover / contain
+const CARD_PAD = 48;          // 信息卡距左 / 右 / 底，三边等距
+const CARD_H = 496;           // 信息卡高度（沿用模板比例换算出的大小）
+const GAP_IMG_TEXT = 64;      // 顶部图片区 → 文字块
+const GAP_TEXT_CARD = 48;     // 文字块 → 信息卡（缩字时保留的最小留白）
+const TEXT_SCALE_MIN = 0.6;   // 自动缩字下限：缩到这里仍装不下就允许溢出
+const DBL_MS = 300;           // 双击判定窗口
 
 const POS_COLOR = {
   'n.': '#2563eb', 'v.': '#7c3aed', 'vt.': '#7c3aed', 'vi.': '#7c3aed',
@@ -37,12 +46,8 @@ const state = {
   layout: null,         // 最近一次渲染的版面（点击命中用）
   regions: [],          // 可点区域表（画布坐标）
   annots: [],           // 版面标注表（画布坐标，仅 ?debug=1 登记）
-  candidates: [],       // 上游缺解析时，从句子挑出的关键词候选（Top 3）
-  selectedWord: '',     // 当前选中的候选关键词
-  picking: false,       // 正在查词典，避免重复点击
-  lookupSeq: 0,         // 查词序号：晚到的旧结果直接丢掉
-  defsWord: '',         // 当前释义属于哪个关键词（用来判断改词后是否过期）
-  defsManual: false,    // 释义被手改过，就别再自动覆盖
+  /* 双击隐藏的元素：只在内存里，刷新即恢复（标准版才有这套交互） */
+  hidden: { date: false, en: false, cn: false, source: false },
   viewDate: '',         // 正在看哪一天（''=今天）；往日数据来自服务端存档
   archived: false,      // 这份数据是从存档来的（不是上游实时）
   archiveOnly: false,   // 上游挂了，整份海报都是存档顶上的
@@ -57,11 +62,7 @@ const state = {
   ratios: { ...DEFAULT_RATIOS },
   opts: {
     bgStyle: 'natural',
-    fontScale: 1,
-    showDate: true,
-    showRule: true,
-    showSource: true,
-    longPoster: false,
+    longPoster: false,    // true = 长版海报（?long=1），本阶段保持旧版面不动
   },
 };
 
@@ -247,12 +248,12 @@ async function loadDaily(force, date) {
      往日存档不重跑这条链路：那是当时抓到的样子，重查词典既没意义也慢。 */
   const missing = !!data.missing;
   const fb = data.fallback || null;
-  state.candidates = state.archived
+  /* 上游没给关键词时，用服务端挑的候选词兜底（Top 1） */
+  const cands = state.archived
     ? []
-    : (Array.isArray(data.candidates) ? data.candidates.slice() : []);
+    : (Array.isArray(data.candidates) ? data.candidates : []);
   const autoWord =
-    data.word || (fb && fb.query) || (state.candidates[0] && state.candidates[0].word) || '';
-  state.selectedWord = autoWord;
+    data.word || (fb && fb.query) || (cands[0] && cands[0].word) || '';
 
   state.content = {
     word: autoWord,
@@ -269,9 +270,6 @@ async function loadDaily(force, date) {
     dateCN: data.dateCN || '',
     autoKind: missing ? (fb ? 'dict' : (autoWord ? 'guess' : '')) : '',
   };
-  /* 释义跟着哪个关键词走、有没有被手改 —— 供「改词自动重查」判断 */
-  state.defsWord = missing ? (fb ? autoWord : '') : (data.word || '');
-  state.defsManual = false;
   /* 便于分享 / 调试：允许用 ?word=&en=&cn= 覆盖文案 */
   ['word', 'en', 'cn', 'source'].forEach((k) => {
     const v = QS.get(k);
@@ -289,138 +287,8 @@ async function loadDaily(force, date) {
     });
     state.content.phonetic = '';
   }
-  fillForm();
-  renderCandidates();
-  updateSrcTag();
-  if (missing && !state.archived) {
-    const phr = fb && fb.lemma ? '已按原形 ' + fb.lemma + ' 取释义。' : '已用词典补全音标与释义。';
-    setFixNote(
-      fb
-        ? '欧路今天没给出「解析」内容，已按句意自动选词，' + phr + '点其它候选可切换：'
-        : '欧路今天没给出「解析」内容，词典也没查到释义。已按句意自动选词，可点其它候选重试，或在下面手填：'
-    );
-  }
-  $('linkSource').href = data.permalink || 'https://dict.eudic.net/home/dailysentence';
-
   await loadBackground(data.image);
   render();
-}
-
-/* ------------------- 上游缺解析时的关键词补全 ------------------- */
-
-/** 画出候选关键词胶囊；没有候选就整块隐藏 */
-function renderCandidates() {
-  const card = $('fixCard');
-  const list = state.candidates || [];
-  const on = !state.archived && !!(state.apiData && state.apiData.missing && (list.length || state.selectedWord));
-  if (!card) return;
-  card.hidden = !on;
-  if (!on) return;
-
-  const seg = $('segWord');
-  seg.innerHTML = '';
-  const items = list.length ? list.slice() : [{ word: state.selectedWord }];
-  if (state.selectedWord && !items.some((c) => c.word === state.selectedWord)) {
-    items.unshift({ word: state.selectedWord });
-  }
-  items.forEach((c) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.dataset.v = c.word;
-    b.textContent = c.word;
-    b.classList.toggle('on', c.word === state.selectedWord);
-    seg.appendChild(b);
-  });
-}
-
-function setFixNote(text) {
-  const n = $('fixNote');
-  if (n) n.textContent = text;
-}
-
-/** 选一个候选关键词：重置卡片内容 → 查词典 → 回填音标 / 释义 / 例句 */
-async function selectCandidate(word) {
-  if (!word || state.picking) return;
-  state.picking = true;
-  state.selectedWord = word;
-  setFixNote('正在查词典补全「' + word + '」…');
-  await applyLookup(word, { auto: true });
-  state.picking = false;
-}
-
-/**
- * 查询词典并把结果回填到单词卡片。
- *
- * 关键词一变，旧词的音标 / 释义 / 例句立刻就过期了，所以这里先把它们清空，
- * 避免「标题写着 never、释义还留着 deceive」这种错配。
- * auto = 关键词是自动挑的（不是用户手敲的），查不到时决定要不要留「自动选词」标记。
- */
-async function applyLookup(word, opts = {}) {
-  const auto = !!opts.auto;
-  const c = state.content;
-  const seq = ++state.lookupSeq;
-
-  c.word = word;
-  c.phonetic = '';
-  c.phonetics = [];
-  c.defs = [];
-  c.examples = [];
-  c.autoKind = auto ? 'guess' : '';
-  state.defsWord = '';
-  state.defsManual = false;
-  renderCandidates();
-  fillForm();
-  scheduleRender();
-
-  let r = null;
-  try {
-    const res = await fetch('/api/lookup?word=' + encodeURIComponent(word), { cache: 'no-store' });
-    r = await res.json();
-  } catch (e) {
-    r = null;
-  }
-  /* 等待期间又换了词 / 输入框已被改回别的内容，这次的结果作废 */
-  if (seq !== state.lookupSeq) return false;
-  if ((($('fWord').value) || '').trim() !== word) return false;
-
-  const missing = !!(state.apiData && state.apiData.missing);
-  if (r && r.ok) {
-    c.phonetics = Array.isArray(r.phonetics) ? r.phonetics : [];
-    c.defs = Array.isArray(r.definitions) ? r.definitions : [];
-    c.examples = Array.isArray(r.examples) ? r.examples : [];
-    c.autoKind = 'dict';
-    state.defsWord = word;
-    if (missing) setFixNote(r.lemma ? '已按原形 ' + r.lemma + ' 取到释义。' : '已用词典内容补全。');
-  } else {
-    c.autoKind = auto ? 'guess' : '';
-    if (missing) setFixNote('词典没查到「' + word + '」，海报上只显示关键词，释义可在下面手填。');
-  }
-  fillForm();
-  scheduleRender();
-  return !!(r && r.ok);
-}
-
-/** 手敲关键词后自动重查词典：否则释义 / 例句还留着上一个词的 */
-function autoLookupTypedWord() {
-  const w = ($('fWord').value || '').trim();
-  if (w.length < 3) return;        /* 多半还没敲完 */
-  if (w === state.defsWord) return; /* 释义已经是这个词的 */
-  if (state.picking || !state.apiData) return;
-  /* 释义是手填的就不覆盖，但音标 / 例句一定属于上一个词，清掉免得张冠李戴 */
-  if (state.defsManual) {
-    const c = state.content;
-    if (c.phonetics.length || c.phonetic || c.examples.length) {
-      c.phonetics = [];
-      c.phonetic = '';
-      c.examples = [];
-      fillForm();
-      scheduleRender();
-    }
-    return;
-  }
-  applyLookup(w, { auto: false }).then((ok) => {
-    toast(ok ? '已按词典更新「' + w + '」的音标与释义' : '词典没查到「' + w + '」，释义可在下面手填');
-  });
 }
 
 function safeGet(k) {
@@ -462,8 +330,8 @@ function loadImage(src) {
 async function loadTemplate(src) {
   const im = await loadImage(src);
   state.template = im;
+  /* 识别只用来决定「从这张图里抠哪一块」；卡片自身位置与尺寸是固定的 */
   detectCard(im);
-  syncRatioSliders();
 }
 
 /**
@@ -534,21 +402,6 @@ function detectCard(img) {
   }
 }
 
-function syncRatioSliders() {
-  const r = state.ratios;
-  $('rTop').value = Math.round(r.T * 100);
-  $('rH').value = Math.round((r.B - r.T) * 100);
-  $('rM').value = Math.round(r.L * 100);
-  updateRangeLabels();
-}
-
-function updateRangeLabels() {
-  $('vTop').textContent = $('rTop').value + '%';
-  $('vH').textContent = $('rH').value + '%';
-  $('vM').textContent = $('rM').value + '%';
-  $('vFont').textContent = $('rFont').value + '%';
-}
-
 /* ============================== 布局 ================================ */
 
 const T = (size, weight, family) => `${weight} ${Math.round(size)}px ${family}`;
@@ -560,21 +413,66 @@ function naturalImageH() {
   return Math.round((CW * im.height) / im.width);
 }
 
-/** 文字块起始 y：原比例模式让位给顶部图片 */
+/** 长版文字块起始 y：原比例模式让位给顶部图片 */
 function textTopY() {
   if (state.opts.bgStyle === 'natural' && state.bgImage) return naturalImageH() + 64;
   return TOP_PAD;
 }
 
 /**
- * 计算整张海报的版面。
- * 从上到下三段流式排布：文字块（句子 + 出处） → 单词卡片 → 个人信息卡片。
- * 高度取「内容所需高度」与 1920 的较大者：标准版通常就是 1920，装不下自动长高；
- * 长版海报会带上例句，因此更高。
+ * 计算整张海报的版面。两条路线：
+ *
+ * - 标准版（默认）：三段式固定版面 —— 顶部图片区（`IMG_BLOCK_H`）→ 句子 → 信息卡。
+ *   画布恒 1080×1920；句子太长时**自动缩小文字块字号**装箱，绝不长高。
+ * - 长版（`?long=1`）：沿用原来的流式版面（含单词卡与例句），按内容需要长高。
  */
 function computeLayout(ctx) {
-  /* 版面是流式的，不会互相压盖，所以不做自动缩字：
-     字号完全交给「字号」滑块，装不下时按需要长高（标准版下限 1920） */
+  return state.opts.longPoster ? computeLayoutLong(ctx) : computeLayoutStandard(ctx);
+}
+
+/** 标准版：固定 1080×1920，三段式 */
+function computeLayoutStandard(ctx) {
+  CH = CH_MIN;
+
+  /* 信息卡：尺寸固定，距左 / 右 / 底三边等距 */
+  const card = {
+    x: CARD_PAD,
+    y: CH - CARD_PAD - CARD_H,
+    w: CW - 2 * CARD_PAD,
+    h: CARD_H,
+    shifted: false,
+  };
+
+  const textTop = IMG_BLOCK_H + GAP_IMG_TEXT;
+  const avail = card.y - GAP_TEXT_CARD - textTop;
+
+  /* 自动缩字：只缩文字块，缩到装得下为止；到下限还超就允许溢出，版面永不长高 */
+  let scale = 1;
+  let text = buildTextBlockStandard(ctx, scale);
+  while (text.total > avail && scale > TEXT_SCALE_MIN) {
+    scale = Math.max(TEXT_SCALE_MIN, Math.round((scale - 0.02) * 100) / 100);
+    text = buildTextBlockStandard(ctx, scale);
+  }
+
+  return {
+    K: scale,
+    textTop,
+    textBottom: textTop + text.total,
+    title: null,              /* 标准版没有关键词大标题 */
+    rule: { on: false },      /* 标准版没有标题分隔线 */
+    date: text.date,
+    en: text.en,
+    cn: text.cn,
+    source: text.source,
+    panel: { hidden: true, x: card.x, y: card.y, w: card.w, h: 0, padX: 0, padY: 0, row1H: 0, wordW: 0, defItems: [], exItems: [], badge: null },
+    card,
+    ch: CH,
+    imgBlock: { y: 0, h: IMG_BLOCK_H },
+  };
+}
+
+/** 长版：原有流式版面（单词卡 + 例句），按内容长高 */
+function computeLayoutLong(ctx) {
   const M = measureAll(ctx, 1);
 
   CH = Math.max(CH_MIN, Math.ceil(M.total / 2) * 2);
@@ -590,17 +488,19 @@ function computeLayout(ctx) {
     textBottom: M.textBottom,
     title: M.text.title,
     rule: M.text.rule,
+    date: M.text.date,
     en: M.text.en,
     cn: M.text.cn,
     source: M.text.source,
     panel: M.panel,
     card,
     ch: CH,
+    imgBlock: null,
   };
 }
 
 function measureAll(ctx, scale) {
-  const K = state.opts.fontScale * scale;
+  const K = scale;
   const textTop = textTopY();
 
   const text = buildTextBlock(ctx, K);
@@ -617,13 +517,13 @@ function measureAll(ctx, scale) {
   };
 }
 
-/** 顶部文字块：关键词标题 + 分隔线 + 英文 + 中文 + 出处 */
+/** 长版文字块：关键词标题 + 分隔线 + 英文 + 中文 + 出处 */
 function buildTextBlock(ctx, K) {
   const maxW = CW - 2 * MX;
 
   /* 日期徽标占位 → 标题可用宽度 */
   let badgeW = 0;
-  if (state.opts.showDate && state.content.date) {
+  if (state.content.date) {
     ctx.font = T(25, 600, F_SANS);
     badgeW = measureSpaced(ctx, state.content.date, 2.5) + 56;
   }
@@ -640,7 +540,7 @@ function buildTextBlock(ctx, K) {
   const titleH = ts * 1.12;
 
   /* 分隔线 */
-  const rule = { on: state.opts.showRule, gapTop: 30, h: 4, w: 86, gapBottom: 32 };
+  const rule = { on: true, gapTop: 30, h: 4, w: 86, gapBottom: 32 };
   const afterTitle = titleH + (rule.on ? rule.gapTop + rule.h + rule.gapBottom : 26);
 
   /* 英文 */
@@ -661,15 +561,66 @@ function buildTextBlock(ctx, K) {
 
   /* 出处：紧跟在句子下方，不再放进单词卡片 */
   const sourceSize = 29 * K;
-  const sourceOn = state.opts.showSource && !!state.content.source;
+  const sourceOn = !!state.content.source;
   const sourceY = cnBottom + (sourceOn ? 30 * K : 0);
 
   return {
     total: sourceY + (sourceOn ? sourceSize * 1.4 : 0),
     title: { size: ts, h: titleH, text: word, badgeW },
     rule: Object.assign({}, rule, { y: titleH + rule.gapTop }),
-    en: { size: enSize, lh: enLH, lines: enLines, y: enY },
-    cn: { size: cnSize, lh: cnLH, lines: cnLines, y: cnY },
+    date: { on: !!state.content.date, y: 4, h: 52, w: badgeW },
+    en: { on: true, size: enSize, lh: enLH, lines: enLines, y: enY },
+    cn: { on: true, size: cnSize, lh: cnLH, lines: cnLines, y: cnY },
+    source: { on: sourceOn, size: sourceSize, y: sourceY, text: state.content.source },
+  };
+}
+
+/**
+ * 标准版文字块：日期胶囊 → 英文 → 中文 → 出处。
+ * 没有关键词大标题与分隔线；被双击隐藏的元素直接不参与排版，其余内容自动上移补齐。
+ * 返回的 y 都是「相对文字块顶端」的偏移，与长版同一套画法。
+ */
+function buildTextBlockStandard(ctx, K) {
+  const maxW = CW - 2 * MX;
+  const h = state.hidden;
+
+  /* 日期胶囊：自己占一行，靠右 */
+  let date = { on: false, y: 0, h: 52, w: 0 };
+  if (!h.date && state.content.date) {
+    ctx.font = T(25, 600, F_SANS);
+    date = { on: true, y: 0, h: 52, w: measureSpaced(ctx, state.content.date, 2.5) + 56 };
+  }
+  let y = date.on ? date.h + 34 * K : 0;
+
+  /* 英文 */
+  const enSize = 42 * K;
+  const enLH = enSize * 1.32;
+  const enOn = !h.en && !!state.content.en;
+  ctx.font = T(enSize, 400, F_SANS);
+  const enLines = enOn ? wrapText(ctx, state.content.en, maxW) : [];
+  const enY = y;
+  if (enOn) y = enY + enLines.length * enLH;
+
+  /* 中文 */
+  const cnSize = 42 * K;
+  const cnLH = cnSize * 1.46;
+  const cnOn = !h.cn && !!state.content.cn;
+  ctx.font = T(cnSize, 400, F_SANS);
+  const cnLines = cnOn ? wrapText(ctx, state.content.cn, maxW) : [];
+  const cnY = y + (enOn && cnOn ? 34 * K : 0);
+  if (cnOn) y = cnY + cnLines.length * cnLH;
+
+  /* 出处 */
+  const sourceSize = 29 * K;
+  const sourceOn = !h.source && !!state.content.source;
+  const sourceY = y + (sourceOn ? 30 * K : 0);
+  if (sourceOn) y = sourceY + sourceSize * 1.4;
+
+  return {
+    total: y,
+    date,
+    en: { on: enOn, size: enSize, lh: enLH, lines: enLines, y: enY },
+    cn: { on: cnOn, size: cnSize, lh: cnLH, lines: cnLines, y: cnY },
     source: { on: sourceOn, size: sourceSize, y: sourceY, text: state.content.source },
   };
 }
@@ -872,16 +823,16 @@ function buildAnnots(ctx, L) {
   const maxW = CW - 2 * MX;
   const T0 = L.textTop;
 
-  /* ---- 顶部文字块 ---- */
-  const t = L.title;
-  ctx.font = T(t.size, 700, F_SERIF);
-  push('title', '大标题关键词', MX, T0, Math.min(ctx.measureText(t.text).width, maxW), t.h,
-    { font: r1(t.size), color: '#ffffff', text: t.text });
+  /* ---- 顶部文字块（标准版没有大标题与分隔线） ---- */
+  if (L.title) {
+    const t = L.title;
+    ctx.font = T(t.size, 700, F_SERIF);
+    push('title', '大标题关键词', MX, T0, Math.min(ctx.measureText(t.text).width, maxW), t.h,
+      { font: r1(t.size), color: '#ffffff', text: t.text });
+  }
 
-  if (state.opts.showDate && c.date) {
-    ctx.font = T(25, 600, F_SANS);
-    const pw = measureSpaced(ctx, c.date, 2.5) + 56;
-    push('badge-date', '日期胶囊', CW - MX - pw, T0 + 4, pw, 52,
+  if (L.date && L.date.on) {
+    push('badge-date', '日期胶囊', CW - MX - L.date.w, T0 + L.date.y, L.date.w, L.date.h,
       { font: 25, color: 'rgba(255,255,255,0.94)', text: c.date });
   }
 
@@ -890,13 +841,17 @@ function buildAnnots(ctx, L) {
       { color: 'rgba(255,255,255,0.95)' });
   }
 
-  push('en', '英文句', MX, T0 + L.en.y,
-    blockW(L.en.lines, L.en.size, 400, F_SANS), L.en.lines.length * L.en.lh,
-    { font: r1(L.en.size), color: 'rgba(255,255,255,0.97)', text: L.en.lines.join(' ') });
+  if (L.en.on) {
+    push('en', '英文句', MX, T0 + L.en.y,
+      blockW(L.en.lines, L.en.size, 400, F_SANS), L.en.lines.length * L.en.lh,
+      { font: r1(L.en.size), color: 'rgba(255,255,255,0.97)', text: L.en.lines.join(' ') });
+  }
 
-  push('cn', '中文句', MX, T0 + L.cn.y,
-    blockW(L.cn.lines, L.cn.size, 400, F_SANS), L.cn.lines.length * L.cn.lh,
-    { font: r1(L.cn.size), color: 'rgba(255,255,255,0.88)', text: L.cn.lines.join('') });
+  if (L.cn.on) {
+    push('cn', '中文句', MX, T0 + L.cn.y,
+      blockW(L.cn.lines, L.cn.size, 400, F_SANS), L.cn.lines.length * L.cn.lh,
+      { font: r1(L.cn.size), color: 'rgba(255,255,255,0.88)', text: L.cn.lines.join('') });
+  }
 
   if (L.source.on) {
     const st = '—— ' + L.source.text;
@@ -966,12 +921,17 @@ function buildAnnots(ctx, L) {
 
   if (state.bgImage) {
     const natural = state.opts.bgStyle === 'natural';
-    push('bg', '背景图区（' + (natural ? '原比例' : '铺满') + '）', 0, 0, CW,
-      natural ? naturalImageH() : CH, { kind: 'bg' });
+    const label = '背景图区（' + (natural ? '原比例' : '铺满') + '）';
+    /* 标准版：图片只占固定的顶部图片区 */
+    push('bg', label, 0, 0, CW,
+      L.imgBlock ? L.imgBlock.h : (natural ? naturalImageH() : CH), { kind: 'bg' });
   }
 
-  push('safe-l', '左安全边距', 0, 0, MX, CH, { kind: 'guide' });
-  push('safe-r', '右安全边距', CW - MX, 0, MX, CH, { kind: 'guide' });
+  /* 「文字安全边距」是长版的概念；标准版的对齐基准是信息卡的 48px 边距 */
+  if (!L.imgBlock) {
+    push('safe-l', '左安全边距', 0, 0, MX, CH, { kind: 'guide' });
+    push('safe-r', '右安全边距', CW - MX, 0, MX, CH, { kind: 'guide' });
+  }
 
   /* 编号 = 版面从上到下的顺序，报号不用来回找 */
   A.sort((a, b) => (a.box[1] - b.box[1]) || (a.box[0] - b.box[0]));
@@ -989,10 +949,19 @@ function buildGaps(L) {
   const P = L.panel;
   const textBottom = L.textBottom;
 
-  add('margin-x', '左右安全边距', MX);
-  add('top-pad', '海报顶 → 文字块顶', L.textTop);
-  add('gap-title-en', '大标题 → 英文句', L.en.y - L.title.h);
-  if (P.hidden) {
+  if (L.imgBlock) {
+    /* 标准版：顶部图片区是固定的一段 */
+    add('img-h', '顶部图片区高度', L.imgBlock.h);
+    add('gap-img-text', '图片区 → 文字块', L.textTop - (L.imgBlock.y + L.imgBlock.h));
+    add('margin-x', '信息卡距左右', L.card.x);
+  } else {
+    add('margin-x', '左右安全边距', MX);
+    add('top-pad', '海报顶 → 文字块顶', L.textTop);
+    if (L.title && L.date && L.date.on) {
+      add('gap-title-en', '大标题 → 英文句', L.en.y - L.title.h);
+    }
+  }
+  if (P && P.hidden) {
     add('gap-text-card', '文字块 → 信息卡', L.card.y - textBottom);
   } else {
     add('gap-text-panel', '文字块 → 单词卡', P.y - textBottom);
@@ -1060,12 +1029,6 @@ function render() {
   state.regions = buildHitRegions(L);
   /* 版面标注：给人看的编号图与给 AI 读的坐标清单共用这份数据（仅调试模式） */
   if (DEBUG) state.annots = buildAnnots(ctx, L);
-  if (guide.active) guide.repaint();
-  /* 正在编辑时版面变了（比如改了句子），让高亮框跟着元素走 */
-  if (popId && isPopOpen()) {
-    const follow = (state.regions || []).find((r) => r.id === popId);
-    if (follow) { popAnchor = follow; showMark(follow); }
-  }
   return L;
 }
 
@@ -1078,7 +1041,26 @@ function drawBackground(ctx, L) {
     return;
   }
 
-  /* 原比例：宽度铺满、顶端与海报顶端对齐，图片完整不裁切 */
+  /* 标准版：顶部图片区高度固定，图片只在这一块里排 ——
+     铺满 = 等比裁切填满整块（竖图也不会顶掉下面的句子）；
+     原比例 = 完整装进整块、居中，多余处留底色 */
+  if (L.imgBlock) {
+    darkBase(ctx);
+    const blockH = L.imgBlock.h;
+    let drawH = blockH;
+    if (state.opts.bgStyle === 'cover') {
+      drawCover(ctx, im, 0, 0, CW, blockH);
+    } else {
+      const s = Math.min(CW / im.width, blockH / im.height);
+      const w = im.width * s;
+      drawH = im.height * s;
+      ctx.drawImage(im, (CW - w) / 2, 0, w, drawH);
+    }
+    fadeImageBottom(ctx, Math.min(blockH, drawH));
+    return;
+  }
+
+  /* 长版：原比例 = 宽度铺满、顶端与海报顶端对齐，图片完整不裁切 */
   if (state.opts.bgStyle === 'natural') {
     darkBase(ctx);
     const ih = naturalImageH();
@@ -1115,7 +1097,23 @@ function fadeImageBottom(ctx, ih) {
 
 /** 顶部压暗 + 底部压暗 + 四角暗角 */
 function drawScrim(ctx, L) {
-  /* 原比例：顶部图片保持干净，只在其下方轻压暗 + 底部收边 */
+  /* 标准版：句子与卡片都落在底色上，不需要压暗图片；只做底部收边与暗角 */
+  if (L.imgBlock) {
+    const g = ctx.createLinearGradient(0, CH - 640, 0, CH);
+    g.addColorStop(0, 'rgba(6,11,22,0)');
+    g.addColorStop(1, 'rgba(6,11,22,0.5)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, CH - 640, CW, 640);
+
+    const v0 = ctx.createRadialGradient(CW / 2, CH * 0.44, CW * 0.26, CW / 2, CH * 0.5, CH * 0.78);
+    v0.addColorStop(0, 'rgba(0,0,0,0)');
+    v0.addColorStop(1, 'rgba(0,0,0,0.3)');
+    ctx.fillStyle = v0;
+    ctx.fillRect(0, 0, CW, CH);
+    return;
+  }
+
+  /* 长版 · 原比例：顶部图片保持干净，只在其下方轻压暗 + 底部收边 */
   if (state.opts.bgStyle === 'natural' && state.bgImage) {
     const ih = naturalImageH();
     ctx.fillStyle = 'rgba(6,11,22,0.06)';
@@ -1175,15 +1173,14 @@ function drawTopText(ctx, L) {
     ctx.shadowOffsetY = 0;
   };
 
-  /* 日期徽标 */
-  if (state.opts.showDate && state.content.date) {
+  /* 日期胶囊：标准版自己占一行，长版与标题同行 */
+  if (L.date && L.date.on) {
     const label = state.content.date;
     ctx.font = T(25, 600, F_SANS);
-    const tw = measureSpaced(ctx, label, 2.5);
-    const pw = tw + 56;
-    const ph = 52;
+    const pw = L.date.w;
+    const ph = L.date.h;
     const px = CW - MX - pw;
-    const py = L.textTop + 4;
+    const py = L.textTop + L.date.y;
     ctx.save();
     roundRect(ctx, px, py, pw, ph, ph / 2);
     ctx.fillStyle = 'rgba(255,255,255,0.14)';
@@ -1198,19 +1195,21 @@ function drawTopText(ctx, L) {
     ctx.textBaseline = 'alphabetic';
   }
 
-  /* 标题 */
-  const t = L.title;
-  const ty = L.textTop + t.size * 0.86;
-  ctx.save();
-  ctx.font = T(t.size, 700, F_SERIF);
-  ctx.fillStyle = '#ffffff';
-  shadow();
-  ctx.strokeStyle = 'rgba(255,255,255,0.16)';
-  ctx.lineWidth = t.size * 0.055;
-  ctx.lineJoin = 'round';
-  ctx.strokeText(t.text, MX, ty);
-  ctx.fillText(t.text, MX, ty);
-  ctx.restore();
+  /* 关键词大标题：只有长版有 */
+  if (L.title) {
+    const t = L.title;
+    const ty = L.textTop + t.size * 0.86;
+    ctx.save();
+    ctx.font = T(t.size, 700, F_SERIF);
+    ctx.fillStyle = '#ffffff';
+    shadow();
+    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+    ctx.lineWidth = t.size * 0.055;
+    ctx.lineJoin = 'round';
+    ctx.strokeText(t.text, MX, ty);
+    ctx.fillText(t.text, MX, ty);
+    ctx.restore();
+  }
 
   /* 分隔线 */
   if (L.rule.on) {
@@ -1446,33 +1445,6 @@ function hexA(hex, a) {
 
 /* ============================== 交互 ================================ */
 
-const els = {};
-
-function fillForm() {
-  const c = state.content;
-  $('fWord').value = c.word;
-  $('fEn').value = c.en;
-  $('fCn').value = c.cn;
-  $('fDefs').value = c.defs.map((d) => d.pos + d.text).join('\n');
-  $('fSource').value = c.source;
-}
-
-function readForm() {
-  const c = state.content;
-  c.word = $('fWord').value.trim();
-  c.en = $('fEn').value.trim();
-  c.cn = $('fCn').value.trim();
-  c.source = $('fSource').value.trim();
-  c.defs = $('fDefs')
-    .value.split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((l) => {
-      const m = l.match(/^([a-zA-Z]{1,6}\.)\s*(.*)$/);
-      return m ? { pos: m[1].toLowerCase(), text: m[2].trim() } : { pos: '', text: l };
-    });
-}
-
 let renderTimer = null;
 function scheduleRender() {
   if (renderTimer) return;
@@ -1482,34 +1454,8 @@ function scheduleRender() {
   });
 }
 
-function bindUI() {
-  let inputTimer = null;
-  let wordTimer = null;
-  ['fWord', 'fEn', 'fCn', 'fDefs', 'fSource'].forEach((id) => {
-    $(id).addEventListener('input', () => {
-      /* 亲手改过关键词，就不再是「自动选的」了，角标跟着撤掉 */
-      if (id === 'fWord') state.content.autoKind = '';
-      /* 亲手写过释义，就别再拿词典结果盖掉 */
-      if (id === 'fDefs') state.defsManual = true;
-      clearTimeout(inputTimer);
-      inputTimer = setTimeout(() => {
-        readForm();
-        scheduleRender();
-      }, 220);
-      /* 改完关键词等一会儿没再动，就自动重查词典（释义/例句本来属于上一个词） */
-      if (id === 'fWord') {
-        clearTimeout(wordTimer);
-        wordTimer = setTimeout(autoLookupTypedWord, 700);
-      }
-    });
-  });
-
-  $('segWord').addEventListener('click', (e) => {
-    const b = e.target.closest('button');
-    if (!b || state.picking) return;
-    selectCandidate(b.dataset.v);
-  });
-
+/** 顶栏四枚按钮 + 两个相册选图入口（界面上再没有别的控件） */
+function bindTopbar() {
   $('btnRefresh').addEventListener('click', async () => {
     const past = !!(state.viewDate && state.viewDate !== todayISO());
     $('btnRefresh').classList.add('spin');
@@ -1518,77 +1464,29 @@ function bindUI() {
     if (past) toast('已回到今天');
   });
 
-  /* 顶栏小标 / 日期徽标 → 往期存档 */
-  $('srcTag').addEventListener('click', openArchive);
-  $('archList').addEventListener('click', (e) => {
-    const b = e.target.closest('button');
-    if (b) gotoDate(b.dataset.date || '');
+  /* 相册选图：顶部图片 */
+  $('fBgImage').addEventListener('change', async (e) => {
+    const im = await readPickedImage(e);
+    if (!im) return;
+    state.bgImage = im;
+    scheduleRender();
+    toast('已更换顶部图片');
   });
 
-  $('segBg').addEventListener('click', (e) => {
-    const b = e.target.closest('button');
-    if (!b) return;
-    state.opts.bgStyle = b.dataset.v;
-    syncBgUI();
+  /* 相册选图：信息卡（自动识别只决定从这张图里抠哪一块） */
+  $('fCardImage').addEventListener('change', async (e) => {
+    const im = await readPickedImage(e);
+    if (!im) return;
+    state.template = im;
+    try {
+      detectCard(im);
+      toast('已更换信息卡');
+    } catch (err) {
+      state.ratios = { ...DEFAULT_RATIOS };
+      toast('信息卡识别失败，已按默认比例裁切');
+    }
     scheduleRender();
   });
-
-  $('btnTemplate').addEventListener('click', () => $('fTemplate').click());
-
-  $('fTemplate').addEventListener('change', async (e) => {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const url = URL.createObjectURL(f);
-    try {
-      await loadTemplate(url);
-      scheduleRender();
-      toast('已识别信息卡位置');
-    } catch (err) {
-      toast('模板图片读取失败');
-    } finally {
-      URL.revokeObjectURL(url);
-      e.target.value = '';
-    }
-  });
-
-  const bindRange = (id, apply) => {
-    $(id).addEventListener('input', () => {
-      apply();
-      updateRangeLabels();
-      scheduleRender();
-    });
-  };
-  bindRange('rTop', () => {
-    const t = Number($('rTop').value) / 100;
-    const h = Number($('rH').value) / 100;
-    state.ratios.T = t;
-    state.ratios.B = Math.min(0.98, t + h);
-  });
-  bindRange('rH', () => {
-    const t = Number($('rTop').value) / 100;
-    const h = Number($('rH').value) / 100;
-    state.ratios.T = t;
-    state.ratios.B = Math.min(0.98, t + h);
-  });
-  bindRange('rM', () => {
-    const m = Number($('rM').value) / 100;
-    state.ratios.L = m;
-    state.ratios.R = 1 - m;
-  });
-  bindRange('rFont', () => {
-    state.opts.fontScale = Number($('rFont').value) / 100;
-  });
-
-  const bindCheck = (id, key) => {
-    $(id).addEventListener('change', () => {
-      state.opts[key] = $(id).checked;
-      scheduleRender();
-    });
-  };
-  bindCheck('cDate', 'showDate');
-  bindCheck('cRule', 'showRule');
-  bindCheck('cSource', 'showSource');
-  bindCheck('cLong', 'longPoster');
 
   $('btnSave').addEventListener('click', savePoster);
 
@@ -1605,65 +1503,65 @@ function bindUI() {
     scheduleRender();
   });
 
-  $('popClose').addEventListener('click', () => closePopover());
-
-  /* 输入框获得焦点 → 浮框切到键盘上方；失去焦点 → 回到锚点 */
-  $('pop').addEventListener('focusin', (e) => {
-    if (e.target.matches('input, textarea')) setKbMode(true);
-  });
-  $('pop').addEventListener('focusout', () => {
-    setTimeout(() => {
-      if (!$('pop').contains(document.activeElement)) setKbMode(false);
-    }, 60);
-  });
-
   bindGestures();
-  watchKeyboard();
 }
 
-/* ======================== 点击即改：命中 / 浮框 / 手势 ======================== */
+/** 读取相册选中的图片；解码完立刻释放 objectURL，多次换图也不积累内存 */
+async function readPickedImage(e) {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!f) return null;
+  const url = URL.createObjectURL(f);
+  try {
+    return await loadImage(url);
+  } catch (err) {
+    toast('图片读取失败');
+    return null;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
 
-/** 可点区域表：坐标是画布坐标，顺序即优先级（后画的、更靠上的元素在前） */
+/* ==================== 手势：单击选图 / 双击隐藏 / 长按保存 ==================== */
+
+/** 可点区域表：坐标是画布坐标，id 与标注表一致（这样双击时能直接对上元素） */
 function buildHitRegions(L) {
   const R = [];
-  const c = state.content;
   const maxW = CW - 2 * MX;
   const push = (id, x, y, w, h) => {
     if (w > 0 && h > 0) R.push({ id, x, y, w, h });
   };
 
-  /* 单词卡：关键词行 / 释义区 分开命中 */
-  if (!L.panel.hidden && L.panel.h > 0) {
+  /* 标准版：文字元素各自成区，双击各自隐藏 */
+  if (L.source.on) {
+    push('source', MX - 16, L.textTop + L.source.y - 12, maxW * 0.72, L.source.size * 1.4 + 20);
+  }
+  if (L.cn && L.cn.on) {
+    push('cn', MX - 16, L.textTop + L.cn.y - 14, maxW + 32,
+      L.cn.lines.length * L.cn.lh + 20);
+  }
+  if (L.en && L.en.on) {
+    push('en', MX - 16, L.textTop + L.en.y - 14, maxW + 32,
+      L.en.lines.length * L.en.lh + 20);
+  }
+  if (L.date.on) {
+    push('badge-date', CW - MX - L.date.w - 6, L.textTop + L.date.y - 6, L.date.w + 12, L.date.h + 12);
+  }
+
+  /* 长版：单词卡按「关键词行 / 释义区」分开命中 */
+  if (L.panel && !L.panel.hidden && L.panel.h > 0) {
     const P = L.panel;
     const rowH = P.padY + P.row1H + 12;
     push('word', P.x, P.y, P.w, Math.min(P.h, rowH));
     push('defs', P.x, P.y + rowH, P.w, Math.max(0, P.h - rowH));
   }
+  if (L.title) {
+    push('word', MX - 16, L.textTop - 12, Math.min(maxW + 32, L.title.size * 6.2), L.title.h + 24);
+  }
 
-  /* 个人信息卡 */
+  /* 信息卡与顶部图片区：单击 = 从相册选图（放最后，别挡住上面的具体元素） */
   push('card', L.card.x, L.card.y, L.card.w, L.card.h);
-
-  /* 出处 */
-  if (L.source.on) {
-    push('source', MX - 16, L.textTop + L.source.y - 12, maxW * 0.72, L.source.size * 1.4 + 20);
-  }
-
-  /* 句子（英文 + 中文） */
-  push(
-    'text',
-    MX - 16,
-    L.textTop + L.en.y - 14,
-    maxW + 32,
-    (L.cn.y + L.cn.lines.length * L.cn.lh) - L.en.y + 20
-  );
-
-  /* 标题（关键词）——放最后，避免挡住下面更具体的区域 */
-  push('word', MX - 16, L.textTop - 12, Math.min(maxW + 32, L.title.size * 6.2), L.title.h + 24);
-
-  /* 日期徽标 → 往期存档（想在版式里关日期标签，点空白进「背景与版式」） */
-  if (state.opts.showDate && c.date) {
-    push('archive', CW - MX - L.title.badgeW - 6, L.textTop - 8, L.title.badgeW + 20, 62);
-  }
+  if (L.imgBlock) push('img', 0, L.imgBlock.y, CW, L.imgBlock.h);
   return R;
 }
 
@@ -1683,256 +1581,26 @@ function toClient(x, y) {
   return { x: rect.left + x * s, y: rect.top + y * s };
 }
 
-const POP_META = {
-  word:    { kit: 'word',    title: '关键词',   hint: '改完自动重查词典 · 长按海报可以保存' },
-  text:    { kit: 'text',    title: '中英文句子', hint: '直接改，画面立即重排 · 长按海报可以保存' },
-  source:  { kit: 'source',  title: '出处',     hint: '留空则不显示出处' },
-  defs:    { kit: 'defs',    title: '释义',     hint: '每行一条，行首写词性（如 n. v. adj.）会显示成彩色标签' },
-  card:    { kit: 'card',    title: '个人信息卡', hint: '上传你在乐词 App 里的卡片截图，自动识别位置' },
-  page:    { kit: 'page',    title: '背景与版式', hint: '点一下画面空白也能打开这里' },
-  archive: { kit: 'archive', title: '往期存档', hint: '每天第一次打开会自动把这天的基础数据存下来' },
-};
-
-const kitGroups = {};     /* { word: [节点…] } 浮框关闭时节点回到 #kit */
-let popAnchor = null;     /* 当前浮框锚点（画布坐标矩形） */
-let popId = '';           /* 当前浮框对应的区域类型 */
-
-function stashKitGroups() {
-  document.querySelectorAll('#kit .k').forEach((k) => {
-    kitGroups[k.dataset.k] = [...k.children];
-  });
-}
-
-/** 把所有控件节点收进仓库；已经搬回原位的跳过 */
-function returnNodesToKit() {
-  Object.entries(kitGroups).forEach(([key, nodes]) => {
-    const k = document.querySelector('#kit .k[data-k="' + key + '"]');
-    if (!k) return;
-    nodes.forEach((n) => { if (n.parentNode !== k) k.appendChild(n); });
-  });
-}
-
-function openPopover(id, anchor) {
-  const meta = POP_META[id];
-  const nodes = meta && kitGroups[meta.kit];
-  if (!nodes) return;
-  popAnchor = anchor;
-  popId = id;
-
-  $('popTitle').textContent = meta.title;
-  $('popHint').textContent = meta.hint || '';
-
-  /* 先把上一组控件收回仓库，再搬这一组进来（节点始终在文档里，事件绑定不会丢） */
-  returnNodesToKit();
-  const body = $('popBody');
-  nodes.forEach((n) => body.appendChild(n));
-
-  const pop = $('pop');
-  pop.hidden = false;
-  pop.classList.remove('kb');
-  positionPop(anchor);
-  showMark(anchor);
-  if (id === 'archive') renderArchiveList();
-  renderCandidates();
-}
-
-function closePopover() {
-  const pop = $('pop');
-  if (pop.hidden) return;
-  pop.hidden = true;
-  pop.classList.remove('kb');
-  $('mark').hidden = true;
-  returnNodesToKit();
-  popAnchor = null;
-  popId = '';
-}
-
-/** 给正在编辑的区域描一圈边，四角轻微压暗 */
-function showMark(anchor) {
-  const m = $('mark');
-  const a = toClient(anchor.x, anchor.y);
-  const b = toClient(anchor.x + anchor.w, anchor.y + anchor.h);
-  m.style.left = Math.round(a.x - 6) + 'px';
-  m.style.top = Math.round(a.y - 6) + 'px';
-  m.style.width = Math.max(20, Math.round(b.x - a.x + 12)) + 'px';
-  m.style.height = Math.max(20, Math.round(b.y - a.y + 12)) + 'px';
-  m.hidden = false;
-}
-
-function isPopOpen() {
-  return !$('pop').hidden;
-}
-
-/* ------------------------ 往期存档（服务端 data/） ------------------------ */
-
-/** 顶栏「你在看哪一天」的小标：平时不显示，往日或走存档时才出现 */
-function updateSrcTag() {
-  const tag = $('srcTag');
-  if (!tag) return;
-  if (state.archiveOnly) {
-    tag.textContent = dateLabel(state.viewDate) + ' · 存档';
-    tag.hidden = false;
-  } else if (state.viewDate && state.viewDate !== todayISO()) {
-    tag.textContent = dateLabel(state.viewDate) + ' · 往期';
-    tag.hidden = false;
-  } else if (state.archived) {
-    tag.textContent = '今天 · 存档';
-    tag.hidden = false;
-  } else {
-    tag.hidden = true;
-  }
-}
-
-/** 日期徽标那块画布坐标 —— 浮框和引导框都锚在它旁边 */
-function archiveAnchor() {
-  const r = (state.regions || []).find((x) => x.id === 'archive');
-  return r || { x: CW - MX - 240, y: 40, w: 220, h: 56 };
-}
-
-function openArchive() {
-  openPopover('archive', archiveAnchor());
-}
-
-/** 拉取存档列表并画成「一行一天」；没有归档时给出说明而不是空白 */
-async function renderArchiveList() {
-  const note = $('archNote');
-  const list = $('archList');
-  if (!note || !list) return;
-  note.textContent = '正在读取存档…';
-  list.innerHTML = '';
-
-  let days = [];
-  let writable = true;
-  try {
-    const r = await fetch('/api/archive', { cache: 'no-store' });
-    const j = await r.json();
-    days = (j && j.days) || [];
-    writable = !j || j.writable !== false;
-  } catch (e) {
-    note.textContent = '存档列表读取失败：' + (e && e.message ? e.message : e);
-    return;
-  }
-
-  const today = todayISO();
-  const hasToday = days.some((d) => d.dateISO === today);
-  /* 「今天」永远排第一：即使今天还没归档，也能从这里回到实时 */
-  const rows = [{ dateISO: today, date: '', word: '', today: true }].concat(
-    days.filter((d) => d.dateISO !== today)
-  );
-
-  if (!days.length) {
-    note.textContent = writable
-      ? '还没有往期归档。每天第一次打开海报，就会自动把这天的内容存下来。'
-      : '存档目录不可写（线上容器可能不留盘），本功能只在你自己跑服务时有效。';
-  } else {
-    note.textContent = '已归档 ' + days.length + ' 天' + (writable ? '' : '（存档目录不可写）');
-  }
-
-  const cur = state.viewDate || (state.archived ? '' : todayISO());
-  rows.forEach((d) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.dataset.date = d.today ? '' : d.dateISO;
-
-    const lab = document.createElement('span');
-    lab.className = 'd';
-    lab.textContent = d.today ? '今天' : dateLabel(d.dateISO);
-    b.appendChild(lab);
-
-    const w = document.createElement('span');
-    w.className = 'w';
-    w.textContent = d.today && !d.word ? (hasToday ? '' : '还没获取') : (d.word || d.en || '');
-    b.appendChild(w);
-
-    if (d.missing) {
-      const t = document.createElement('span');
-      t.className = 't';
-      t.textContent = '无解析';
-      b.appendChild(t);
-    }
-    b.classList.toggle('on', d.today ? cur === todayISO() : cur === d.dateISO);
-    list.appendChild(b);
-  });
-}
-
-/** 切到某一天；date 为空 = 回到今天（重新走上游） */
-async function gotoDate(date) {
-  closePopover();
-  guide.stop();
-  await loadDaily(false, date);
-  if (state.viewDate && state.viewDate !== todayISO()) {
-    toast('正在看 ' + dateLabel(state.viewDate) + ' 的存档');
-  }
-}
-
-/** 浮框定位：优先贴在区域下方，放不下就翻到上方，左右自动避让屏幕边缘 */
-function positionPop(anchor) {
-  const pop = $('pop');
-  const vv = window.visualViewport;
-  const vw = vv ? vv.width : window.innerWidth;
-  const vh = vv ? vv.height : window.innerHeight;
-  const M = 12;
-
-  const a = toClient(anchor.x, anchor.y);
-  const aRight = toClient(anchor.x + anchor.w, anchor.y).x;
-  const aBottom = toClient(anchor.x, anchor.y + anchor.h).y;
-
-  const pr = pop.getBoundingClientRect();
-  let top = aBottom + 10;
-  if (top + pr.height > vh - M) top = a.y - pr.height - 10;
-  if (top < M) top = Math.min(aBottom + 10, Math.max(M, vh - pr.height - M));
-  let left = a.x + (aRight - a.x) / 2 - pr.width / 2;
-  left = Math.max(M, Math.min(left, vw - M - pr.width));
-
-  pop.style.top = Math.round(top) + 'px';
-  pop.style.left = Math.round(left) + 'px';
-}
-
-/** 正在输入时，浮框贴到键盘上方（否则会被键盘盖住） */
-function setKbMode(on) {
-  const pop = $('pop');
-  if (pop.hidden) return;
-  pop.classList.toggle('kb', on);
-  if (on) {
-    pop.style.top = '';
-    pop.style.left = '';
-  } else if (popAnchor) {
-    positionPop(popAnchor);
-  }
-}
-
-function kbHeight() {
-  const vv = window.visualViewport;
-  if (!vv) return 0;
-  return Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
-}
-
-/** 键盘高度写入 CSS 变量 --kb；正在输入时把浮框顶到键盘上方 */
-function watchKeyboard() {
-  const vv = window.visualViewport;
-  const apply = () => {
-    const kb = kbHeight();
-    document.documentElement.style.setProperty('--kb', kb + 'px');
-    if (kb > 100 && document.activeElement && $('pop').contains(document.activeElement)) setKbMode(true);
-    else if (kb < 100) setKbMode(false);
-    if (!vv) return;
-  };
-  apply();
-  if (!vv) return;
-  vv.addEventListener('resize', apply);
-  vv.addEventListener('scroll', apply);
-  window.addEventListener('orientationchange', () => setTimeout(apply, 240));
-}
-
 /* ------------------------------ 手势 ------------------------------ */
 
 const PRESS = { moved: 8, maxMs: 620, holdMs: 520 };
 
+/** 双击能删掉的区域 → 隐藏状态里的键 */
+const HIDE_MAP = { 'badge-date': 'date', en: 'en', cn: 'cn', source: 'source' };
+
+/**
+ * stage 上只有三种手势：
+ *   单击顶部图片 / 信息卡 = 从手机相册选图（这两块不定义双击）
+ *   双击日期胶囊 / 英文 / 中文 / 出处 = 从海报上删掉它（不可逆，刷新恢复）
+ *   长按海报 = 保存到相册
+ */
 function bindGestures() {
   const stage = $('stage');
   let start = null;
   let holdTimer = null;
   let longFired = false;
+  let lastTap = { id: '', t: 0 };
+  let pickerAt = 0;          /* 刚开过相册的防抖时间戳 */
 
   const clear = () => {
     clearTimeout(holdTimer);
@@ -1943,8 +1611,7 @@ function bindGestures() {
 
   stage.addEventListener('pointerdown', (e) => {
     if (e.button && e.button !== 0) return;
-    if (e.target.closest('.topbar') || e.target.closest('.pop')) return;
-    guide.stop();
+    if (e.target.closest('.topbar')) return;
     wakeTopbar();
     start = { x: e.clientX, y: e.clientY, t: Date.now() };
     longFired = false;
@@ -1969,34 +1636,52 @@ function bindGestures() {
     const wasLong = longFired;
     clear();
     if (wasLong || moved || spent > PRESS.maxMs) return;
-    handleTap(e.clientX, e.clientY);
+
+    const hit = hitTestAt(e.clientX, e.clientY);
+    if (!hit) return;
+
+    /* 图片 / 信息卡：单击即开相册；双击这里会连开两次，所以加一道防抖 */
+    if (hit.id === 'img' || hit.id === 'card') {
+      if (Date.now() - pickerAt < 400) return;
+      pickerAt = Date.now();
+      openPicker(hit.id);
+      return;
+    }
+
+    /* 句子上的元素：只认双击。单击本就无功能，所以不必为「是不是双击」等延迟 */
+    if (state.opts.longPoster) return;              /* 长版本轮交互不动 */
+    const now = Date.now();
+    if (lastTap.id === hit.id && now - lastTap.t <= DBL_MS) {
+      lastTap = { id: '', t: 0 };
+      hideElement(hit.id);
+    } else {
+      lastTap = { id: hit.id, t: now };
+    }
   });
 
   stage.addEventListener('pointercancel', clear);
   stage.addEventListener('contextmenu', (e) => e.preventDefault());
 }
 
-/** 单击：命中什么就弹什么；点画面空白弹版式；点海报以外收起 */
-function handleTap(clientX, clientY) {
+/** 屏幕坐标 → 命中的区域（换算成画布坐标再查命中表） */
+function hitTestAt(clientX, clientY) {
   const rect = cvs.getBoundingClientRect();
-  if (!rect.width) return;
+  if (!rect.width) return null;
   const s = rect.width / CW;
-  const x = (clientX - rect.left) / s;
-  const y = (clientY - rect.top) / s;
-  /* 点在海报之外：只把浮框收起 */
-  if (x < 0 || y < 0 || x > CW || y > CH) {
-    if (isPopOpen()) closePopover();
-    return;
-  }
+  return hitTest((clientX - rect.left) / s, (clientY - rect.top) / s);
+}
 
-  const hit = hitTest(x, y);
-  if (!hit) {
-    /* 配图 / 空白：已经有浮框就收起，否则打开「背景与版式」 */
-    if (isPopOpen()) closePopover();
-    else openPopover('page', { x: CW * 0.5 - 160, y: CH * 0.34, w: 320, h: 60 });
-    return;
-  }
-  openPopover(hit.id, hit);
+/** 双击：把这块从海报上删掉，其余内容自动上移补齐 */
+function hideElement(regionId) {
+  const key = HIDE_MAP[regionId];
+  if (!key || state.hidden[key]) return;
+  state.hidden[key] = true;
+  scheduleRender();
+}
+
+/** 唤起相册：顶部图片 / 信息卡各有一个隐藏的 file input */
+function openPicker(which) {
+  $(which === 'card' ? 'fCardImage' : 'fBgImage').click();
 }
 
 /* ------------------------------ 顶栏淡出 ------------------------------ */
@@ -2006,100 +1691,12 @@ function wakeTopbar() {
   const bar = $('topbar');
   bar.classList.remove('dim');
   clearTimeout(topbarTimer);
-  topbarTimer = setTimeout(() => {
-    if (!isPopOpen()) bar.classList.add('dim');
-  }, 3200);
+  topbarTimer = setTimeout(() => bar.classList.add('dim'), 3200);
 }
 
 function syncBgUI() {
   $('bgLabel').textContent = state.opts.bgStyle === 'cover' ? '铺满' : '原比例';
-  const seg = $('segBg');
-  if (seg) [...seg.children].forEach((b) => b.classList.toggle('on', b.dataset.v === state.opts.bgStyle));
 }
-
-/* ------------------------------ 首访引导 ------------------------------ */
-/* 每次进入都放一遍：四个可编辑区域依次呼吸闪烁，配一句说明，几秒后自动退场。 */
-
-const guide = {
-  active: false,
-  step: 0,
-  steps: [],
-  timer: null,
-  frames: [],
-  start() {
-    if (this.active) return;
-    this.active = true;
-    this.step = 0;
-    this.build();
-    this.show();
-    this.schedule();
-  },
-  build() {
-    const L = state.layout;
-    if (!L) return;
-    const of = (id) => (state.regions || []).find((r) => r.id === id);
-    const word = of('word');
-    const card = of('card');
-    const pick = (id, fallback) => of(id) || fallback;
-    this.steps = [
-      { rect: word, text: '点这里的单词，就地改关键词' },
-      { rect: pick('text', { x: MX - 16, y: 320, w: CW - 2 * MX + 32, h: 260 }), text: '点句子，改中英文' },
-      { rect: pick('defs', { x: 84, y: 1180, w: CW - 168, h: 160 }), text: '点释义，改词条解释' },
-      { rect: card, text: '点卡片，换你的个人信息卡模板' },
-      { rect: pick('archive', archiveAnchor()), text: '点日期，翻看往期（每天自动存一份）' },
-      { rect: { x: 0, y: 0, w: CW, h: Math.max(1, (state.bgImage && state.opts.bgStyle === 'natural') ? naturalImageH() : CH * 0.3) }, text: '点配图或空白，调背景与版式' },
-    ].filter((s) => s.rect);
-  },
-  schedule() {
-    clearTimeout(this.timer);
-    const next = () => {
-      if (!this.active) return;
-      if (this.step >= this.steps.length) return this.finish();
-      this.show();
-      this.timer = setTimeout(next, 1450);
-      this.step++;
-    };
-    this.timer = setTimeout(next, 900);
-  },
-  show() {
-    const s = this.steps[this.step];
-    if (!s) return;
-    this.repaint();
-    const tip = $('tip');
-    tip.hidden = false;
-    tip.classList.remove('hide');
-    $('tipText').textContent = s.text;
-  },
-  repaint() {
-    const wrap = $('frames');
-    wrap.innerHTML = '';
-    const s = this.steps[this.step];
-    if (!s || !this.active) return;
-    const a = toClient(s.rect.x, s.rect.y);
-    const b = toClient(s.rect.x + s.rect.w, s.rect.y + s.rect.h);
-    const d = document.createElement('div');
-    d.className = 'frame';
-    d.style.left = Math.round(a.x) + 'px';
-    d.style.top = Math.round(a.y) + 'px';
-    d.style.width = Math.max(24, Math.round(b.x - a.x)) + 'px';
-    d.style.height = Math.max(24, Math.round(b.y - a.y)) + 'px';
-    wrap.appendChild(d);
-  },
-  finish() {
-    this.stop();
-    if (isPopOpen()) return;
-    const tip = $('tip');
-    tip.classList.add('hide');
-    setTimeout(() => { if (tip.classList.contains('hide')) tip.hidden = true; }, 300);
-  },
-  stop() {
-    if (!this.active) return;
-    this.active = false;
-    clearTimeout(this.timer);
-    $('frames').innerHTML = '';
-    $('tip').hidden = true;
-  },
-};
 
 /* ------------------------------ 保存 ------------------------------- */
 
@@ -2157,12 +1754,8 @@ function setOverlay(show, text) {
   const bg = qs.get('bg');
   if (bg) state.opts.bgStyle = bg === 'cover' ? 'cover' : 'natural';  /* 旧参数 band/card 归入原比例 */
   if (qs.get('long') === '1' || qs.get('ex') === '1') state.opts.longPoster = true;
-  bindUI();
-  watchKeyboard();
-  stashKitGroups();
+  bindTopbar();
   syncBgUI();
-  $('cLong').checked = state.opts.longPoster;
-  updateRangeLabels();
 
   /* 字体度量必须先就绪，否则折行与居中会算错 */
   try {
@@ -2185,13 +1778,11 @@ function setOverlay(show, text) {
     render();
   }
   wakeTopbar();
-  /* 每次进入都放一遍引导：可编辑区域依次呼吸闪烁，几秒后自动退场 */
-  if (!document.body.classList.contains('raw')) setTimeout(() => guide.start(), 500);
 
   /* 调试/回归用具：?debug=1 时把命中表、坐标换算与版面标注暴露出来 */
   if (DEBUG) {
     window.__ds = {
-      state, hitTest, toClient, openPopover, closePopover, guide,
+      state, hitTest, toClient, hitTestAt, hideElement,
       inspect,            // 版面清单：inspect.js 靠它导出 JSON 与标注图
     };
   }
