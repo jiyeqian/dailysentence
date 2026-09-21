@@ -114,8 +114,16 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
 
 三条硬约束，不满足就不提交：
 
-- **A 绿色点**：提交前必跑 `parse-check`（50 项）+ `server.js` / `app.js` 语法检查；
-  界面改动加 `ui-check`（需服务在跑，见上文「运行与验证」）。半成品允许 WIP，但
+- **A 绿色点**：提交前必跑 `parse-check`（50 项）+ 语法检查：
+
+  ```bash
+  node app/parse-check.js                                  # 必须 50 passed, 0 failed
+  for f in app/server.js app/public/app.js app/ui-check.js; do node --check $f; done
+  ```
+
+  语法检查一律用 `node --check` —— **别用 `new Function(src)`**：`server.js` 首行是
+  `#!/usr/bin/env node`，shebang 会让它直接抛 `Invalid or unexpected token`（假警报）。
+  界面改动再加 `ui-check`（需服务在跑，见上文「运行与验证」）。半成品允许 WIP，但
   message 以 `wip:` 开头，且下一轮必须重写掉，不让 wip 留在 main 上。
 - **B 只提交本次的**：提交前 `git status --short` 逐文件核对，用 `git add <具体文件>`；
   **绝不 `git add -A` 一把梭**（本项目出过「另一会话悄悄把 HEAD 推到 `5c65503`」的事），
