@@ -149,6 +149,12 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
 - `node app/parse-check.js`（50 passed）+ 语法检查；界面改动再加 `ui-check`
 - **存档比对（每次必做）**：本地 `app/data/daily/*.json` 与线上 `/api/archive` + 逐日
   `/api/daily?date=` 比 `score`（释义数 ×10 + 例句数 ×2 + 音标 + 词），同分才敢覆盖
+  - **同分 ≠ 同版本**：还要对比 `rev` 与 `updatedAt`，并对 `en` / `cn` / `word` /
+    `phonetic` / `definitions` / `examples` / `usages` 做字段级 diff。
+    出过「本地 rev=9、线上 rev=11」——score 一样但线上更新，只有字段级 diff 能看出
+    真实差异只是 `image`（上游每日配图是轮换池，本地与线上拿到不同一张都很正常、都可用）。
+  - 上传是**文件覆盖、不做合并**（合并在进程写盘时才发生），所以本地 rev 更小就会让线上 rev 回落；
+    只要字段级 diff 无文案差异，rev 回落无害
 - 部署参数固定 `updateExistingApp: true` + 固定 appId（复用沙箱 → 链接与存档都延续；
   appId 记在 `.workbuddy/memory/`，**不写进公开仓库**）
 - 复核四点：首页 200 / `archive` 的 `writable=true` 且 `days` 正确 / 两日 score 未变 /
