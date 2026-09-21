@@ -105,6 +105,44 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   自证改动范围。界面改动不靠识图，报编号 + id。
 - 优先零依赖方案；涉及云服务 / 计费资源时不擅自开通。
 
+### 提交节奏（2026-09-22 立）：每子任务自动 commit + 即 push
+
+**commit 后立刻 push**，粒度为**子任务级**：一个可验证的功能点一个提交。
+
+动机：git 提交廉价可撤销，真正收益是「精确 revert + bisect 可用」—— 历史上 `5c65503`
+一次 +674/−1308（`app.js` 单文件 1089 行）塞了多个逻辑，想只回退其中一个做不到。
+
+三条硬约束，不满足就不提交：
+
+- **A 绿色点**：提交前必跑 `parse-check`（50 项）+ `server.js` / `app.js` 语法检查；
+  界面改动加 `ui-check`（需服务在跑，见上文「运行与验证」）。半成品允许 WIP，但
+  message 以 `wip:` 开头，且下一轮必须重写掉，不让 wip 留在 main 上。
+- **B 只提交本次的**：提交前 `git status --short` 逐文件核对，用 `git add <具体文件>`；
+  **绝不 `git add -A` 一把梭**（本项目出过「另一会话悄悄把 HEAD 推到 `5c65503`」的事），
+  出现不认识的文件就停下报告。
+- **C push ≠ 上线**：「只改文档不 tag 不上线」「上线要用户明说」照旧有效；提交后写明
+  「已 push，未上线」。
+
+保持现状两点：**文档与代码同批提交**（文档描述的就是这版行为，拆开对不上号）；
+判据是「revert 掉它之后应用还能正常跑」→ 就能单独成提交。
+安全项：`app/data/`、`app/shots/` 已在 `.gitignore`，自动提交不会把本机存档带进仓库。
+
+### Commit Message 结构（2026-09-22 立）
+
+统一 `<type>(<scope>): <description>`（conventional commits）：
+
+- **type**：`feat` 新功能 / `fix` 修 bug / `refactor` 重构不改行为 / `perf` 性能 /
+  `docs` 文档 / `test` 回归脚本 / `chore` 杂项（包名 · gitignore · 部署配置）
+- **scope**：`server` 抓取 · 路由 · 存档 / `parse` 上游解析兼容 /
+  `ui` Canvas 排版 · 手势 · 版面 / `docs` 文档 /
+  `test` parse-check · ui-check · inspect / `infra` 元数据与部署
+- **description**：中文祈使句，句末不加句号，50 字内说清「做了什么」
+- **body**：结构行之后空一行，继续写要点与「为什么」（原风格不变，只是头上多了结构行）
+
+改写示例：`标准版重构：去掉全部浮层…` → `refactor(ui): 去掉全部浮层改三段式版面`；
+`兼容上游「短语型」解析…` → `feat(parse): 兼容上游短语型结构（词与释义同行）`。
+2026-09-22 之前的提交仍是纯中文祈使句，不回改。
+
 ## 环境说明（CodeBuddy 与 WorkBuddy 并存）
 
 代码可自由在两个环境里开发（纯本地 git 仓库、零依赖 Node，无平台私有 SDK）。
