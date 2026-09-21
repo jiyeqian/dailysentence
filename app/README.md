@@ -141,6 +141,7 @@ app/
 ├── server.js                  # 零依赖 HTTP 服务：抓取 + 解析 + 图片代理 + 静态托管
 ├── parse-check.js             # 解析回归（node app/parse-check.js）：钉住上游各种历史结构
 ├── ui-check.js                # 交互回归（playwright 截图 + 断言）：点哪改哪 + 往期存档
+├── inspect.js                 # 版面标注通道（playwright）：编号标注图 + 坐标清单 + 改前改后 diff
 ├── fixtures/                  # 上游页面快照（回归用）
 ├── data/                      # 每日存档（运行时生成，已在 .gitignore）
 ├── package.json
@@ -235,6 +236,61 @@ node app/parse-check.js     # 上游各种历史结构 + 今日结构的解析�
 - `PORT`（默认 8787）、`HOST`（默认 0.0.0.0）
 - `DS_DATA_DIR` —— 存档目录，默认 `app/data`（测试用它把存档写到临时目录，不污染真实存档）
 - `DS_DAILY_PAGE` —— 覆盖上游页面地址，用来验证「上游挂了」时的存档兜底
+
+## 版面标注通道（人机沟通用，2026-09-21 起）
+
+改版式时不靠「截图 + 手绘标注 + 对方识图」，用**编号**说话：编号标注图给人看、
+坐标清单（JSON）给 AI 读，两边共用同一套编号。前提：服务在跑（`node server.js`）。
+
+```bash
+# playwright 是外挂工具，不在 package.json 里，借 WorkBuddy 的 node_modules 跑
+NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
+  node app/inspect.js --tag before --raw \
+  --word impulse --en "..." --cn "..." --source "..."   # 固定文案，保证两次可比
+
+# 改完代码后再跑一次 --tag after，然后：
+node app/inspect.js --diff before after
+```
+
+常用参数：`--tag <名>`（输出后缀，默认 latest）、`--raw`（只截海报）、`--desktop`（桌面视口）、
+`--long`（长版）、`--word/--en/--cn/--source`（固定文案）、`--base`（服务地址）、`--no-shot`。
+
+产物在 `app/shots/`（已 gitignore）：
+
+- `inspect-<tag>.json` —— 版面清单：`items[]`（`i` 编号 / `id` / `label` 中文名 /
+  `box` [x,y,w,h] 画布坐标 1080 基准 / `font` 字号 / `text` / `kind`）、
+  `gaps[]`（间距量尺）、`opts` / `ratios` / `meta`
+- `annot-<tag>.png` —— 带编号框的标注图（红实线 = 内容元素，黄虚线 = 安全边距）
+
+`--diff` 输出两份清单的逐项变化（Δbox / 字号 / 新增移除 / 间距变化），改完自证改动范围。
+
+### 命名表（共同词汇，说话以此为准）
+
+| id | 中文名 | 备注 |
+| --- | --- | --- |
+| `title` | 大标题关键词 | 118px 起，放不下自动缩 |
+| `badge-date` | 日期胶囊 | 右上角，点它 = 往期存档 |
+| `rule` | 标题分隔线 | |
+| `en` / `cn` | 英文句 / 中文句 | |
+| `source` | 出处 | `—— ` 前缀一起算在框里 |
+| `panel` | 单词卡整体 | 毛玻璃卡片 |
+| `panel-bar` | 左侧渐变竖条 | |
+| `panel-word` | 卡内关键词 | 与 `title` 是同一个词的两处呈现 |
+| `panel-ph` | 音标 | 等宽字体，挤了会逐档缩小 |
+| `def-0…n` | 释义第 N+1 条 | 框含行首词性 |
+| `chip-0…n` | 词性胶囊 | n. / v. / adj. |
+| `ex-0…n` | 例句块 | 仅长版海报出现 |
+| `badge-src` | 右下来源圆标 | `补` / `选`，仅兜底内容出现 |
+| `card` | 个人信息卡 | 位置从模板图自动识别 |
+| `bg` | 背景图区 | 原比例 = 图片完整高度；铺满 = 整张画布 |
+| `safe-l` / `safe-r` | 左 / 右安全边距 | 各 84px |
+
+间距量尺：`margin-x`（左右安全边距）、`top-pad`（海报顶→文字块）、`gap-title-en`（大标题→英文句）、
+`gap-text-panel`（文字块→单词卡）、`gap-panel-card`（单词卡→信息卡）、`bottom-pad`（信息卡→海报底）、
+`card-h`（信息卡高度）。说「这两块太挤」时，直接引用其中一个 id 即可被翻译成数值改动。
+
+> 标注只在 `?debug=1` 下生成（`window.__ds.inspect()`），生产渲染路径零开销；
+> 标注坐标由 `state.layout` 派生并与点击命中表自校验，不一致会在控制台告警。
 
 ## 说明
 

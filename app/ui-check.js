@@ -2,7 +2,19 @@
    跑法：先 node server.js（8787），再
    NODE_PATH=<node workspace>/node_modules node app/ui-check.js  */
 const path = require('path');
-const { chromium } = require('playwright');
+
+/* playwright 是外挂工具（不在 package.json 里），找不到就说明怎么借，而不是崩 */
+let chromium;
+try {
+  ({ chromium } = require('playwright'));
+} catch (e) {
+  console.log(
+    '[ui-check] 跳过：没找到 playwright。\n' +
+    '  NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules node app/ui-check.js\n' +
+    '（或 npm i -D playwright && npx playwright install chromium）'
+  );
+  process.exit(0);
+}
 
 const OUT = path.join(__dirname, 'shots');
 const BASE = 'http://127.0.0.1:8787/?debug=1';

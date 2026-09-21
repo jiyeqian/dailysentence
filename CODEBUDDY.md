@@ -55,6 +55,9 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
 - **发布节奏**：只改文档 / 元数据、没动任何程序功能时，只 commit & push，
   不 tag、不 deploy。要上线等明确说「上线」。
 - 先给方案与取舍 → 确认后再实施；视觉问题以截图驱动。
+- **版式沟通走标注通道**（`app/inspect.js`）：带编号的标注图给人看、`inspect-*.json`
+  坐标清单给 AI 读，两边共用一套编号（命名表见 `app/README.md`）；改完用 `--diff`
+  自证改动范围。界面改动不靠识图，报编号 + id。
 - 优先零依赖方案；涉及云服务 / 计费资源时不擅自开通。
 
 ## 环境说明（CodeBuddy 与 WorkBuddy 并存）

@@ -36,6 +36,7 @@ const state = {
   apiData: null,
   layout: null,         // 最近一次渲染的版面（点击命中用）
   regions: [],          // 可点区域表（画布坐标）
+  annots: [],           // 版面标注表（画布坐标，仅 ?debug=1 登记）
   candidates: [],       // 上游缺解析时，从句子挑出的关键词候选（Top 3）
   selectedWord: '',     // 当前选中的候选关键词
   picking: false,       // 正在查词典，避免重复点击
@@ -67,6 +68,8 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const cvs = $('poster');
 const QS = new URLSearchParams(location.search);
+/* 调试开关：挂 window.__ds、登记版面标注。生产路径不受影响 */
+const DEBUG = QS.get('debug') === '1';
 
 const FROST_OK = (() => {
   try {
@@ -837,6 +840,195 @@ function buildProfileCard(topY) {
   };
 }
 
+/* --------------------- 版面标注（?debug=1 专用） --------------------- */
+
+/**
+ * 把排版用到的每个 L 字段翻译成「有名字、有框」的条目。
+ * 坐标一律是画布坐标（1080 宽基准），与 state.regions 同一坐标系，
+ * 编号按版面从上到下（y 再 x）生成 —— 人报编号、AI 查 id，两边对得上。
+ *
+ * 只在 ?debug=1 时调用，生产渲染路径零开销；也不参与任何绘制。
+ */
+function buildAnnots(ctx, L) {
+  const A = [];
+  const r1 = (n) => Math.round(n * 10) / 10;
+  const push = (id, label, x, y, w, h, extra) => {
+    if (!(w > 0 && h > 0)) return;
+    A.push(Object.assign({
+      id, label,
+      box: [r1(x), r1(y), r1(w), r1(h)],
+      font: 0, color: '', text: '', kind: 'item',
+    }, extra || {}));
+  };
+  /* 多行文本块的实际宽度：取最长一行 */
+  const blockW = (lines, size, weight, family) => {
+    ctx.font = T(size, weight, family);
+    let w = 0;
+    for (const ln of lines) w = Math.max(w, ctx.measureText(ln).width);
+    return w;
+  };
+
+  const c = state.content;
+  const maxW = CW - 2 * MX;
+  const T0 = L.textTop;
+
+  /* ---- 顶部文字块 ---- */
+  const t = L.title;
+  ctx.font = T(t.size, 700, F_SERIF);
+  push('title', '大标题关键词', MX, T0, Math.min(ctx.measureText(t.text).width, maxW), t.h,
+    { font: r1(t.size), color: '#ffffff', text: t.text });
+
+  if (state.opts.showDate && c.date) {
+    ctx.font = T(25, 600, F_SANS);
+    const pw = measureSpaced(ctx, c.date, 2.5) + 56;
+    push('badge-date', '日期胶囊', CW - MX - pw, T0 + 4, pw, 52,
+      { font: 25, color: 'rgba(255,255,255,0.94)', text: c.date });
+  }
+
+  if (L.rule.on) {
+    push('rule', '标题分隔线', MX, T0 + L.rule.y, L.rule.w, L.rule.h,
+      { color: 'rgba(255,255,255,0.95)' });
+  }
+
+  push('en', '英文句', MX, T0 + L.en.y,
+    blockW(L.en.lines, L.en.size, 400, F_SANS), L.en.lines.length * L.en.lh,
+    { font: r1(L.en.size), color: 'rgba(255,255,255,0.97)', text: L.en.lines.join(' ') });
+
+  push('cn', '中文句', MX, T0 + L.cn.y,
+    blockW(L.cn.lines, L.cn.size, 400, F_SANS), L.cn.lines.length * L.cn.lh,
+    { font: r1(L.cn.size), color: 'rgba(255,255,255,0.88)', text: L.cn.lines.join('') });
+
+  if (L.source.on) {
+    const st = '—— ' + L.source.text;
+    ctx.font = T(L.source.size, 500, F_SANS);
+    push('source', '出处', MX, T0 + L.source.y, ctx.measureText(st).width, L.source.size * 1.4,
+      { font: r1(L.source.size), color: 'rgba(255,255,255,0.62)', text: st });
+  }
+
+  /* ---- 单词卡片 ---- */
+  const P = L.panel;
+  if (!P.hidden && P.h > 0) {
+    push('panel', '单词卡整体', P.x, P.y, P.w, P.h, { color: 'rgba(255,255,255,0.94)' });
+
+    const barH = Math.min(P.h - P.padY * 2, P.row1H + 22);
+    push('panel-bar', '左侧渐变竖条', P.x + 22, P.y + P.padY + 4, 5, barH - 8,
+      { color: '#4f8dfd → #22d3ee' });
+
+    const x0 = P.x + P.padX;
+    const row1Top = P.y + P.padY;
+    ctx.font = T(P.wordSize, 600, F_SANS);
+    const ww = ctx.measureText(c.word || '').width;
+    push('panel-word', '卡内关键词', x0, row1Top, ww, P.row1H,
+      { font: r1(P.wordSize), color: '#0f172a', text: c.word });
+
+    const phs = phoneticList();
+    if (phs.length) {
+      const ps = P.phDrawSize || P.phSize;
+      ctx.font = T(ps, 400, F_MONO);
+      let phW = -22;
+      for (const p of phs) phW += ctx.measureText(p.text).width + 22;
+      const phBase = row1Top + P.wordSize * 0.85;
+      push('panel-ph', '音标', x0 + ww + 18, phBase - ps * 0.8, Math.max(0, phW), ps * 1.25,
+        { font: r1(ps), color: '#7c8aa5', text: phs.map((p) => p.text).join(' ') });
+    }
+
+    let y = row1Top + P.row1H + 16;
+    P.defItems.forEach((it, i) => {
+      const many = P.defItems.length > 1;
+      push('def-' + i, '释义' + (many ? ' ' + (i + 1) : ''), x0, y, P.innerW, it.h,
+        { font: r1(P.defSize), color: '#334155', text: it.lines.join('') });
+      if (it.pos) {
+        const chipH = P.chipSize * 1.72;
+        push('chip-' + i, '词性胶囊', x0, y + (it.h - chipH) / 2, it.chipW, chipH,
+          { font: r1(P.chipSize), color: POS_COLOR[it.pos] || '#475569', text: it.pos });
+      }
+      y += it.h + 10;
+    });
+
+    if (P.exItems.length) {
+      y += 6;
+      P.exItems.forEach((ex, i) => {
+        push('ex-' + i, '例句' + (P.exItems.length > 1 ? ' ' + (i + 1) : ''), x0, y, P.innerW, ex.h,
+          { font: r1(ex.enSize), color: '#475569', text: ex.enLines.join(' ') });
+        y += ex.h + 16;
+      });
+    }
+
+    if (P.badge) {
+      const d = BADGE_D;
+      push('badge-src', '右下来源圆标', P.x + P.w - BADGE_MX - d, P.y + P.h - BADGE_MY - d, d, d,
+        { font: BADGE_FS, color: P.badge.fg, text: P.badge.ch, kind: 'badge' });
+    }
+  }
+
+  /* ---- 信息卡 / 背景 / 安全边距 ---- */
+  push('card', '个人信息卡', L.card.x, L.card.y, L.card.w, L.card.h, { color: '#ffffff' });
+
+  if (state.bgImage) {
+    const natural = state.opts.bgStyle === 'natural';
+    push('bg', '背景图区（' + (natural ? '原比例' : '铺满') + '）', 0, 0, CW,
+      natural ? naturalImageH() : CH, { kind: 'bg' });
+  }
+
+  push('safe-l', '左安全边距', 0, 0, MX, CH, { kind: 'guide' });
+  push('safe-r', '右安全边距', CW - MX, 0, MX, CH, { kind: 'guide' });
+
+  /* 编号 = 版面从上到下的顺序，报号不用来回找 */
+  A.sort((a, b) => (a.box[1] - b.box[1]) || (a.box[0] - b.box[0]));
+  A.forEach((it, i) => { it.i = i + 1; });
+  return A;
+}
+
+/** 间距量尺：「这两块太挤」这种描述的可执行翻译 */
+function buildGaps(L) {
+  const G = [];
+  const add = (id, label, px) => {
+    if (px == null || !isFinite(px)) return;
+    G.push({ id, label, px: Math.round(px) });
+  };
+  const P = L.panel;
+  const textBottom = L.textBottom;
+
+  add('margin-x', '左右安全边距', MX);
+  add('top-pad', '海报顶 → 文字块顶', L.textTop);
+  add('gap-title-en', '大标题 → 英文句', L.en.y - L.title.h);
+  if (P.hidden) {
+    add('gap-text-card', '文字块 → 信息卡', L.card.y - textBottom);
+  } else {
+    add('gap-text-panel', '文字块 → 单词卡', P.y - textBottom);
+    add('gap-panel-card', '单词卡 → 信息卡', L.card.y - (P.y + P.h));
+  }
+  add('bottom-pad', '信息卡 → 海报底', CH - (L.card.y + L.card.h));
+  add('card-h', '信息卡高度', L.card.h);
+  return G;
+}
+
+/** 版面快照：编号 + 坐标 + 字号 + 间距，供 app/inspect.js 导出 */
+function inspect() {
+  const ctx = cvs.getContext('2d');
+  const L = state.layout || computeLayout(ctx);
+  const items = buildAnnots(ctx, L);
+
+  /* 自校验：标注框与点击命中表必须一致，否则说明派生公式与真实绘制漂移了 */
+  const rCard = (state.regions || []).find((r) => r.id === 'card');
+  const aCard = items.find((it) => it.id === 'card');
+  if (rCard && aCard && (Math.abs(rCard.x - aCard.box[0]) > 1 || Math.abs(rCard.y - aCard.box[1]) > 1)) {
+    console.warn('[inspect] 标注与命中表不一致 card:', rCard, aCard.box);
+  }
+
+  return {
+    canvas: { w: CW, h: CH },
+    items,
+    gaps: buildGaps(L),
+    opts: Object.assign({}, state.opts),
+    ratios: Object.assign({}, state.ratios),
+    meta: {
+      date: state.content.date, word: state.content.word,
+      autoKind: state.content.autoKind, bgImage: !!state.bgImage,
+    },
+  };
+}
+
 /* ============================== 绘制 ================================ */
 
 function render() {
@@ -866,6 +1058,8 @@ function render() {
   /* 版面即「可点区域地图」：留下坐标供点击命中与引导框使用 */
   state.layout = L;
   state.regions = buildHitRegions(L);
+  /* 版面标注：给人看的编号图与给 AI 读的坐标清单共用这份数据（仅调试模式） */
+  if (DEBUG) state.annots = buildAnnots(ctx, L);
   if (guide.active) guide.repaint();
   /* 正在编辑时版面变了（比如改了句子），让高亮框跟着元素走 */
   if (popId && isPopOpen()) {
@@ -1994,8 +2188,11 @@ function setOverlay(show, text) {
   /* 每次进入都放一遍引导：可编辑区域依次呼吸闪烁，几秒后自动退场 */
   if (!document.body.classList.contains('raw')) setTimeout(() => guide.start(), 500);
 
-  /* 调试/回归用具：?debug=1 时把命中表与坐标换算暴露出来 */
-  if (qs.get('debug') === '1') {
-    window.__ds = { state, hitTest, toClient, openPopover, closePopover, guide };
+  /* 调试/回归用具：?debug=1 时把命中表、坐标换算与版面标注暴露出来 */
+  if (DEBUG) {
+    window.__ds = {
+      state, hitTest, toClient, openPopover, closePopover, guide,
+      inspect,            // 版面清单：inspect.js 靠它导出 JSON 与标注图
+    };
   }
 })();
