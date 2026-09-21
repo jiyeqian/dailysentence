@@ -54,8 +54,8 @@ function ok(label, cond, extra) {
   const ids = (d) => d.items.map((it) => it.id);
   const box = (d, id) => (d.items.find((it) => it.id === id) || {}).box;
 
-  /* 按命中表反查屏幕坐标，再真的点下去（画布坐标 → 屏幕坐标由页面自己换算） */
-  async function tap(p, regionId, index = 0, dbl = false) {
+  /* 按命中表反查屏幕坐标（画布坐标 → 屏幕坐标由页面自己换算） */
+  async function pointOf(p, regionId, index = 0) {
     const pt = await p.evaluate(({ id, index }) => {
       const list = (window.__ds.state.regions || []).filter((r) => r.id === id);
       const r = list[index];
@@ -64,9 +64,25 @@ function ok(label, cond, extra) {
       return { x: Math.round(c.x), y: Math.round(c.y) };
     }, { id: regionId, index });
     if (!pt) throw new Error('找不到区域 ' + regionId);
+    return pt;
+  }
+
+  async function tap(p, regionId, index = 0, dbl = false) {
+    const pt = await pointOf(p, regionId, index);
     if (dbl) await p.mouse.dblclick(pt.x, pt.y);
     else await p.mouse.click(pt.x, pt.y);
     await p.waitForTimeout(420);
+    return pt;
+  }
+
+  /** 在某个区域上上下拖动（测试上下滑动缩放）；dy 为负 = 上滑 */
+  async function dragY(p, regionId, dy) {
+    const pt = await pointOf(p, regionId);
+    await p.mouse.move(pt.x, pt.y);
+    await p.mouse.down();
+    await p.mouse.move(pt.x, pt.y + dy, { steps: 8 });
+    await p.mouse.up();
+    await p.waitForTimeout(340);
     return pt;
   }
 
@@ -95,6 +111,31 @@ function ok(label, cond, extra) {
   ok('信息卡三边等距 48', mLeft === 48 && mRight === 48 && mBottom === 48,
     `左${mLeft} 右${mRight} 底${mBottom}`);
 
+  ok('正文左线 = 信息卡左线 48',
+    box(d, 'en')[0] === 48 && box(d, 'cn')[0] === 48 && box(d, 'source')[0] === 48,
+    `en ${box(d, 'en')[0]} / cn ${box(d, 'cn')[0]} / source ${box(d, 'source')[0]}`);
+  const db = box(d, 'badge-date');
+  ok('日期胶囊右线 = 48', db[0] + db[2] === 1080 - 48, '右线 ' + (db[0] + db[2]));
+  ok('默认背景是铺满裁切', (await p.textContent('#bgLabel')).trim() === '铺满');
+
+  const bandH = d.text.band.h;
+  const gapTop = d.gaps.find((g) => g.id === 'gap-img-text').px;
+  const gapBottom = d.gaps.find((g) => g.id === 'gap-text-card').px;
+  ok('句子在中部区域里垂直居中', Math.abs(gapTop - gapBottom) <= 2, `上${gapTop} 下${gapBottom}`);
+  /* 「尽量铺满」的真实不变式：再放大一档（0.02）就会装不下。
+     字号要取整、断行是跳变的，所以填满度可能是 90% 出头，这不是 bug */
+  const fill = await p.evaluate(() => {
+    const L = window.__ds.state.layout;
+    return {
+      total: Math.round(L.textBottom - L.textTop),
+      bandH: Math.round(L.band.h),
+      next: Math.round(window.__ds.textTotalAt(L.autoScale + 0.02)),
+    };
+  });
+  ok('初始尽量铺满中部区域（再大一档就溢出）', fill.next > fill.bandH,
+    `文字块 ${fill.total} / 活动区 ${fill.bandH}，放大一档 → ${fill.next}`);
+  ok('字号自适应放大（基准 42）', d.text.autoScale > 1, 'autoScale=' + d.text.autoScale);
+
   /* ---------------- 双击隐藏 ---------------- */
   console.log('标准版 · 双击隐藏');
   const enY0 = box(d, 'en')[1];
@@ -106,7 +147,14 @@ function ok(label, cond, extra) {
   ok('隐藏后信息卡位置不变（贴底）', JSON.stringify(box(d, 'card')) === JSON.stringify(cb));
   await shot(p, 's2-hide-date');
 
-  for (const id of ['en', 'cn', 'source']) {
+  /* 删掉一个元素后，剩下的内容自动放大补满中部区域 */
+  const fontBefore = d.items.find((it) => it.id === 'en').font;
+  await tap(p, 'source', 0, true);
+  d = await info(p);
+  const fontAfter = d.items.find((it) => it.id === 'en').font;
+  ok('删掉出处后字号自动放大', fontAfter > fontBefore, `${fontBefore} → ${fontAfter}`);
+
+  for (const id of ['en', 'cn']) {
     await tap(p, id, 0, true);
     d = await info(p);
     ok('双击 ' + id + ' 后消失', !ids(d).includes(id));
@@ -119,6 +167,34 @@ function ok(label, cond, extra) {
   await p.waitForFunction(() => window.__ds && window.__ds.state.layout);
   d = await info(p);
   ok('刷新后回到初始状态', ids(d).length === 6, ids(d).join(','));
+
+  /* ---------------- 中部区域：上下滑动缩放 ---------------- */
+  console.log('标准版 · 上下滑动缩放');
+  const fontOf = (x) => x.items.find((it) => it.id === 'en').font;
+  const f0 = fontOf(d);
+  await dragY(p, 'en', -120);                        /* 上滑 = 放大 */
+  d = await info(p);
+  ok('上滑放大字号', fontOf(d) > f0 && d.text.zoom > 1,
+    `${f0} → ${fontOf(d)}（zoom ${d.text.zoom}）`);
+  await shot(p, 's7-zoom-in');
+
+  const f1 = fontOf(d);
+  await dragY(p, 'en', 240);                         /* 下滑 = 缩小 */
+  d = await info(p);
+  ok('下滑缩小字号', fontOf(d) < f1, `${f1} → ${fontOf(d)}（zoom ${d.text.zoom}）`);
+
+  /* 缩到最小也不能压到卡片 */
+  await dragY(p, 'en', 900);
+  d = await info(p);
+  ok('缩到下限后仍不越过信息卡',
+    box(d, 'source')[1] + box(d, 'source')[3] <= box(d, 'card')[1],
+    `文字底 ${box(d, 'source')[1] + box(d, 'source')[3]} / 卡片顶 ${box(d, 'card')[1]}`);
+
+  await p.reload({ waitUntil: 'load' });
+  await p.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  d = await info(p);
+  ok('刷新后缩放归位', d.text.zoom === 1 && Math.abs(fontOf(d) - f0) < 0.6,
+    `zoom=${d.text.zoom} font=${fontOf(d)}（初始 ${f0}）`);
 
   /* ---------------- 单击选图 ---------------- */
   console.log('标准版 · 单击选图');
@@ -145,7 +221,7 @@ function ok(label, cond, extra) {
   /* ---------------- 长按保存 / 顶栏 ---------------- */
   console.log('标准版 · 保存与顶栏');
   const mid = await p.evaluate(() => {
-    const c = window.__ds.toClient(540, 1300);   /* 句子与卡片之间的空白处 */
+    const c = window.__ds.toClient(540, 1352);   /* 文字活动区与卡片之间的空白处 */
     return { x: Math.round(c.x), y: Math.round(c.y) };
   });
   await p.mouse.move(mid.x, mid.y);
@@ -167,7 +243,36 @@ function ok(label, cond, extra) {
   await p.waitForTimeout(500);
   const bg1 = await p.textContent('#bgLabel');
   ok('背景比例可切换', bg0 !== bg1, bg0 + ' → ' + bg1);
-  ok('铺满模式下画布仍是 1920', (await info(p)).canvas.h === 1920);
+  ok('切换后画布仍是 1920', (await info(p)).canvas.h === 1920);
+
+  /* ---------------- 顶栏「重新获取」= 回到初始状态 ---------------- */
+  console.log('标准版 · 重新获取回到初始');
+  /* 先把状态弄乱：删掉日期、换相册图、放大字号（背景比例上一步已切成原比例） */
+  await tap(p, 'badge-date', 0, true);
+  const fc2 = p.waitForEvent('filechooser', { timeout: 5000 });
+  await tap(p, 'img');
+  await (await fc2).setFiles(TEMPLATE);
+  await p.waitForTimeout(600);
+  await dragY(p, 'en', -120);
+  const messy = await info(p);
+  ok('（准备）状态已改乱',
+    messy.meta.hidden.date === true && messy.text.zoom > 1 && messy.opts.bgStyle === 'natural',
+    `hidden.date=${messy.meta.hidden.date} zoom=${messy.text.zoom} bg=${messy.opts.bgStyle}`);
+
+  await p.click('#btnRefresh');
+  await p.waitForTimeout(2800);
+  const back = await info(p);
+  ok('隐藏状态被清空',
+    JSON.stringify(back.meta.hidden) === JSON.stringify({ date: false, en: false, cn: false, source: false }));
+  ok('缩放归位', back.text.zoom === 1, 'zoom=' + back.text.zoom);
+  ok('背景比例回到初始（铺满）',
+    back.opts.bgStyle === 'cover' && (await p.textContent('#bgLabel')).trim() === '铺满',
+    back.opts.bgStyle);
+  ok('六个元素都回来了',
+    JSON.stringify(ids(back)) === JSON.stringify(['bg', 'badge-date', 'en', 'cn', 'source', 'card']),
+    ids(back).join(','));
+  ok('重新获取后画布仍 1920', back.canvas.h === 1920);
+  await shot(p, 's8-after-refresh');
 
   /* ---------------- 桌面视口 ---------------- */
   console.log('桌面视口');
@@ -185,6 +290,8 @@ function ok(label, cond, extra) {
   const ld = await info(lp);
   ok('长版仍有单词卡与关键词', ids(ld).includes('panel') && ids(ld).includes('title'), ids(ld).join(','));
   ok('长版仍按内容长高（≥1920）', ld.canvas.h >= 1920, 'h=' + ld.canvas.h);
+  ok('长版默认仍是原比例（只有标准版默认铺满）',
+    (await lp.textContent('#bgLabel')).trim() === '原比例', await lp.textContent('#bgLabel'));
   await shot(lp, 'l1-long');
   await lp.close();
 

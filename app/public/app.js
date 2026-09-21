@@ -26,9 +26,19 @@ const GAP_PANEL_CARD = 46;  // 单词卡片 → 信息卡（长版）
 const IMG_BLOCK_H = 648;      // 顶部图片区高度：图片在这一块里 cover / contain
 const CARD_PAD = 48;          // 信息卡距左 / 右 / 底，三边等距
 const CARD_H = 496;           // 信息卡高度（沿用模板比例换算出的大小）
-const GAP_IMG_TEXT = 64;      // 顶部图片区 → 文字块
-const GAP_TEXT_CARD = 48;     // 文字块 → 信息卡（缩字时保留的最小留白）
-const TEXT_SCALE_MIN = 0.6;   // 自动缩字下限：缩到这里仍装不下就允许溢出
+const TEXT_X = CARD_PAD;      // 标准版正文左基线 = 卡片左线（同一条纵向边线）
+
+/* 中部区域：日期胶囊固定在顶部靠右，英文 + 中文 + 出处在其下方的活动区里居中铺满 */
+const DATE_TOP_PAD = 24;      // 日期胶囊距顶部图片区底
+const DATE_H = 52;            // 日期胶囊高度
+const GAP_DATE_BAND = 28;     // 日期胶囊 → 文字活动区
+const GAP_TEXT_CARD = 48;     // 文字活动区距信息卡顶（同时是底部最小留白）
+const AUTO_MIN = 0.5;         // 自适应倍率下限
+const AUTO_MAX = 2.0;         // 自适应倍率上限（用户定的「最多翻倍」）
+const ZOOM_MIN = 0.6;         // 手动缩放范围
+const ZOOM_MAX = 1.6;
+const ZOOM_PER_PX = 0.001;    // 每像素缩放量：上滑 200px ≈ +20%
+const DEFAULT_BG = 'cover';   // 默认背景：铺满裁切
 const DBL_MS = 300;           // 双击判定窗口
 
 const POS_COLOR = {
@@ -48,6 +58,7 @@ const state = {
   annots: [],           // 版面标注表（画布坐标，仅 ?debug=1 登记）
   /* 双击隐藏的元素：只在内存里，刷新即恢复（标准版才有这套交互） */
   hidden: { date: false, en: false, cn: false, source: false },
+  zoom: 1,              // 中部区域的用户缩放系数（叠在自适应倍率上，1 = 自动）
   viewDate: '',         // 正在看哪一天（''=今天）；往日数据来自服务端存档
   archived: false,      // 这份数据是从存档来的（不是上游实时）
   archiveOnly: false,   // 上游挂了，整份海报都是存档顶上的
@@ -61,7 +72,7 @@ const state = {
   template: null,
   ratios: { ...DEFAULT_RATIOS },
   opts: {
-    bgStyle: 'natural',
+    bgStyle: DEFAULT_BG,
     longPoster: false,    // true = 长版海报（?long=1），本阶段保持旧版面不动
   },
 };
@@ -430,7 +441,7 @@ function computeLayout(ctx) {
   return state.opts.longPoster ? computeLayoutLong(ctx) : computeLayoutStandard(ctx);
 }
 
-/** 标准版：固定 1080×1920，三段式 */
+/** 标准版：固定 1080×1920，三段式；中部区域里的句子自动放大/缩小并纵向居中 */
 function computeLayoutStandard(ctx) {
   CH = CH_MIN;
 
@@ -443,24 +454,46 @@ function computeLayoutStandard(ctx) {
     shifted: false,
   };
 
-  const textTop = IMG_BLOCK_H + GAP_IMG_TEXT;
-  const avail = card.y - GAP_TEXT_CARD - textTop;
-
-  /* 自动缩字：只缩文字块，缩到装得下为止；到下限还超就允许溢出，版面永不长高 */
-  let scale = 1;
-  let text = buildTextBlockStandard(ctx, scale);
-  while (text.total > avail && scale > TEXT_SCALE_MIN) {
-    scale = Math.max(TEXT_SCALE_MIN, Math.round((scale - 0.02) * 100) / 100);
-    text = buildTextBlockStandard(ctx, scale);
+  /* 日期胶囊：固定在中部区域顶部靠右，不参与居中 */
+  const dateTop = IMG_BLOCK_H + DATE_TOP_PAD;
+  let date = { on: false, x: CW - TEXT_X, y: dateTop, w: 0, h: DATE_H };
+  if (!state.hidden.date && state.content.date) {
+    ctx.font = T(25, 600, F_SANS);
+    date = {
+      on: true,
+      x: CW - TEXT_X - (measureSpaced(ctx, state.content.date, 2.5) + 56),
+      y: dateTop,
+      w: measureSpaced(ctx, state.content.date, 2.5) + 56,
+      h: DATE_H,
+    };
   }
 
+  /* 文字活动区：日期胶囊之下、信息卡之上；日期被删掉就把那一行还给句子 */
+  const bandTop = date.on ? dateTop + DATE_H + GAP_DATE_BAND : IMG_BLOCK_H + DATE_TOP_PAD;
+  const bandBottom = card.y - GAP_TEXT_CARD;
+  const bandH = bandBottom - bandTop;
+
+  /* 自适应：找「尽量填满活动区」的倍率 —— 装得下就放大，装不下就缩小 */
+  const autoScale = solveAutoScale(ctx, bandH);
+
+  /* 手动缩放的倍率直接叠上去：放大到超出活动区是用户主动要的结果，让它居中溢出 */
+  const K = Math.max(AUTO_MIN, Math.round(autoScale * state.zoom * 100) / 100);
+  const text = buildTextBlockStandard(ctx, K);
+
+  /* 在活动区里垂直居中；装不下时上下同量溢出，仍然是居中的 */
+  const textTop = bandTop + (bandH - text.total) / 2;
+
   return {
-    K: scale,
+    K,
+    autoScale,
+    zoom: state.zoom,
+    textX: TEXT_X,
+    band: { top: bandTop, bottom: bandBottom, h: bandH },
     textTop,
     textBottom: textTop + text.total,
     title: null,              /* 标准版没有关键词大标题 */
     rule: { on: false },      /* 标准版没有标题分隔线 */
-    date: text.date,
+    date,
     en: text.en,
     cn: text.cn,
     source: text.source,
@@ -469,6 +502,42 @@ function computeLayoutStandard(ctx) {
     ch: CH,
     imgBlock: { y: 0, h: IMG_BLOCK_H },
   };
+}
+
+/**
+ * 自适应倍率：在 [AUTO_MIN, AUTO_MAX] 内找最大的、能把文字块装进 bandH 的倍率。
+ * 文字块高度对倍率单调，所以二分 12 次就够（比逐档步进少一个量级的 measureText）；
+ * 结果按「文字块内容 + 可用高度」缓存，拖动缩放时不会重复求解。
+ */
+let _autoCacheKey = '';
+let _autoCacheVal = 1;
+function solveAutoScale(ctx, bandH) {
+  const h = state.hidden;
+  const c = state.content;
+  const key = [bandH, h.date ? 1 : 0, h.en ? 1 : 0, h.cn ? 1 : 0, h.source ? 1 : 0,
+    c.en, c.cn, c.source].join('\u0001');
+  if (key === _autoCacheKey) return _autoCacheVal;
+
+  const totalAt = (k) => buildTextBlockStandard(ctx, k).total;
+  let K = AUTO_MIN;
+  if (totalAt(AUTO_MAX) <= bandH) {
+    K = AUTO_MAX;                       /* 连上限都装得下：用上限，短文不失控 */
+  } else {
+    let lo = AUTO_MIN;
+    let hi = AUTO_MAX;
+    for (let i = 0; i < 12; i++) {
+      const mid = (lo + hi) / 2;
+      if (totalAt(mid) <= bandH) { lo = mid; K = mid; } else { hi = mid; }
+    }
+    K = Math.floor(K * 100) / 100;
+  }
+  /* 字号会被 T() 取整（Math.round），所以倍率取整后必须复核一次：
+     1.367 → 1.37 会让字号从 57 跳到 58，文字块瞬间多一行、撑破活动区 */
+  while (K > AUTO_MIN && totalAt(K) > bandH) K = Math.round((K - 0.01) * 100) / 100;
+
+  _autoCacheKey = key;
+  _autoCacheVal = K;
+  return K;
 }
 
 /** 长版：原有流式版面（单词卡 + 例句），按内容长高 */
@@ -484,11 +553,19 @@ function computeLayoutLong(ctx) {
 
   return {
     K: M.K,
+    autoScale: M.K,           /* 长版不做自适应缩放，这里只为字段形状统一 */
+    zoom: 1,
+    textX: MX,                /* 长版继续用 84 的文字安全边距 */
+    band: null,
     textTop: M.textTop,
     textBottom: M.textBottom,
     title: M.text.title,
     rule: M.text.rule,
-    date: M.text.date,
+    /* 日期胶囊在长版与标题同行；这里统一换算成「画布绝对坐标」*/
+    date: Object.assign({}, M.text.date, {
+      y: M.textTop + M.text.date.y,
+      x: CW - MX - M.text.date.w,
+    }),
     en: M.text.en,
     cn: M.text.cn,
     source: M.text.source,
@@ -581,16 +658,11 @@ function buildTextBlock(ctx, K) {
  * 返回的 y 都是「相对文字块顶端」的偏移，与长版同一套画法。
  */
 function buildTextBlockStandard(ctx, K) {
-  const maxW = CW - 2 * MX;
+  const maxW = CW - 2 * TEXT_X;
   const h = state.hidden;
 
-  /* 日期胶囊：自己占一行，靠右 */
-  let date = { on: false, y: 0, h: 52, w: 0 };
-  if (!h.date && state.content.date) {
-    ctx.font = T(25, 600, F_SANS);
-    date = { on: true, y: 0, h: 52, w: measureSpaced(ctx, state.content.date, 2.5) + 56 };
-  }
-  let y = date.on ? date.h + 34 * K : 0;
+  /* 日期胶囊不在这条流里（它固定在中部区域顶部靠右），所以从 0 开始量 */
+  let y = 0;
 
   /* 英文 */
   const enSize = 42 * K;
@@ -618,7 +690,6 @@ function buildTextBlockStandard(ctx, K) {
 
   return {
     total: y,
-    date,
     en: { on: enOn, size: enSize, lh: enLH, lines: enLines, y: enY },
     cn: { on: cnOn, size: cnSize, lh: cnLH, lines: cnLines, y: cnY },
     source: { on: sourceOn, size: sourceSize, y: sourceY, text: state.content.source },
@@ -820,35 +891,36 @@ function buildAnnots(ctx, L) {
   };
 
   const c = state.content;
-  const maxW = CW - 2 * MX;
+  const tx = L.textX;
+  const maxW = CW - 2 * tx;
   const T0 = L.textTop;
 
   /* ---- 顶部文字块（标准版没有大标题与分隔线） ---- */
   if (L.title) {
     const t = L.title;
     ctx.font = T(t.size, 700, F_SERIF);
-    push('title', '大标题关键词', MX, T0, Math.min(ctx.measureText(t.text).width, maxW), t.h,
+    push('title', '大标题关键词', tx, T0, Math.min(ctx.measureText(t.text).width, maxW), t.h,
       { font: r1(t.size), color: '#ffffff', text: t.text });
   }
 
   if (L.date && L.date.on) {
-    push('badge-date', '日期胶囊', CW - MX - L.date.w, T0 + L.date.y, L.date.w, L.date.h,
+    push('badge-date', '日期胶囊', L.date.x, L.date.y, L.date.w, L.date.h,
       { font: 25, color: 'rgba(255,255,255,0.94)', text: c.date });
   }
 
   if (L.rule.on) {
-    push('rule', '标题分隔线', MX, T0 + L.rule.y, L.rule.w, L.rule.h,
+    push('rule', '标题分隔线', tx, T0 + L.rule.y, L.rule.w, L.rule.h,
       { color: 'rgba(255,255,255,0.95)' });
   }
 
   if (L.en.on) {
-    push('en', '英文句', MX, T0 + L.en.y,
+    push('en', '英文句', tx, T0 + L.en.y,
       blockW(L.en.lines, L.en.size, 400, F_SANS), L.en.lines.length * L.en.lh,
       { font: r1(L.en.size), color: 'rgba(255,255,255,0.97)', text: L.en.lines.join(' ') });
   }
 
   if (L.cn.on) {
-    push('cn', '中文句', MX, T0 + L.cn.y,
+    push('cn', '中文句', tx, T0 + L.cn.y,
       blockW(L.cn.lines, L.cn.size, 400, F_SANS), L.cn.lines.length * L.cn.lh,
       { font: r1(L.cn.size), color: 'rgba(255,255,255,0.88)', text: L.cn.lines.join('') });
   }
@@ -856,7 +928,7 @@ function buildAnnots(ctx, L) {
   if (L.source.on) {
     const st = '—— ' + L.source.text;
     ctx.font = T(L.source.size, 500, F_SANS);
-    push('source', '出处', MX, T0 + L.source.y, ctx.measureText(st).width, L.source.size * 1.4,
+    push('source', '出处', tx, T0 + L.source.y, ctx.measureText(st).width, L.source.size * 1.4,
       { font: r1(L.source.size), color: 'rgba(255,255,255,0.62)', text: st });
   }
 
@@ -950,22 +1022,25 @@ function buildGaps(L) {
   const textBottom = L.textBottom;
 
   if (L.imgBlock) {
-    /* 标准版：顶部图片区是固定的一段 */
+    /* 标准版：顶部图片区固定，句子在中部活动区里自适应并居中 */
     add('img-h', '顶部图片区高度', L.imgBlock.h);
-    add('gap-img-text', '图片区 → 文字块', L.textTop - (L.imgBlock.y + L.imgBlock.h));
-    add('margin-x', '信息卡距左右', L.card.x);
+    add('band-top', '图片区 → 中部活动区顶', L.band.top - (L.imgBlock.y + L.imgBlock.h));
+    add('band-h', '中部活动区高度', L.band.h);
+    add('gap-img-text', '活动区顶 → 文字块顶', L.textTop - L.band.top);
+    add('gap-text-card', '文字块底 → 活动区底', L.band.bottom - textBottom);
+    add('margin-x', '正文与信息卡距左右', L.textX);
   } else {
     add('margin-x', '左右安全边距', MX);
     add('top-pad', '海报顶 → 文字块顶', L.textTop);
     if (L.title && L.date && L.date.on) {
       add('gap-title-en', '大标题 → 英文句', L.en.y - L.title.h);
     }
-  }
-  if (P && P.hidden) {
-    add('gap-text-card', '文字块 → 信息卡', L.card.y - textBottom);
-  } else {
-    add('gap-text-panel', '文字块 → 单词卡', P.y - textBottom);
-    add('gap-panel-card', '单词卡 → 信息卡', L.card.y - (P.y + P.h));
+    if (P && P.hidden) {
+      add('gap-text-card', '文字块 → 信息卡', L.card.y - textBottom);
+    } else {
+      add('gap-text-panel', '文字块 → 单词卡', P.y - textBottom);
+      add('gap-panel-card', '单词卡 → 信息卡', L.card.y - (P.y + P.h));
+    }
   }
   add('bottom-pad', '信息卡 → 海报底', CH - (L.card.y + L.card.h));
   add('card-h', '信息卡高度', L.card.h);
@@ -991,9 +1066,18 @@ function inspect() {
     gaps: buildGaps(L),
     opts: Object.assign({}, state.opts),
     ratios: Object.assign({}, state.ratios),
+    /* 中部区域的缩放三件套：K = autoScale × zoom（已夹紧），便于 --diff 自证「字体放大了多少」 */
+    text: {
+      K: L.K,
+      autoScale: L.autoScale,
+      zoom: L.zoom == null ? 1 : L.zoom,
+      x: L.textX,
+      band: L.band ? { top: L.band.top, h: L.band.h } : null,
+    },
     meta: {
       date: state.content.date, word: state.content.word,
       autoKind: state.content.autoKind, bgImage: !!state.bgImage,
+      hidden: Object.assign({}, state.hidden),
     },
   };
 }
@@ -1173,28 +1257,6 @@ function drawTopText(ctx, L) {
     ctx.shadowOffsetY = 0;
   };
 
-  /* 日期胶囊：标准版自己占一行，长版与标题同行 */
-  if (L.date && L.date.on) {
-    const label = state.content.date;
-    ctx.font = T(25, 600, F_SANS);
-    const pw = L.date.w;
-    const ph = L.date.h;
-    const px = CW - MX - pw;
-    const py = L.textTop + L.date.y;
-    ctx.save();
-    roundRect(ctx, px, py, pw, ph, ph / 2);
-    ctx.fillStyle = 'rgba(255,255,255,0.14)';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.34)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    ctx.restore();
-    ctx.fillStyle = 'rgba(255,255,255,0.94)';
-    ctx.textBaseline = 'middle';
-    drawSpaced(ctx, label, px + 28, py + ph / 2 + 1, 2.5);
-    ctx.textBaseline = 'alphabetic';
-  }
-
   /* 关键词大标题：只有长版有 */
   if (L.title) {
     const t = L.title;
@@ -1229,7 +1291,7 @@ function drawTopText(ctx, L) {
   ctx.fillStyle = 'rgba(255,255,255,0.97)';
   shadow();
   L.en.lines.forEach((ln, i) => {
-    ctx.fillText(ln, MX, L.textTop + L.en.y + i * L.en.lh + L.en.size * 0.86);
+    ctx.fillText(ln, L.textX, L.textTop + L.en.y + i * L.en.lh + L.en.size * 0.86);
   });
   ctx.restore();
 
@@ -1239,7 +1301,7 @@ function drawTopText(ctx, L) {
   ctx.fillStyle = 'rgba(255,255,255,0.88)';
   shadow();
   L.cn.lines.forEach((ln, i) => {
-    ctx.fillText(ln, MX, L.textTop + L.cn.y + i * L.cn.lh + L.cn.size * 0.86);
+    ctx.fillText(ln, L.textX, L.textTop + L.cn.y + i * L.cn.lh + L.cn.size * 0.86);
   });
   ctx.restore();
 
@@ -1249,8 +1311,31 @@ function drawTopText(ctx, L) {
     ctx.font = T(L.source.size, 500, F_SANS);
     ctx.fillStyle = 'rgba(255,255,255,0.62)';
     shadow();
-    ctx.fillText('—— ' + L.source.text, MX, L.textTop + L.source.y + L.source.size * 0.86);
+    ctx.fillText('—— ' + L.source.text, L.textX, L.textTop + L.source.y + L.source.size * 0.86);
     ctx.restore();
+  }
+
+  /* 日期胶囊画在最后：句子被手动放大溢出时也不会把它盖住。
+     标准版固定在中部区域顶部靠右，长版与标题同行（坐标为画布绝对值） */
+  if (L.date && L.date.on) {
+    const label = state.content.date;
+    ctx.font = T(25, 600, F_SANS);
+    const pw = L.date.w;
+    const ph = L.date.h;
+    const px = L.date.x;
+    const py = L.date.y;
+    ctx.save();
+    roundRect(ctx, px, py, pw, ph, ph / 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.14)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.34)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = 'rgba(255,255,255,0.94)';
+    ctx.textBaseline = 'middle';
+    drawSpaced(ctx, label, px + 28, py + ph / 2 + 1, 2.5);
+    ctx.textBaseline = 'alphabetic';
   }
 
   noShadow();
@@ -1454,14 +1539,47 @@ function scheduleRender() {
   });
 }
 
+/** 进入页面时的背景比例：?bg= 优先，其次按版本取默认（标准版铺满，长版维持原比例） */
+function initialBgStyle() {
+  const bg = QS.get('bg');
+  if (bg === 'cover') return 'cover';
+  if (bg === 'natural' || bg === 'band' || bg === 'card') return 'natural';  /* 旧参数归入原比例 */
+  return state.opts.longPoster ? 'natural' : DEFAULT_BG;
+}
+
+/**
+ * 回到「刚打开这个页面」的状态：隐藏清空、缩放归位、背景比例回默认、
+ * 配图与信息卡模板恢复默认，再重新取一次当日内容。
+ *
+ * 顶栏「重新获取」与首次启动（boot）走同一条路径 —— 免得两套初始化逻辑各自演化。
+ * refetch = true 时跳过缓存重新抓上游。
+ */
+async function resetToInitial(refetch) {
+  state.hidden = { date: false, en: false, cn: false, source: false };
+  state.zoom = 1;
+  _autoCacheKey = '';                       /* 让自适应倍率重新求解 */
+  state.opts.bgStyle = initialBgStyle();
+  state.ratios = { ...DEFAULT_RATIOS };
+  try {
+    await loadTemplate('assets/template.jpg');
+  } catch (e) { /* 模板加载失败就沿用默认比例 */ }
+  await loadDaily(!!refetch);
+  syncBgUI();
+  scheduleRender();
+}
+
 /** 顶栏四枚按钮 + 两个相册选图入口（界面上再没有别的控件） */
 function bindTopbar() {
+  /* 「重新获取」= 回到初始状态（不只是换句子） */
   $('btnRefresh').addEventListener('click', async () => {
-    const past = !!(state.viewDate && state.viewDate !== todayISO());
-    $('btnRefresh').classList.add('spin');
-    await loadDaily(true);
-    $('btnRefresh').classList.remove('spin');
-    if (past) toast('已回到今天');
+    const btn = $('btnRefresh');
+    btn.classList.add('spin');
+    try {
+      await resetToInitial(true);
+      toast('已回到初始状态');
+    } finally {
+      btn.classList.remove('spin');
+    }
   });
 
   /* 相册选图：顶部图片 */
@@ -1527,25 +1645,26 @@ async function readPickedImage(e) {
 /** 可点区域表：坐标是画布坐标，id 与标注表一致（这样双击时能直接对上元素） */
 function buildHitRegions(L) {
   const R = [];
-  const maxW = CW - 2 * MX;
+  const tx = L.textX;
+  const maxW = CW - 2 * tx;
   const push = (id, x, y, w, h) => {
     if (w > 0 && h > 0) R.push({ id, x, y, w, h });
   };
 
-  /* 标准版：文字元素各自成区，双击各自隐藏 */
+  /* 标准版：文字元素各自成区，双击各自隐藏、上下拖动即缩放 */
   if (L.source.on) {
-    push('source', MX - 16, L.textTop + L.source.y - 12, maxW * 0.72, L.source.size * 1.4 + 20);
+    push('source', tx - 16, L.textTop + L.source.y - 12, maxW * 0.72, L.source.size * 1.4 + 20);
   }
   if (L.cn && L.cn.on) {
-    push('cn', MX - 16, L.textTop + L.cn.y - 14, maxW + 32,
+    push('cn', tx - 16, L.textTop + L.cn.y - 14, maxW + 32,
       L.cn.lines.length * L.cn.lh + 20);
   }
   if (L.en && L.en.on) {
-    push('en', MX - 16, L.textTop + L.en.y - 14, maxW + 32,
+    push('en', tx - 16, L.textTop + L.en.y - 14, maxW + 32,
       L.en.lines.length * L.en.lh + 20);
   }
   if (L.date.on) {
-    push('badge-date', CW - MX - L.date.w - 6, L.textTop + L.date.y - 6, L.date.w + 12, L.date.h + 12);
+    push('badge-date', L.date.x - 6, L.date.y - 6, L.date.w + 12, L.date.h + 12);
   }
 
   /* 长版：单词卡按「关键词行 / 释义区」分开命中 */
@@ -1556,7 +1675,7 @@ function buildHitRegions(L) {
     push('defs', P.x, P.y + rowH, P.w, Math.max(0, P.h - rowH));
   }
   if (L.title) {
-    push('word', MX - 16, L.textTop - 12, Math.min(maxW + 32, L.title.size * 6.2), L.title.h + 24);
+    push('word', tx - 16, L.textTop - 12, Math.min(maxW + 32, L.title.size * 6.2), L.title.h + 24);
   }
 
   /* 信息卡与顶部图片区：单击 = 从相册选图（放最后，别挡住上面的具体元素） */
@@ -1588,10 +1707,14 @@ const PRESS = { moved: 8, maxMs: 620, holdMs: 520 };
 /** 双击能删掉的区域 → 隐藏状态里的键 */
 const HIDE_MAP = { 'badge-date': 'date', en: 'en', cn: 'cn', source: 'source' };
 
+/** 上下滑动缩放只挂在句子元素上（它们单击无功能，正好当拖动条用） */
+const ZOOM_REGIONS = new Set(['en', 'cn', 'source']);
+
 /**
- * stage 上只有三种手势：
+ * stage 上的手势：
  *   单击顶部图片 / 信息卡 = 从手机相册选图（这两块不定义双击）
  *   双击日期胶囊 / 英文 / 中文 / 出处 = 从海报上删掉它（不可逆，刷新恢复）
+ *   在英文 / 中文 / 出处上上下拖动 = 实时缩放中部区域字号（上滑放大、下滑缩小）
  *   长按海报 = 保存到相册
  */
 function bindGestures() {
@@ -1601,6 +1724,8 @@ function bindGestures() {
   let longFired = false;
   let lastTap = { id: '', t: 0 };
   let pickerAt = 0;          /* 刚开过相册的防抖时间戳 */
+  let zoomDrag = null;       /* { startY, startZoom, active } */
+  let limitHit = '';         /* 已经提示过的缩放极限，避免刷屏 */
 
   const clear = () => {
     clearTimeout(holdTimer);
@@ -1609,12 +1734,36 @@ function bindGestures() {
     longFired = false;
   };
 
+  /** 改缩放系数并重绘；到上下限只提示一次 */
+  const applyZoom = (z) => {
+    const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+    if (clamped !== state.zoom) {
+      state.zoom = clamped;
+      scheduleRender();
+    }
+    const limit = clamped >= ZOOM_MAX ? 'max' : (clamped <= ZOOM_MIN ? 'min' : '');
+    if (limit && limit !== limitHit) {
+      limitHit = limit;
+      toast(limit === 'max' ? '字号已放到最大' : '字号已缩到最小');
+    } else if (!limit) {
+      limitHit = '';
+    }
+  };
+
   stage.addEventListener('pointerdown', (e) => {
     if (e.button && e.button !== 0) return;
     if (e.target.closest('.topbar')) return;
     wakeTopbar();
     start = { x: e.clientX, y: e.clientY, t: Date.now() };
     longFired = false;
+    zoomDrag = null;
+    /* 起点落在句子元素上才允许拖动缩放（长版不参与） */
+    if (!state.opts.longPoster) {
+      const hit = hitTestAt(e.clientX, e.clientY);
+      if (hit && ZOOM_REGIONS.has(hit.id)) {
+        zoomDrag = { startY: e.clientY, startZoom: state.zoom, active: false };
+      }
+    }
     clearTimeout(holdTimer);
     /* 长按 = 保存海报 */
     holdTimer = setTimeout(() => {
@@ -1625,11 +1774,27 @@ function bindGestures() {
   });
 
   stage.addEventListener('pointermove', (e) => {
+    if (zoomDrag) {
+      const dy = e.clientY - zoomDrag.startY;
+      if (!zoomDrag.active && Math.abs(dy) > PRESS.moved) {
+        zoomDrag.active = true;
+        clear();                 /* 拖动期间取消长按与点击判定 */
+      }
+      if (zoomDrag.active) {
+        applyZoom(zoomDrag.startZoom * (1 + (-dy) * ZOOM_PER_PX));
+        return;
+      }
+    }
     if (!start) return;
     if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > PRESS.moved) clear();
   });
 
   stage.addEventListener('pointerup', (e) => {
+    if (zoomDrag) {
+      const dragged = zoomDrag.active;
+      zoomDrag = null;
+      if (dragged) { clear(); return; }   /* 拖动结束，不算点击 */
+    }
     if (!start) return;
     const moved = Math.hypot(e.clientX - start.x, e.clientY - start.y) > PRESS.moved;
     const spent = Date.now() - start.t;
@@ -1659,7 +1824,7 @@ function bindGestures() {
     }
   });
 
-  stage.addEventListener('pointercancel', clear);
+  stage.addEventListener('pointercancel', () => { zoomDrag = null; clear(); });
   stage.addEventListener('contextmenu', (e) => e.preventDefault());
 }
 
@@ -1751,9 +1916,9 @@ function setOverlay(show, text) {
 (async function boot() {
   const qs = QS;
   if (qs.get('raw') === '1') document.body.classList.add('raw');
-  const bg = qs.get('bg');
-  if (bg) state.opts.bgStyle = bg === 'cover' ? 'cover' : 'natural';  /* 旧参数 band/card 归入原比例 */
+  /* longPoster 先定，背景比例的默认值要按版本取（标准版铺满 / 长版原比例） */
   if (qs.get('long') === '1' || qs.get('ex') === '1') state.opts.longPoster = true;
+  state.opts.bgStyle = initialBgStyle();
   bindTopbar();
   syncBgUI();
 
@@ -1767,12 +1932,8 @@ function setOverlay(show, text) {
     if (document.fonts.ready) await document.fonts.ready;
   } catch (e) {}
 
-  state.ratios = { ...DEFAULT_RATIOS };
-  try {
-    await loadTemplate('assets/template.jpg');
-  } catch (e) {}
-
-  await loadDaily(false);
+  /* 与应用初始状态对齐（同一段代码，顶栏「重新获取」也走它） */
+  await resetToInitial(false);
   if (!state.apiData) {
     setOverlay(false);
     render();
@@ -1784,6 +1945,9 @@ function setOverlay(show, text) {
     window.__ds = {
       state, hitTest, toClient, hitTestAt, hideElement,
       inspect,            // 版面清单：inspect.js 靠它导出 JSON 与标注图
+      /* 排版中间量：排查「自适应倍率算错」时可以直接在页面里量 */
+      textTotalAt: (k) => buildTextBlockStandard(cvs.getContext('2d'), k).total,
+      solveAutoScale: (bandH) => solveAutoScale(cvs.getContext('2d'), bandH),
     };
   }
 })();

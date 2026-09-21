@@ -69,12 +69,14 @@ body { position: fixed; inset: 0; overflow: hidden; touch-action: manipulation; 
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
   touch-action: manipulation;
 }
-/* 长按是「保存」，双击是「隐藏」，必须压住系统的图片菜单与文本选择 */
+/* 长按是「保存」，双击是「隐藏」，上下拖动是「缩放字号」——
+   所以既要压住系统菜单与文本选择，也要压住浏览器自己的滚动 / 橡皮筋 */
 #stage, .canvas-wrap, #poster {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
 }
+body:not(.raw) #stage { touch-action: none; }
 
 .overlay {
   position: absolute; inset: 0;
