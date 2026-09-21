@@ -1176,11 +1176,13 @@ function inspect() {
 
   return {
     /* w/h = 设计坐标（恒以 1080 为基准，标注通道与回归都用它）；
-       physW/physH = 实际位图 = 设备分辨率（手机自适应时的真实出图尺寸） */
+       physW/physH = 设备位图尺寸（手机 = 设备分辨率；桌面 = 1080×1920）；
+       bitmapW/bitmapH = 画布缓冲实际尺寸 —— 长版会按内容长高，比 physH 更高 */
     canvas: {
       w: CW, h: CH,
       u: Math.round(U * 10000) / 10000,
       physW: PHYS.w, physH: PHYS.h,
+      bitmapW: cvs.width, bitmapH: cvs.height,
       adaptive: ADAPTIVE,
       safe: { top: Math.round(SAFE.top), bottom: Math.round(SAFE.bottom) },
     },

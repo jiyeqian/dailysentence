@@ -552,12 +552,9 @@ function ok(label, cond, extra) {
     JSON.stringify(md.canvas));
   ok('手机：设计坐标仍是 1080 基准、U > 1（部件等比放大）',
     md.canvas.w === 1080 && md.canvas.u > 1, `w=${md.canvas.w} u=${md.canvas.u}`);
-  ok('手机：canvas 元素尺寸 = 位图（保存即设备原生分辨率）',
-    await mp.evaluate(() => {
-      const c = document.getElementById('poster');
-      const d = window.__ds.inspect().canvas;
-      return c.width === d.physW && c.height === d.physH;
-    }));
+  ok('手机：标准版画布缓冲 = 设备位图（保存即设备原生分辨率）',
+    md.canvas.bitmapW === md.canvas.physW && md.canvas.bitmapH === md.canvas.physH,
+    `${md.canvas.bitmapW}x${md.canvas.bitmapH}`);
   ok('手机：海报贴边（body.adaptive → #stage 无内边距）',
     await mp.evaluate(() => document.body.classList.contains('adaptive') &&
       getComputedStyle(document.getElementById('stage')).padding === '0px'));
@@ -578,6 +575,17 @@ function ok(label, cond, extra) {
     Math.round(rd.canvas.h) === Math.round(md.canvas.h) &&
     Math.round(rd.text.band.h) === Math.round(md.text.band.h),
     `设计高 ${Math.round(md.canvas.h)} → ${Math.round(rd.canvas.h)}`);
+
+  /* 视口真的变了（Safari 工具栏收起 / 展开就是这种）→ 防抖后按新尺寸重排 */
+  await mp.setViewportSize({ width: 500, height: 1000 });
+  await mp.waitForTimeout(800);
+  const vd = await info(mp);
+  ok('视口变化后画布跟着变（500×1000 @3x → 1500×3000）',
+    vd.canvas.physW === 1500 && vd.canvas.physH === 3000,
+    `${vd.canvas.physW}x${vd.canvas.physH}`);
+  ok('视口变化后设计高跟着变（更高的屏幕 → 更大的句子区）',
+    vd.canvas.h > md.canvas.h && vd.text.band.h > md.text.band.h,
+    `设计高 ${Math.round(md.canvas.h)} → ${Math.round(vd.canvas.h)}`);
   await mobileCtx.close();
 
   /* ---------------- 长版：本阶段必须没被动过 ---------------- */
@@ -586,7 +594,10 @@ function ok(label, cond, extra) {
   await lp.waitForTimeout(800);
   const ld = await info(lp);
   ok('长版仍有单词卡与关键词', ids(ld).includes('panel') && ids(ld).includes('title'), ids(ld).join(','));
-  ok('长版仍按内容长高（≥1920）', ld.canvas.h >= 1920, 'h=' + ld.canvas.h);
+  ok('长版仍按内容长高（设计高 ≥ 设备画布高）', ld.canvas.h >= 1920, 'h=' + ld.canvas.h);
+  ok('长版：画布缓冲比设备位图更高（内容长高，不是被裁掉）',
+    ld.canvas.bitmapH > ld.canvas.physH,
+    `缓冲 ${ld.canvas.bitmapH} vs 设备 ${ld.canvas.physH}`);
   ok('长版仍是原比例模式（只有标准版走「宽度铺满 + 裁切」）',
     ld.opts.bgStyle === 'natural' && ld.text.band === null, JSON.stringify(ld.opts));
   await shot(lp, 'l1-long');
