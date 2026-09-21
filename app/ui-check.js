@@ -42,7 +42,8 @@ function ok(label, cond, extra) {
   const errors = [];
 
   async function open(url, viewport = { width: 390, height: 844 }) {
-    const p = await browser.newPage({ viewport, deviceScaleFactor: 2 });
+    /* hasTouch：调整模式的「双指捏合」只能靠触摸事件模拟 */
+    const p = await browser.newPage({ viewport, deviceScaleFactor: 2, hasTouch: true });
     p.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
     p.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
     await p.goto(url, { waitUntil: 'load' });
@@ -96,6 +97,47 @@ function ok(label, cond, extra) {
     await p.mouse.up();
     await p.waitForTimeout(360);
     return pt;
+  }
+
+  /** 在某个区域上按住拖动（dx/dy 为 CSS px）：调整模式的单指平移 */
+  async function dragBy(p, regionId, dx, dy) {
+    const pt = await pointOf(p, regionId);
+    await p.mouse.move(pt.x, pt.y);
+    await p.mouse.down();
+    await p.mouse.move(pt.x + dx, pt.y + dy, { steps: 10 });
+    await p.mouse.up();
+    await p.waitForTimeout(260);
+  }
+
+  /** 退出调整模式：点被调区域以外的地方（默认点中文句，且不该触发朗读） */
+  async function finishAdjust(p) {
+    const pt = await pointOf(p, 'cn');
+    await p.mouse.click(pt.x, pt.y);
+    await p.waitForTimeout(420);
+  }
+
+  /**
+   * 双指捏合（调整模式的缩放）。Playwright 的 mouse 只有一个指针，
+   * 所以走 CDP 的触摸事件：两指从 distance 出发，按 factor 拉开再抬起。
+   */
+  async function pinchOn(p, cx, cy, factor, from) {
+    const cdp = await p.context().newCDPSession(p);
+    const pts = (d) => [
+      { x: Math.round(cx - d), y: Math.round(cy), id: 1 },
+      { x: Math.round(cx + d), y: Math.round(cy), id: 2 },
+    ];
+    const d0 = from || 60;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: pts(d0) });
+    for (let i = 1; i <= 8; i++) {
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: pts(d0 * (1 + (factor - 1) * (i / 8))),
+      });
+      await p.waitForTimeout(28);
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await p.waitForTimeout(320);
+    await cdp.detach();
   }
 
   const speakAt = (x) => x.meta.lastSpeakAt || 0;
@@ -259,7 +301,7 @@ function ok(label, cond, extra) {
   await tap(p, 'img');
   ok('单击顶部图片唤起相册', !!(await chooser));
   await (await chooser).setFiles(TEMPLATE);
-  await p.waitForTimeout(700);
+  await p.waitForTimeout(800);
   d = await info(p);
   ok('换成竖图后画布仍是 1920', d.canvas.h === 1920, 'h=' + d.canvas.h);
   ok('换成竖图后图片区仍是 648', box(d, 'bg')[3] === 648);
@@ -272,14 +314,73 @@ function ok(label, cond, extra) {
   ok('换成竖图后信息卡没有被挤走', JSON.stringify(box(d, 'card')) === JSON.stringify(cb));
   await shot(p, 's4-tall-photo');
 
+  /* ---------------- 图片手动调整模式 ---------------- */
+  console.log('标准版 · 图片手动调整');
+  ok('换完图立刻进入调整模式，且默认不动（scale=1 / 不平移）',
+    !!d.edit && d.edit.target === 'img' &&
+    d.fits.img.scale === 1 && d.fits.img.ox === 0 && d.fits.img.oy === 0,
+    JSON.stringify({ edit: d.edit, fit: d.fits.img }));
+  ok('调整模式里给出常驻操作提示',
+    await p.evaluate(() => {
+      const h = document.getElementById('hint');
+      return !h.hidden && /双指/.test(h.textContent);
+    }));
+
+  /* 调整期间其它手势让路：长按不保存、点句子不朗读 */
+  const saveBefore = await p.evaluate(() => window.__ds.state.lastSave);
+  const speakBefore = speakAt(d);
+  const imgMid = await pointOf(p, 'img');
+  await p.mouse.move(imgMid.x, imgMid.y);
+  await p.mouse.down();
+  await p.waitForTimeout(760);
+  await p.mouse.up();
+  await p.waitForTimeout(500);
+  ok('调整模式下长按不会保存',
+    (await p.evaluate(() => window.__ds.state.lastSave)) === saveBefore,
+    'lastSave 未变');
+
+  /* 双指捏合 = 缩放 */
+  const imgPt = await pointOf(p, 'img');
+  await pinchOn(p, imgPt.x, imgPt.y, 1.8);
+  d = await info(p);
+  ok('双指捏合放大了图片', d.fits.img.scale > 1.1, 'scale=' + d.fits.img.scale.toFixed(2));
+  ok('放大后画布仍是 1920、图片区仍是 648',
+    d.canvas.h === 1920 && box(d, 'bg')[3] === 648);
+
+  /* 单指拖动 = 平移（把图片别处露出来），且不许把窗口拖出白边 */
+  const fit0 = (await info(p)).fits.img;
+  await dragBy(p, 'img', 0, 120);
+  d = await info(p);
+  const afterPan = d.fits.img;
+  ok('单指拖动改变了图片位移', afterPan.oy !== fit0.oy, `oy ${fit0.oy} → ${afterPan.oy}`);
+  ok('拖动后图片仍盖满窗口（不留白）',
+    d.bg.y <= 0 && d.bg.y + d.bg.h >= d.bg.blockH,
+    `图片 y=${d.bg.y} 高=${d.bg.h}，窗口 648`);
+  ok('拖动没有改变其它元素', JSON.stringify(box(d, 'card')) === JSON.stringify(cb));
+  await shot(p, 's10-adjust-img');
+
+  /* 点被调区域以外 = 完成（且不触发朗读） */
+  await finishAdjust(p);
+  d = await info(p);
+  ok('点区域外退出调整模式', d.edit === null, JSON.stringify(d.edit));
+  ok('退出时不会顺带朗读', speakAt(d) === speakBefore, `lastSpeakAt ${speakBefore} → ${speakAt(d)}`);
+  ok('退出后提示收起',
+    await p.evaluate(() => { const h = document.getElementById('hint'); return !h || h.hidden || h.classList.contains('hide'); }));
+  ok('调整结果被保留（退出不等于复原）', d.fits.img.scale > 1.1, 'scale=' + d.fits.img.scale.toFixed(2));
+
+  /* 信息卡：一样是「换完即进调整模式」，且从此等比不再拉伸 */
   chooser = p.waitForEvent('filechooser', { timeout: 5000 });
   await tap(p, 'card');
   ok('单击信息卡唤起相册', !!(await chooser));
   await (await chooser).setFiles(TEMPLATE);
-  await p.waitForTimeout(700);
+  await p.waitForTimeout(800);
   d = await info(p);
   ok('换信息卡后三边仍是 48', box(d, 'card')[0] === 48 && 1920 - (box(d, 'card')[1] + box(d, 'card')[3]) === 48);
+  ok('换信息卡后也立刻进入调整模式', !!d.edit && d.edit.target === 'card', JSON.stringify(d.edit));
+  ok('卡片默认 scale=1（顺着自动识别的位置，不跳变）', d.fits.card.scale === 1,
+    JSON.stringify(d.fits.card));
   await shot(p, 's5-new-card');
+  await finishAdjust(p);
 
   /* ---------------- 长按保存（界面无按钮，保存只能靠长按） ---------------- */
   console.log('标准版 · 长按保存');
@@ -372,17 +473,20 @@ function ok(label, cond, extra) {
 
   /* ---------------- 下拉更新 = 回到初始状态 ---------------- */
   console.log('标准版 · 下拉更新回到初始');
-  /* 先把状态弄乱：删掉日期、换成竖图、放大字号 */
+  /* 先把状态弄乱：删掉日期、换成竖图、调一下图、放大字号 */
   await tap(p, 'badge-date', 0, true);
   const fc2 = p.waitForEvent('filechooser', { timeout: 5000 });
   await tap(p, 'img');
   await (await fc2).setFiles(TEMPLATE);
-  await p.waitForTimeout(700);
+  await p.waitForTimeout(800);
+  await dragBy(p, 'img', 0, -160);            /* 调整模式：挪一下图 */
+  await finishAdjust(p);                      /* 退出调整模式 */
   await dragY(p, 'en', -120);
   const messy = await info(p);
   ok('（准备）状态已改乱',
-    messy.meta.hidden.date === true && messy.text.zoom > 1 && messy.bg.clipped === true,
-    `hidden.date=${messy.meta.hidden.date} zoom=${messy.text.zoom} clipped=${messy.bg.clipped}`);
+    messy.meta.hidden.date === true && messy.text.zoom > 1 &&
+    messy.bg.clipped === true && messy.fits.img.oy !== 0,
+    `hidden.date=${messy.meta.hidden.date} zoom=${messy.text.zoom} clipped=${messy.bg.clipped} oy=${messy.fits.img.oy}`);
 
   await pullY(p, 'img', 150);                 /* 图片区向下拉 = 更新 */
   await p.waitForTimeout(2600);
@@ -392,6 +496,9 @@ function ok(label, cond, extra) {
   ok('下拉后缩放归位', back.text.zoom === 1, 'zoom=' + back.text.zoom);
   ok('下拉后相册图被换回上游默认（不再裁切）', back.bg && back.bg.clipped === false,
     JSON.stringify(back.bg));
+  ok('下拉后手动调整也一并归位',
+    back.fits.img.scale === 1 && back.fits.img.ox === 0 && back.fits.img.oy === 0 && back.edit === null,
+    JSON.stringify(back.fits.img));
   ok('六个元素都回来了',
     JSON.stringify(ids(back)) === JSON.stringify(['bg', 'badge-date', 'en', 'cn', 'source', 'card']),
     ids(back).join(','));

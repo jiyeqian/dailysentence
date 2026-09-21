@@ -73,9 +73,14 @@ const state = {
     autoKind: '',
   },
   bgImage: null,
-  bgDraw: null,         // 最近一次顶部图片的实际绘制结果 { w, h, blockH, clipped, blankBottom }
+  bgDraw: null,         // 最近一次顶部图片的实际绘制结果 { w, h, blockH, clipped, blankBottom, scale, x, y }
   template: null,
   ratios: { ...DEFAULT_RATIOS },
+  /* 图片手动调整：源图在展示窗口里的变换。scale = 相对基线的倍数，ox/oy = 相对基线的画布坐标平移。
+     基线（1,0,0）就是「刚换完图时看到的样子」，不调就等于不调。 */
+  fits: { img: { scale: 1, ox: 0, oy: 0 }, card: { scale: 1, ox: 0, oy: 0 } },
+  /* 非 null = 正在手动调整某一块：{ target: 'img'|'card', moved } */
+  edit: null,
   opts: {
     bgStyle: DEFAULT_BG,
     longPoster: false,    // true = 长版海报（?long=1），本阶段保持旧版面不动
@@ -320,6 +325,7 @@ async function loadBackground(url) {
   const im = await loadImage(url).catch(() => null);
   if (im) {
     state.bgImage = im;
+    state.fits.img = { scale: 1, ox: 0, oy: 0 };   /* 换了图，之前的手动调整作废 */
     setOverlay(false);
   } else {
     const cached = safeGet('ds:last');
@@ -348,6 +354,7 @@ async function loadTemplate(src) {
   state.template = im;
   /* 识别只用来决定「从这张图里抠哪一块」；卡片自身位置与尺寸是固定的 */
   detectCard(im);
+  state.fits.card = { scale: 1, ox: 0, oy: 0 };   /* 换了模板图，卡片的调整作废 */
 }
 
 /**
@@ -1073,6 +1080,12 @@ function inspect() {
     gaps: buildGaps(L),
     opts: Object.assign({}, state.opts),
     ratios: Object.assign({}, state.ratios),
+    /* 图片手动调整：正在调哪一块（null = 没在调）+ 两块各自的缩放/位移 */
+    edit: state.edit ? { target: state.edit.target, moved: !!state.edit.moved } : null,
+    fits: {
+      img: Object.assign({}, state.fits.img),
+      card: Object.assign({}, state.fits.card),
+    },
     /* 中部区域的缩放三件套：K = autoScale × zoom（已夹紧），便于 --diff 自证「字体放大了多少」 */
     text: {
       K: L.K,
@@ -1118,12 +1131,87 @@ function render() {
   drawWordCard(ctx, L);
   drawProfileCard(ctx, L);
 
+  /* 调整模式：给正在调的那块描一圈虚线，让人知道现在在调什么 */
+  if (state.edit) drawEditFrame(ctx, L);
+
   /* 版面即「可点区域地图」：留下坐标供点击命中与引导框使用 */
   state.layout = L;
   state.regions = buildHitRegions(L);
   /* 版面标注：给人看的编号图与给 AI 读的坐标清单共用这份数据（仅调试模式） */
   if (DEBUG) state.annots = buildAnnots(ctx, L);
   return L;
+}
+
+/* ===================== 图片手动调整（fit 模型） ===================== */
+
+const FIT_MAX = 4;      /* 双指最多放大到基线的 4 倍 */
+
+/** 某个可调区域在画布上的展示窗口：顶部图片区 / 信息卡 */
+function fitBox(target, L) {
+  if (target === 'img') {
+    return { x: 0, y: 0, w: CW, h: (L && L.imgBlock ? L.imgBlock.h : IMG_BLOCK_H) };
+  }
+  const c = (L && L.card) || { x: CARD_PAD, y: CH_MIN - CARD_PAD - CARD_H, w: CW - 2 * CARD_PAD, h: CARD_H };
+  return { x: c.x, y: c.y, w: c.w, h: c.h };
+}
+
+/**
+ * 基线变换：`scale = 1` 时必须与「刚换完图看到的样子」一致。
+ *
+ * - 顶部图片：宽度铺满、左上角对齐 —— 与改造前逐像素相同
+ * - 信息卡：等比缩放到「面积与自动识别出的那块矩形相当」，中心对准识别矩形的中心。
+ *   旧实现是把识别矩形**拉伸**填满卡片，比例不合就变形；这里从此不再变形，
+ *   代价只是比例差较大时边缘会有轻微位移。
+ */
+function fitBase(target, L) {
+  const im = target === 'img' ? state.bgImage : state.template;
+  if (!im || !im.width || !im.height) return null;
+  const box = fitBox(target, L);
+  let k; let x; let y;
+  if (target === 'img') {
+    k = CW / im.width;
+    x = box.x;
+    y = box.y;
+  } else {
+    const r = state.ratios;
+    const cx = ((r.L + r.R) / 2) * im.width;
+    const cy = ((r.T + r.B) / 2) * im.height;
+    const area = Math.max(1, (r.R - r.L) * im.width * (r.B - r.T) * im.height);
+    k = Math.sqrt((box.w * box.h) / area);
+    x = box.x + box.w / 2 - cx * k;
+    y = box.y + box.h / 2 - cy * k;
+  }
+  return { im, box, k, x, y };
+}
+
+/**
+ * 把 fit 收进合法范围，并算出实际绘制参数。
+ *
+ * 缩放锚点 = 窗口中心（基线中心点不动），所以 scale = 1 时位置与基线完全一致。
+ * 平移限制：某方向图片比窗口大 → 必须盖满该方向（不许露底色）；
+ * 比窗口小（例如 16:9 宽图铺满宽度后只有 608 高）→ 该方向锁在缩放后的基线位置，
+ * 既保住「宽图下方露一段底色」的既有观感，也没法把它拖出窗口。
+ */
+function fitDraw(base, fit) {
+  const W = base.box.w;
+  const H = base.box.h;
+  const s = Math.max(1, Math.min(FIT_MAX, (fit && fit.scale) || 1));
+  const iw = base.im.width * base.k * s;
+  const ih = base.im.height * base.k * s;
+  const xs = base.box.x + W / 2 - (base.box.x + W / 2 - base.x) * s;
+  const ys = base.box.y + H / 2 - (base.box.y + H / 2 - base.y) * s;
+  let x = xs + ((fit && fit.ox) || 0);
+  let y = ys + ((fit && fit.oy) || 0);
+  x = iw >= W ? Math.min(base.box.x, Math.max(base.box.x + W - iw, x)) : xs;
+  y = ih >= H ? Math.min(base.box.y, Math.max(base.box.y + H - ih, y)) : ys;
+  return { scale: s, ox: x - xs, oy: y - ys, x, y, k: base.k * s, w: iw, h: ih };
+}
+
+/** 当前调整目标的绘制参数（绘制与手势共用，保证「看到的就是调出来的」） */
+function currentFitDraw(target, L) {
+  const base = fitBase(target, L);
+  if (!base) return null;
+  return Object.assign({ base }, fitDraw(base, state.fits[target]));
 }
 
 /* --------------------------- 背景 --------------------------- */
@@ -1141,22 +1229,27 @@ function drawBackground(ctx, L) {
   if (L.imgBlock) {
     darkBase(ctx);
     const blockH = L.imgBlock.h;
-    const s = CW / im.width;
-    const w = CW;
-    const h = Math.round(im.height * s);
+    const base = fitBase('img', L);
+    const d = fitDraw(base, state.fits.img);
 
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, 0, CW, blockH);
     ctx.clip();
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(im, 0, 0, w, h);
+    ctx.drawImage(base.im, d.x, d.y, d.w, d.h);
     ctx.restore();
 
-    const drawH = Math.min(blockH, h);
-    fadeImageBottom(ctx, drawH);
-    /* 记录实际绘制结果，回归可以结构化断言「确实发生了裁切」 */
-    state.bgDraw = { w, h, blockH, clipped: h > blockH, blankBottom: blockH - drawH };
+    /* 下缘渐隐：图片底边还在窗口里就按底边渐隐，被裁掉则贴窗口底边收 */
+    const visibleBottom = Math.min(blockH, Math.max(0, d.y + d.h));
+    fadeImageBottom(ctx, visibleBottom);
+    /* 记录实际绘制结果，回归可以结构化断言「裁了多少 / 放大到几倍 / 挪到哪」 */
+    state.bgDraw = {
+      w: Math.round(d.w), h: Math.round(d.h), blockH,
+      clipped: d.h > blockH || d.w > CW || d.x < 0 || d.y < 0,
+      blankBottom: Math.max(0, Math.round(blockH - (d.y + d.h))),
+      scale: d.scale, x: Math.round(d.x), y: Math.round(d.y),
+    };
     return;
   }
 
@@ -1361,7 +1454,6 @@ function drawTopText(ctx, L) {
 
 function drawProfileCard(ctx, L) {
   const c = L.card;
-  const src = state.ratios;
 
   ctx.save();
   roundRect(ctx, c.x, c.y, c.w, c.h, 18);
@@ -1372,19 +1464,54 @@ function drawProfileCard(ctx, L) {
   ctx.fill();
   ctx.restore();
 
-  if (state.template) {
-    const tw = state.template.width;
-    const th = state.template.height;
+  /* 卡内图片走 fit 模型（等比，可被手动调整），不再把识别矩形拉伸填满 */
+  const q = currentFitDraw('card', L);
+  if (q) {
     ctx.save();
     roundRect(ctx, c.x, c.y, c.w, c.h, 18);
     ctx.clip();
-    ctx.drawImage(
-      state.template,
-      src.L * tw, src.T * th, (src.R - src.L) * tw, (src.B - src.T) * th,
-      c.x, c.y, c.w, c.h
-    );
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(q.base.im, q.x, q.y, q.w, q.h);
     ctx.restore();
   }
+}
+
+/* ---------------------- 手动调整（模式与反馈） ---------------------- */
+
+/**
+ * 进入手动调整模式：换完图就立刻进来，默认什么都不动
+ * ——「当前展示的比例及位置」就是 `fits[target] = {1,0,0}`。
+ * 调整期间其它手势全部让路（长按保存 / 下拉更新 / 点句子 / 双击删除），
+ * 退出方式只有一个：点被调区域以外的地方。
+ */
+function startEdit(target) {
+  if (state.opts.longPoster) return;      /* 长版本阶段不参与 */
+  if (target === 'img' && !state.bgImage) return;
+  if (target === 'card' && !state.template) return;
+  state.edit = { target, moved: false };
+  showHint(target === 'img'
+    ? '调图：双指缩放 · 单指拖动 · 点别处完成'
+    : '调卡片：双指缩放 · 单指拖动 · 点别处完成', true);
+  scheduleRender();
+}
+
+/** 退出调整模式并收起常驻提示 */
+function finishEdit() {
+  if (!state.edit) return;
+  state.edit = null;
+  hideHint(true);
+  scheduleRender();
+}
+
+/** 调整模式的视觉反馈：正在调的那块描一圈青色虚线 */
+function drawEditFrame(ctx, L) {
+  const box = fitBox(state.edit.target, L);
+  ctx.save();
+  ctx.setLineDash([26, 16]);
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = 'rgba(94,234,212,0.95)';
+  ctx.strokeRect(box.x + 3, box.y + 3, box.w - 6, box.h - 6);
+  ctx.restore();
 }
 
 /* --------------------------- 单词卡片 --------------------------- */
@@ -1601,6 +1728,8 @@ async function toggleDay() {
  */
 async function resetToInitial(refetch) {
   closeSaveSheet();                         /* 保存浮层不算「初始状态」，一并收起 */
+  state.edit = null;                        /* 调整模式也不是「初始状态」 */
+  state.fits = { img: { scale: 1, ox: 0, oy: 0 }, card: { scale: 1, ox: 0, oy: 0 } };
   state.hidden = { date: false, en: false, cn: false, source: false };
   state.zoom = 1;
   _autoCacheKey = '';                       /* 让自适应倍率重新求解 */
@@ -1615,13 +1744,14 @@ async function resetToInitial(refetch) {
 
 /** 两个相册选图入口（界面上没有按钮了，都靠单击海报上的图片 / 卡片触发） */
 function bindInputs() {
-  /* 相册选图：顶部图片 */
+  /* 相册选图：顶部图片。换完立刻进调整模式（默认比例与位置 = 刚换上的样子） */
   $('fBgImage').addEventListener('change', async (e) => {
     const im = await readPickedImage(e);
     if (!im) return;
     state.bgImage = im;
+    state.fits.img = { scale: 1, ox: 0, oy: 0 };
     scheduleRender();
-    toast('已更换顶部图片');
+    startEdit('img');
   });
 
   /* 相册选图：信息卡（自动识别只决定从这张图里抠哪一块） */
@@ -1631,12 +1761,13 @@ function bindInputs() {
     state.template = im;
     try {
       detectCard(im);
-      toast('已更换信息卡');
     } catch (err) {
       state.ratios = { ...DEFAULT_RATIOS };
       toast('信息卡识别失败，已按默认比例裁切');
     }
+    state.fits.card = { scale: 1, ox: 0, oy: 0 };
     scheduleRender();
+    startEdit('card');
   });
 
   bindGestures();
@@ -1777,6 +1908,11 @@ const PULL_MIN = 90;      /* 下拉更新的触发距离（CSS px） */
  *   句子 / 日期双击     = 从海报上删掉它（不可逆，刷新恢复）
  *   句子上上下拖动      = 实时缩放中部字号（上滑放大、下滑缩小）
  *   非句子区向下拉 ≥90  = 回到初始状态（等同重启 App）
+ *
+ * 调整模式（`state.edit`，换图后自动进入）：上面这些手势**全部让路**，只剩
+ *   单指拖动            = 在展示窗口里挪图（把想要的区域露出来）
+ *   双指捏合            = 缩放（中点位移同时当平移）
+ *   点被调区域以外      = 完成 / 退出
  */
 function bindGestures() {
   const stage = $('stage');
@@ -1788,6 +1924,10 @@ function bindGestures() {
   let pullDrag = null;       /* { startY, armed } */
   let pendingTap = null;     /* { id, timer, audio } —— 单击要等双击确认，只留一个槽 */
   let limitHit = '';         /* 已经提示过的缩放极限，避免刷屏 */
+  const ptrs = new Map();    /* 调整模式下按下的指针：pointerId → 最新坐标 */
+  let pinch = null;          /* { d0, mid0, fit0 } —— 双指捏合的基准 */
+  let panLast = null;        /* 单指拖动的上一个位置 */
+  let editStart = null;      /* 调整模式下这一下的起点 { x, y, moved } */
 
   const clear = () => {
     clearTimeout(holdTimer);
@@ -1844,9 +1984,62 @@ function bindGestures() {
     }
   };
 
+  /** CSS 像素 → 画布像素：手指移动 1px 对应海报上移动多少 */
+  const pxToCanvas = () => {
+    const rect = cvs.getBoundingClientRect();
+    return rect.width ? CW / rect.width : 1;
+  };
+
+  /** 提交调整结果：先 clamp 再写回 state.fits，然后重绘 */
+  const commitFit = (next) => {
+    if (!state.edit) return;
+    const target = state.edit.target;
+    const base = fitBase(target, state.layout);
+    if (!base) return;
+    const d = fitDraw(base, next);
+    const cur = state.fits[target];
+    if (Math.abs(d.scale - cur.scale) < 1e-4 &&
+        Math.abs(d.ox - cur.ox) < 0.5 && Math.abs(d.oy - cur.oy) < 0.5) return;
+    state.fits[target] = { scale: d.scale, ox: d.ox, oy: d.oy };
+    state.edit.moved = true;
+    scheduleRender();
+  };
+
+  /** 双指基准：两指距离、中点、以及按下那一刻的 fit */
+  const beginPinch = () => {
+    if (ptrs.size < 2) return;
+    const [a, b] = [...ptrs.values()];
+    pinch = {
+      d0: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+      mid0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+      fit0: Object.assign({}, state.fits[state.edit.target]),
+    };
+  };
+
+  /** 调整模式下指针全部抬起 / 被系统打断时的收尾 */
+  const resetAdjustPointers = () => {
+    ptrs.clear();
+    pinch = null;
+    panLast = null;
+  };
+
   stage.addEventListener('pointerdown', (e) => {
     if (e.button && e.button !== 0) return;
     hideHint();                /* 一有操作就收起手势提示 */
+
+    /* 调整模式：只认指针手势，其它一律让路
+       —— 不建 pullDrag / zoomDrag，也不起长按（否则调图时会误保存） */
+    if (state.edit) {
+      ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false });
+      if (ptrs.size === 1) {
+        panLast = { x: e.clientX, y: e.clientY };
+      } else if (ptrs.size === 2) {
+        panLast = null;
+        beginPinch();
+      }
+      return;
+    }
+
     start = { x: e.clientX, y: e.clientY, t: Date.now() };
     longFired = false;
     zoomDrag = null;
@@ -1871,6 +2064,34 @@ function bindGestures() {
   });
 
   stage.addEventListener('pointermove', (e) => {
+    /* 调整模式：双指 = 缩放（中点位移同时当平移，跟手感更好），单指 = 拖动 */
+    if (state.edit) {
+      const rec = ptrs.get(e.pointerId);
+      if (!rec) return;                       /* 没按下的移动（鼠标悬停）不算 */
+      rec.x = e.clientX;
+      rec.y = e.clientY;
+      if (Math.hypot(e.clientX - rec.x0, e.clientY - rec.y0) > PRESS.moved) rec.moved = true;
+      const k = pxToCanvas();
+      if (ptrs.size >= 2 && pinch) {
+        const [a, b] = [...ptrs.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        commitFit({
+          scale: pinch.fit0.scale * (d / pinch.d0),
+          ox: pinch.fit0.ox + (mid.x - pinch.mid0.x) * k,
+          oy: pinch.fit0.oy + (mid.y - pinch.mid0.y) * k,
+        });
+      } else if (panLast) {
+        const cur = state.fits[state.edit.target];
+        commitFit({
+          scale: cur.scale,
+          ox: cur.ox + (e.clientX - panLast.x) * k,
+          oy: cur.oy + (e.clientY - panLast.y) * k,
+        });
+        panLast = { x: e.clientX, y: e.clientY };
+      }
+      return;
+    }
     if (zoomDrag) {
       const dy = e.clientY - zoomDrag.startY;
       if (!zoomDrag.active && Math.abs(dy) > PRESS.moved) {
@@ -1901,6 +2122,23 @@ function bindGestures() {
   });
 
   stage.addEventListener('pointerup', (e) => {
+    /* 调整模式：没拖过这一下、且落点在被调区域之外 → 「点别处完成」 */
+    if (state.edit) {
+      const rec = ptrs.get(e.pointerId);
+      ptrs.delete(e.pointerId);
+      if (ptrs.size === 1) {
+        pinch = null;
+        const p = [...ptrs.values()][0];
+        panLast = { x: p.x, y: p.y };
+      } else if (ptrs.size === 0) {
+        resetAdjustPointers();
+      }
+      if (!rec || rec.moved) return;
+      const hit = hitTestAt(e.clientX, e.clientY);
+      if (!hit || hit.id !== state.edit.target) finishEdit();
+      return;
+    }
+
     /* 下拉更新优先：够距离就执行（松手瞬间才真正请求） */
     if (pullDrag && pullDrag.armed) {
       pullDrag = null;
@@ -1944,6 +2182,7 @@ function bindGestures() {
     zoomDrag = null;
     pullDrag = null;
     dropPendingTap();
+    resetAdjustPointers();
     clear();
   });
   stage.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -1983,24 +2222,39 @@ function openPicker(which) {
 /* ------------------------------ 一次性手势提示 ------------------------------ */
 
 let hintTimer = null;
+let hintSticky = false;
+let hintDefault = '';
 
 /**
- * 界面没有任何按钮了，所以首次进入给一行手势提示：3 秒后自动淡出，
- * 任意操作立即收起，不做记忆（刷新会再显示一次）。刻意非常驻。
+ * 手势提示（整屏唯一的文字说明）。两种用法：
+ * - 首次进入：3 秒后自动淡出，任意操作立即收起，不做记忆
+ * - 调整模式：`sticky = true`，常驻到退出调整模式为止 —— 那行字是调图时唯一的说明
  */
-function showHintOnce() {
+function showHint(text, sticky) {
   const el = $('hint');
   if (!el) return;
+  clearTimeout(hintTimer);
+  hintSticky = !!sticky;
+  if (text) el.textContent = text;
   el.hidden = false;
   el.classList.remove('hide');
-  clearTimeout(hintTimer);
-  hintTimer = setTimeout(hideHint, 3000);
+  if (!sticky) hintTimer = setTimeout(hideHint, 3000);
 }
 
-function hideHint() {
+function showHintOnce() {
   const el = $('hint');
-  if (!el || el.hidden) return;
+  if (el && !hintDefault) hintDefault = el.textContent;
+  showHint(hintDefault || '长按保存 · 下拉更新 · 点句子朗读 · 点日期看昨天');
+}
+
+/** sticky 提示不会被「一操作就收起」收掉，只能显式 force 收起 */
+function hideHint(force) {
+  const el = $('hint');
+  if (!el) return;
+  if (hintSticky && !force) return;
+  hintSticky = false;
   clearTimeout(hintTimer);
+  if (el.hidden) return;
   el.classList.add('hide');
   setTimeout(() => { if (el.classList.contains('hide')) el.hidden = true; }, 400);
 }
