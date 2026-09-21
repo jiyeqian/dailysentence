@@ -8,7 +8,7 @@
 
 | 线上地址（手机可直接打开） | 在线体验 |
 | --- | --- |
-| <https://dailysentence-poster.app.workbuddy.host/> | 支持「添加到主屏幕」当 App 用 |
+| <https://dailysentence.app.workbuddy.host/> | 支持「添加到主屏幕」当 App 用 |
 
 <img src="docs/preview.png" width="360" alt="生成效果预览">
 
