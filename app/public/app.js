@@ -59,6 +59,10 @@ const state = {
   /* 双击隐藏的元素：只在内存里，刷新即恢复（标准版才有这套交互） */
   hidden: { date: false, en: false, cn: false, source: false },
   zoom: 1,              // 中部区域的用户缩放系数（叠在自适应倍率上，1 = 自动）
+  lastSpeakAt: 0,       // 最近一次朗读的时间戳（回归断言用）
+  lastToggleAt: 0,      // 最近一次「今日⇄昨日」切换的时间戳（回归断言用）
+  lastSave: null,       // 最近一次保存：{ kind: 'sheet'|'share'|'download', name, at }
+
   viewDate: '',         // 正在看哪一天（''=今天）；往日数据来自服务端存档
   archived: false,      // 这份数据是从存档来的（不是上游实时）
   archiveOnly: false,   // 上游挂了，整份海报都是存档顶上的
@@ -69,6 +73,7 @@ const state = {
     autoKind: '',
   },
   bgImage: null,
+  bgDraw: null,         // 最近一次顶部图片的实际绘制结果 { w, h, blockH, clipped, blankBottom }
   template: null,
   ratios: { ...DEFAULT_RATIOS },
   opts: {
@@ -993,8 +998,10 @@ function buildAnnots(ctx, L) {
 
   if (state.bgImage) {
     const natural = state.opts.bgStyle === 'natural';
-    const label = '背景图区（' + (natural ? '原比例' : '铺满') + '）';
-    /* 标准版：图片只占固定的顶部图片区 */
+    /* 标准版：宽度铺满、超出顶部图片区的部分被裁掉；长版仍是两种背景模式 */
+    const label = L.imgBlock
+      ? '顶部图片区（宽度铺满·超出裁切）'
+      : '背景图区（' + (natural ? '原比例' : '铺满') + '）';
     push('bg', label, 0, 0, CW,
       L.imgBlock ? L.imgBlock.h : (natural ? naturalImageH() : CH), { kind: 'bg' });
   }
@@ -1078,7 +1085,10 @@ function inspect() {
       date: state.content.date, word: state.content.word,
       autoKind: state.content.autoKind, bgImage: !!state.bgImage,
       hidden: Object.assign({}, state.hidden),
+      lastSpeakAt: state.lastSpeakAt || 0,
     },
+    /* 顶部图片的实际绘制结果：clipped = 是否发生了裁切（竖图会为 true） */
+    bg: state.bgDraw,
   };
 }
 
@@ -1125,22 +1135,28 @@ function drawBackground(ctx, L) {
     return;
   }
 
-  /* 标准版：顶部图片区高度固定，图片只在这一块里排 ——
-     铺满 = 等比裁切填满整块（竖图也不会顶掉下面的句子）；
-     原比例 = 完整装进整块、居中，多余处留底色 */
+  /* 标准版顶部图片区：宽度统一铺满 1080、高度按原始比例，
+     超出这个 648px 区域的部分**硬裁掉**（不裁的话竖图会一路糊到中部区域）。
+     宽图（如 16:9 → 608 高）下方会露出一段底色。 */
   if (L.imgBlock) {
     darkBase(ctx);
     const blockH = L.imgBlock.h;
-    let drawH = blockH;
-    if (state.opts.bgStyle === 'cover') {
-      drawCover(ctx, im, 0, 0, CW, blockH);
-    } else {
-      const s = Math.min(CW / im.width, blockH / im.height);
-      const w = im.width * s;
-      drawH = im.height * s;
-      ctx.drawImage(im, (CW - w) / 2, 0, w, drawH);
-    }
-    fadeImageBottom(ctx, Math.min(blockH, drawH));
+    const s = CW / im.width;
+    const w = CW;
+    const h = Math.round(im.height * s);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, CW, blockH);
+    ctx.clip();
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(im, 0, 0, w, h);
+    ctx.restore();
+
+    const drawH = Math.min(blockH, h);
+    fadeImageBottom(ctx, drawH);
+    /* 记录实际绘制结果，回归可以结构化断言「确实发生了裁切」 */
+    state.bgDraw = { w, h, blockH, clipped: h > blockH, blankBottom: blockH - drawH };
     return;
   }
 
@@ -1547,6 +1563,35 @@ function initialBgStyle() {
   return state.opts.longPoster ? 'natural' : DEFAULT_BG;
 }
 
+/** 昨天（本地时区）—— 用于「日期胶囊单击切到昨日存档」 */
+function yesterdayISO() {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+/**
+ * 今日 ⇄ 昨日（服务端存档）来回切。
+ * 昨日没抓过存档时 loadDaily 会 toast 报错并保持原内容，
+ * 所以这里用「apiData 是否换了引用」判断有没有切成功，再补一句人话。
+ */
+async function toggleDay() {
+  if (state.opts.longPoster) return;
+  state.lastToggleAt = Date.now();     /* 回归可断言「这次点击确实被识别成单击」 */
+  const iso = yesterdayISO();
+  if (state.viewDate) {                 /* 正在看往日 → 回今天 */
+    await loadDaily(false);
+    toast('已回到今天');
+    return;
+  }
+  const before = state.apiData;
+  await loadDaily(false, iso);
+  if (state.apiData === before) return; /* 没换成：loadDaily 已经提示过原因 */
+  if (state.viewDate === iso) toast('正在看 ' + dateLabel(iso) + ' 的存档');
+  else toast('还没有 ' + dateLabel(iso) + ' 的存档');
+}
+
 /**
  * 回到「刚打开这个页面」的状态：隐藏清空、缩放归位、背景比例回默认、
  * 配图与信息卡模板恢复默认，再重新取一次当日内容。
@@ -1555,6 +1600,7 @@ function initialBgStyle() {
  * refetch = true 时跳过缓存重新抓上游。
  */
 async function resetToInitial(refetch) {
+  closeSaveSheet();                         /* 保存浮层不算「初始状态」，一并收起 */
   state.hidden = { date: false, en: false, cn: false, source: false };
   state.zoom = 1;
   _autoCacheKey = '';                       /* 让自适应倍率重新求解 */
@@ -1564,24 +1610,11 @@ async function resetToInitial(refetch) {
     await loadTemplate('assets/template.jpg');
   } catch (e) { /* 模板加载失败就沿用默认比例 */ }
   await loadDaily(!!refetch);
-  syncBgUI();
   scheduleRender();
 }
 
-/** 顶栏四枚按钮 + 两个相册选图入口（界面上再没有别的控件） */
-function bindTopbar() {
-  /* 「重新获取」= 回到初始状态（不只是换句子） */
-  $('btnRefresh').addEventListener('click', async () => {
-    const btn = $('btnRefresh');
-    btn.classList.add('spin');
-    try {
-      await resetToInitial(true);
-      toast('已回到初始状态');
-    } finally {
-      btn.classList.remove('spin');
-    }
-  });
-
+/** 两个相册选图入口（界面上没有按钮了，都靠单击海报上的图片 / 卡片触发） */
+function bindInputs() {
   /* 相册选图：顶部图片 */
   $('fBgImage').addEventListener('change', async (e) => {
     const im = await readPickedImage(e);
@@ -1606,22 +1639,43 @@ function bindTopbar() {
     scheduleRender();
   });
 
-  $('btnSave').addEventListener('click', savePoster);
-
-  $('btnPlay').addEventListener('click', () => {
-    const url = state.apiData && state.apiData.audio && state.apiData.audio.normal;
-    if (!url) return toast('没有可用发音');
-    new Audio(url).play().catch(() => toast('发音播放失败'));
-  });
-
-  /* ---------- 顶栏：背景比例切换 ---------- */
-  $('btnBg').addEventListener('click', () => {
-    state.opts.bgStyle = state.opts.bgStyle === 'cover' ? 'natural' : 'cover';
-    syncBgUI();
-    scheduleRender();
-  });
-
   bindGestures();
+}
+
+/** 朗读今日句子；audio 传进来时复用它（iOS 必须在手势调用栈里先解锁） */
+function speak(audio) {
+  const url = state.apiData && state.apiData.audio && state.apiData.audio.normal;
+  if (!url) {
+    toast('没有可用发音');
+    return null;
+  }
+  const a = audio && audio.src ? audio : new Audio(url);
+  state.lastSpeakAt = Date.now();
+  try { a.currentTime = 0; } catch (e) { /* 还没 ready 时忽略 */ }
+  const p = a.play();
+  if (p && p.catch) p.catch(() => toast('发音播放失败'));
+  return a;
+}
+
+/**
+ * 在用户手势的同步调用栈里解锁音频元素（iOS 只认这一步）。
+ * 先静音播一下就暂停 —— 既完成解锁，又不会真的发出声音；
+ * 300ms 后确认是单击时再复用这个元素正式播放。
+ */
+function primeAudio() {
+  const url = state.apiData && state.apiData.audio && state.apiData.audio.normal;
+  if (!url) return null;
+  try {
+    const a = new Audio(url);
+    a.volume = 0;
+    const p = a.play();
+    const restore = () => { try { a.pause(); a.currentTime = 0; a.volume = 1; } catch (e) {} };
+    if (p && p.then) p.then(restore).catch(() => {});
+    else restore();
+    return a;
+  } catch (e) {
+    return null;
+  }
 }
 
 /** 读取相册选中的图片；解码完立刻释放 objectURL，多次换图也不积累内存 */
@@ -1707,24 +1761,32 @@ const PRESS = { moved: 8, maxMs: 620, holdMs: 520 };
 /** 双击能删掉的区域 → 隐藏状态里的键 */
 const HIDE_MAP = { 'badge-date': 'date', en: 'en', cn: 'cn', source: 'source' };
 
-/** 上下滑动缩放只挂在句子元素上（它们单击无功能，正好当拖动条用） */
+/** 上下拖动 = 缩放字号（只有句子元素） */
 const ZOOM_REGIONS = new Set(['en', 'cn', 'source']);
 
+/** 单击有动作、同时又要保留双击删除的区域 —— 单击要等 300ms 确认不是双击 */
+const SINGLE_TAP_REGIONS = new Set(['en', 'cn', 'source', 'badge-date']);
+
+const PULL_MIN = 90;      /* 下拉更新的触发距离（CSS px） */
+
 /**
- * stage 上的手势：
- *   单击顶部图片 / 信息卡 = 从手机相册选图（这两块不定义双击）
- *   双击日期胶囊 / 英文 / 中文 / 出处 = 从海报上删掉它（不可逆，刷新恢复）
- *   在英文 / 中文 / 出处上上下拖动 = 实时缩放中部区域字号（上滑放大、下滑缩小）
- *   长按海报 = 保存到相册
+ * stage 上的手势（界面上没有按钮，全部由这里承载）：
+ *   长按任意位置        = 保存到相册
+ *   图片 / 信息卡单击   = 从手机相册选图（不定义双击，所以立即响应）
+ *   句子 / 日期单击     = 朗读 / 今日⇄昨日切换（等 300ms 确认不是双击）
+ *   句子 / 日期双击     = 从海报上删掉它（不可逆，刷新恢复）
+ *   句子上上下拖动      = 实时缩放中部字号（上滑放大、下滑缩小）
+ *   非句子区向下拉 ≥90  = 回到初始状态（等同重启 App）
  */
 function bindGestures() {
   const stage = $('stage');
   let start = null;
   let holdTimer = null;
   let longFired = false;
-  let lastTap = { id: '', t: 0 };
   let pickerAt = 0;          /* 刚开过相册的防抖时间戳 */
   let zoomDrag = null;       /* { startY, startZoom, active } */
+  let pullDrag = null;       /* { startY, armed } */
+  let pendingTap = null;     /* { id, timer, audio } —— 单击要等双击确认，只留一个槽 */
   let limitHit = '';         /* 已经提示过的缩放极限，避免刷屏 */
 
   const clear = () => {
@@ -1732,6 +1794,38 @@ function bindGestures() {
     holdTimer = null;
     start = null;
     longFired = false;
+  };
+
+  /** 丢弃待判定的单击（判定成双击、或开始拖动 / 长按时调用） */
+  const dropPendingTap = () => {
+    if (!pendingTap) return;
+    clearTimeout(pendingTap.timer);
+    pendingTap = null;
+  };
+
+  /** 单击真正落地：句子朗读、日期切今天/昨天 */
+  const runSingleTap = (id, audio) => {
+    if (id === 'badge-date') toggleDay();
+    else speak(audio);
+  };
+
+  /**
+   * 单击进槽等待双击确认。
+   * 只有一个槽：快速点不同元素时，前一次点击作废（只认最后那一下），
+   * 免得连续朗读两次。
+   */
+  const tapAt = (id, audio) => {
+    if (pendingTap && pendingTap.id === id) {
+      dropPendingTap();
+      hideElement(id);         /* 同区域 300ms 内的第二击 = 双击 */
+      return;
+    }
+    dropPendingTap();
+    const timer = setTimeout(() => {
+      pendingTap = null;
+      runSingleTap(id, audio);
+    }, DBL_MS);
+    pendingTap = { id, timer, audio };
   };
 
   /** 改缩放系数并重绘；到上下限只提示一次 */
@@ -1752,22 +1846,25 @@ function bindGestures() {
 
   stage.addEventListener('pointerdown', (e) => {
     if (e.button && e.button !== 0) return;
-    if (e.target.closest('.topbar')) return;
-    wakeTopbar();
+    hideHint();                /* 一有操作就收起手势提示 */
     start = { x: e.clientX, y: e.clientY, t: Date.now() };
     longFired = false;
     zoomDrag = null;
-    /* 起点落在句子元素上才允许拖动缩放（长版不参与） */
+    pullDrag = null;
+    /* 按起点元素分流：句子上是缩放，其余地方是下拉更新（长版不参与） */
     if (!state.opts.longPoster) {
       const hit = hitTestAt(e.clientX, e.clientY);
       if (hit && ZOOM_REGIONS.has(hit.id)) {
         zoomDrag = { startY: e.clientY, startZoom: state.zoom, active: false };
+      } else if (!hit || hit.id === 'img' || hit.id === 'card') {
+        pullDrag = { startY: e.clientY, moved: false, armed: false };
       }
     }
     clearTimeout(holdTimer);
     /* 长按 = 保存海报 */
     holdTimer = setTimeout(() => {
       longFired = true;
+      dropPendingTap();
       if (navigator.vibrate) navigator.vibrate(12);
       savePoster();
     }, PRESS.holdMs);
@@ -1779,17 +1876,40 @@ function bindGestures() {
       if (!zoomDrag.active && Math.abs(dy) > PRESS.moved) {
         zoomDrag.active = true;
         clear();                 /* 拖动期间取消长按与点击判定 */
+        dropPendingTap();
       }
       if (zoomDrag.active) {
         applyZoom(zoomDrag.startZoom * (1 + (-dy) * ZOOM_PER_PX));
         return;
       }
     }
+    if (pullDrag) {
+      const dy = e.clientY - pullDrag.startY;
+      if (dy > PRESS.moved && !pullDrag.moved) {
+        pullDrag.moved = true;
+        clear();                 /* 拖起来了：取消长按，也不算点击 */
+        dropPendingTap();
+      }
+      if (pullDrag.moved && !pullDrag.armed && dy >= PULL_MIN) {
+        pullDrag.armed = true;
+        toast('松手即更新');
+      }
+      if (pullDrag.moved) return;   /* 下拉期间不再走其它判定 */
+    }
     if (!start) return;
     if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > PRESS.moved) clear();
   });
 
   stage.addEventListener('pointerup', (e) => {
+    /* 下拉更新优先：够距离就执行（松手瞬间才真正请求） */
+    if (pullDrag && pullDrag.armed) {
+      pullDrag = null;
+      clear();
+      resetToInitial(true).then(() => toast('已回到初始状态'));
+      return;
+    }
+    pullDrag = null;
+
     if (zoomDrag) {
       const dragged = zoomDrag.active;
       zoomDrag = null;
@@ -1805,7 +1925,7 @@ function bindGestures() {
     const hit = hitTestAt(e.clientX, e.clientY);
     if (!hit) return;
 
-    /* 图片 / 信息卡：单击即开相册；双击这里会连开两次，所以加一道防抖 */
+    /* 图片 / 信息卡：单击即开相册（不定义双击，所以立即响应，只防抖一次） */
     if (hit.id === 'img' || hit.id === 'card') {
       if (Date.now() - pickerAt < 400) return;
       pickerAt = Date.now();
@@ -1813,19 +1933,30 @@ function bindGestures() {
       return;
     }
 
-    /* 句子上的元素：只认双击。单击本就无功能，所以不必为「是不是双击」等延迟 */
+    /* 句子 / 日期：单击有动作、双击是删除 → 进槽等 300ms 确认 */
     if (state.opts.longPoster) return;              /* 长版本轮交互不动 */
-    const now = Date.now();
-    if (lastTap.id === hit.id && now - lastTap.t <= DBL_MS) {
-      lastTap = { id: '', t: 0 };
-      hideElement(hit.id);
-    } else {
-      lastTap = { id: hit.id, t: now };
-    }
+    if (!SINGLE_TAP_REGIONS.has(hit.id)) return;
+    /* iOS 只认手势调用栈里的播放：先静音播一下解锁，300ms 后再正式播 */
+    tapAt(hit.id, hit.id === 'badge-date' ? null : primeAudio());
   });
 
-  stage.addEventListener('pointercancel', () => { zoomDrag = null; clear(); });
+  stage.addEventListener('pointercancel', () => {
+    zoomDrag = null;
+    pullDrag = null;
+    dropPendingTap();
+    clear();
+  });
   stage.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  /* 保存浮层：点图片以外的地方关闭。图片本身不拦任何事件（iOS 要能长按出系统菜单）。
+     注意这里**只监听 click，不碰 touchstart/pointerdown** —— 否则会把长按菜单也一并掐掉。 */
+  const sheet = $('saveSheet');
+  if (sheet) {
+    sheet.addEventListener('click', (e) => {
+      if (e.target && e.target.id === 'saveImg') return;
+      closeSaveSheet();
+    });
+  }
 }
 
 /** 屏幕坐标 → 命中的区域（换算成画布坐标再查命中表） */
@@ -1849,37 +1980,82 @@ function openPicker(which) {
   $(which === 'card' ? 'fCardImage' : 'fBgImage').click();
 }
 
-/* ------------------------------ 顶栏淡出 ------------------------------ */
+/* ------------------------------ 一次性手势提示 ------------------------------ */
 
-let topbarTimer = null;
-function wakeTopbar() {
-  const bar = $('topbar');
-  bar.classList.remove('dim');
-  clearTimeout(topbarTimer);
-  topbarTimer = setTimeout(() => bar.classList.add('dim'), 3200);
+let hintTimer = null;
+
+/**
+ * 界面没有任何按钮了，所以首次进入给一行手势提示：3 秒后自动淡出，
+ * 任意操作立即收起，不做记忆（刷新会再显示一次）。刻意非常驻。
+ */
+function showHintOnce() {
+  const el = $('hint');
+  if (!el) return;
+  el.hidden = false;
+  el.classList.remove('hide');
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(hideHint, 3000);
 }
 
-function syncBgUI() {
-  $('bgLabel').textContent = state.opts.bgStyle === 'cover' ? '铺满' : '原比例';
+function hideHint() {
+  const el = $('hint');
+  if (!el || el.hidden) return;
+  clearTimeout(hintTimer);
+  el.classList.add('hide');
+  setTimeout(() => { if (el.classList.contains('hide')) el.hidden = true; }, 400);
 }
 
 /* ------------------------------ 保存 ------------------------------- */
 
+/** iOS / iPadOS 判定：只有它需要走「长按预览图 → 存储到照片」这条通道 */
+function isIOS() {
+  return /iP(hone|ad|od)/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+/** 文件名：日期能认出来就规范成 YYYY-MM-DD，方便在相册里按时间排序 */
+function posterFileName() {
+  const d = state.content.date || '';
+  const m = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  const iso = m
+    ? m[3] + '-' + String(m[1]).padStart(2, '0') + '-' + String(m[2]).padStart(2, '0')
+    : d.replace(/\//g, '-');
+  return 'dailysentence-' + (iso || 'today') + '.png';
+}
+
+/**
+ * 保存海报。两条通道按平台分流 —— 这是修掉「长按只弹出文件预览」的关键：
+ *
+ * - **iOS**：`<a download>` 只会把 PNG 落进「文件」里并弹 Quick Look 预览（存不进相册）；
+ *   而 `navigator.share({files})` 是在长按的定时器里调用的，早就脱离用户手势调用栈，
+ *   Safari 会直接拒绝（原来就是这么掉进下载兜底的）。唯一稳的路是给一张原图让用户
+ *   **长按 → 存储到照片**，所以这里弹浮层。
+ * - **桌面 / Android**：能分享就分享（系统分享面板里含「保存图片」），否则直接下载。
+ */
 async function savePoster() {
   try {
-    const blob = await new Promise((res) => cvs.toBlob(res, 'image/png', 0.96));
+    const blob = await new Promise((res) => cvs.toBlob(res, 'image/png'));
     if (!blob) throw new Error('导出失败');
-    const name = 'dailysentence-' + (state.content.date.replace(/\//g, '') || 'today') + '.png';
-    const file = new File([blob], name, { type: 'image/png' });
+    const name = posterFileName();
+    state.lastSave = { kind: '', name, at: Date.now() };
 
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      try {
-        await navigator.share({ files: [file], title: '每日一句' });
-        return;
-      } catch (e) {
-        if (e && e.name === 'AbortError') return;
-      }
+    if (isIOS()) {
+      showSaveSheet(blob, name);
+      state.lastSave.kind = 'sheet';
+      return;
     }
+
+    try {
+      const file = new File([blob], name, { type: 'image/png' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: '每日一句' });
+        state.lastSave.kind = 'share';
+        return;
+      }
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;   /* 用户自己取消的，不算失败 */
+    }
+
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1888,10 +2064,34 @@ async function savePoster() {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 20000);
-    toast('已开始下载，iOS 也可长按预览图存到相册');
+    state.lastSave.kind = 'download';
+    toast('已保存：' + name);
   } catch (err) {
     toast('保存失败：' + err.message);
   }
+}
+
+let saveSheetUrl = '';
+
+/** iOS 保存浮层：给一张可直接长按的原图；点图以外的地方关闭 */
+function showSaveSheet(blob, name) {
+  const sheet = $('saveSheet');
+  const img = $('saveImg');
+  if (!sheet || !img) return;
+  if (saveSheetUrl) URL.revokeObjectURL(saveSheetUrl);
+  saveSheetUrl = URL.createObjectURL(blob);
+  img.src = saveSheetUrl;
+  img.alt = name;
+  $('saveTip').textContent = '长按图片 → 存储到照片 · 点空白处关闭';
+  sheet.hidden = false;
+}
+
+function closeSaveSheet() {
+  const sheet = $('saveSheet');
+  if (!sheet || sheet.hidden) return;
+  sheet.hidden = true;
+  $('saveImg').removeAttribute('src');
+  if (saveSheetUrl) { URL.revokeObjectURL(saveSheetUrl); saveSheetUrl = ''; }
 }
 
 /* ------------------------------ UI 辅助 ----------------------------- */
@@ -1919,8 +2119,7 @@ function setOverlay(show, text) {
   /* longPoster 先定，背景比例的默认值要按版本取（标准版铺满 / 长版原比例） */
   if (qs.get('long') === '1' || qs.get('ex') === '1') state.opts.longPoster = true;
   state.opts.bgStyle = initialBgStyle();
-  bindTopbar();
-  syncBgUI();
+  bindInputs();
 
   /* 字体度量必须先就绪，否则折行与居中会算错 */
   try {
@@ -1932,13 +2131,14 @@ function setOverlay(show, text) {
     if (document.fonts.ready) await document.fonts.ready;
   } catch (e) {}
 
-  /* 与应用初始状态对齐（同一段代码，顶栏「重新获取」也走它） */
+  /* 与应用初始状态对齐（下拉更新也走同一段代码） */
   await resetToInitial(false);
   if (!state.apiData) {
     setOverlay(false);
     render();
   }
-  wakeTopbar();
+  /* 界面没有按钮，首次进入给一次手势提示 */
+  showHintOnce();
 
   /* 调试/回归用具：?debug=1 时把命中表、坐标换算与版面标注暴露出来 */
   if (DEBUG) {

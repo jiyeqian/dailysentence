@@ -25,23 +25,20 @@
   </div>
 </div>
 
-<!-- 顶栏：只有四个动作 -->
-<header class="topbar" id="topbar">
-  <button id="btnPlay" class="icon-btn" title="朗读" aria-label="朗读">
-    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 8.2v3.6h2.7L10.5 15V5L6.7 8.2H4z" fill="currentColor"/><path d="M13.5 8a4.6 4.6 0 0 1 0 4.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-  </button>
-  <button id="btnBg" class="icon-btn wide" title="背景比例" aria-label="背景比例"><span id="bgLabel">原比例</span></button>
-  <button id="btnRefresh" class="icon-btn" title="重新获取" aria-label="重新获取">
-    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.6 7A6.4 6.4 0 1 0 16.3 12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M16.2 3.6v3.9h-3.9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-  </button>
-  <button id="btnSave" class="icon-btn primary" title="保存海报" aria-label="保存海报">
-    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.4v8.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M6.6 8.6 10 12l3.4-3.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.2 16h11.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-  </button>
-</header>
-
 <!-- 相册选图入口：单击海报上的顶部图片 / 信息卡时由 JS 触发 -->
 <input id="fBgImage" type="file" accept="image/*" hidden>
 <input id="fCardImage" type="file" accept="image/*" hidden>
+
+<!-- 首次进入的一次性手势提示（3 秒后 / 任意操作立即消失，不做记忆） -->
+<p id="hint" class="hint" hidden>长按保存 · 下拉更新 · 点句子朗读 · 点日期看昨天</p>
+
+<!-- 保存浮层：iOS 专用通道。Safari 上 <a download> 只会落进「文件」里弹 Quick Look
+     预览（存不进相册），而 navigator.share 在长按的定时器里已脱离手势调用栈会被拒。
+     唯一稳的路是「长按这张图 → 存储到照片」，所以这里给一张能长按的原图。点空白处关闭。 -->
+<div id="saveSheet" hidden>
+  <img id="saveImg" alt="每日一句海报">
+  <p id="saveTip">长按图片 → 存储到照片</p>
+</div>
 
 <div id="toast" class="toast"></div>
 

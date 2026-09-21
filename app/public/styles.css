@@ -94,39 +94,27 @@ body:not(.raw) #stage { touch-action: none; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ---------------- 顶栏：只有四个动作，空闲自动淡出 ---------------- */
-.topbar {
+/* ---------------- 一次性手势提示（非常驻：3 秒后 / 任意操作即消失） ---------------- */
+.hint {
   position: fixed;
-  top: calc(var(--sat) + 10px);
-  right: 12px;
-  z-index: 40;
-  display: flex;
-  gap: 8px;
-  transition: opacity 0.5s ease;
-}
-.topbar.dim { opacity: 0.3; }
-
-.icon-btn {
-  width: 40px; height: 40px;
-  display: flex; align-items: center; justify-content: center;
-  border-radius: 50%;
+  left: 50%;
+  bottom: calc(var(--sab) + 26px);
+  transform: translateX(-50%);
+  z-index: 30;
+  margin: 0;
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: rgba(21, 29, 44, 0.82);
   border: 1px solid var(--line);
-  background: rgba(16, 22, 35, 0.72);
   color: var(--text);
+  font-size: 12.5px;
+  white-space: nowrap;
   backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-  cursor: pointer;
-  transition: transform 0.12s, opacity 0.2s;
+  pointer-events: none;
+  transition: opacity 0.4s;
+  max-width: 92vw; overflow: hidden; text-overflow: ellipsis;
 }
-.icon-btn svg { width: 20px; height: 20px; }
-.icon-btn:active { transform: scale(0.93); }
-.icon-btn.spin svg { animation: spin 0.9s linear infinite; }
-.icon-btn.wide { width: auto; padding: 0 15px; border-radius: 999px; font-family: inherit; font-size: 13px; font-weight: 600; }
-.icon-btn.primary {
-  background: linear-gradient(135deg, #4f8dfd, #22d3ee);
-  border-color: transparent;
-  color: #fff;
-  box-shadow: 0 8px 22px rgba(79, 141, 253, 0.4);
-}
+.hint.hide { opacity: 0; }
 
 /* ---------------- 提示 / 保存反馈 ---------------- */
 .toast {
@@ -143,6 +131,26 @@ body:not(.raw) #stage { touch-action: none; }
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
+/* ---------------- 保存浮层（iOS：长按图片 → 存储到照片） ---------------- */
+#saveSheet {
+  position: fixed; inset: 0; z-index: 70;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 20px; padding: 24px;
+  background: rgba(4, 8, 16, 0.94);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+#saveSheet[hidden] { display: none; }
+#saveImg {
+  width: min(76vw, 400px); max-width: 100%; height: auto; max-height: 70vh;
+  border-radius: 14px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.65);
+  /* 关键：把 #stage 上那条全局的 touch-callout:none / user-select:none 覆盖回来，
+     否则 iOS 长按出不来「存储到照片」菜单 */
+  -webkit-touch-callout: default;
+  -webkit-user-select: auto;
+  user-select: auto;
+}
+#saveTip { margin: 0; font-size: 15px; line-height: 1.6; color: #dbe4f5; text-align: center; }
+
 /* ---------------- 只显示海报本身（导出 / 调试）：?raw=1 ---------------- */
 body.raw { position: static; overflow: auto; height: auto; background: #000; }
 body.raw #stage { position: static; padding: 0; display: block; }
@@ -155,11 +163,7 @@ body.raw #poster {
   border-radius: 0;
   box-shadow: none;
 }
-body.raw .topbar,
+body.raw .hint,
 body.raw .overlay,
+body.raw #saveSheet,
 body.raw .toast { display: none !important; }
-
-/* ---------------- 桌面端：同一套交互 ---------------- */
-@media (min-width: 720px) {
-  .topbar { top: calc(var(--sat) + 14px); right: 16px; }
-}
