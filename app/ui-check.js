@@ -11,13 +11,17 @@
      9) 摆位：浏览器里不做竖直补正（--stage-pt 恒 0）；独立全屏桩下按「物理屏 − 布局框」
         补正并把海报中心对准物理屏中线（真机 bug：独立形态下整体偏上半个状态栏）
     10) 语音独占层：点 3 区（英文句）朗读后升起波形 —— **只有竖条、没有任何底板**（无背景 / 描边 /
-        毛玻璃，竖条自带极淡投影），宽度 = 正文列宽 × 90% 且居中、只盖 3 区不碰中文句与日期胶囊；
-        播放中其余手势全部失效；点波形即停并恢复；中文句 / 出处单击不再发音但双击仍能删除；
-        ?raw=1 里没有波形层
+        毛玻璃，竖条自带极淡投影），宽度 = 正文列宽 × 90%、**按 3 区文字框居中（左右留白相等）**、
+        只盖 3 区不碰中文句与日期胶囊；播放中其余手势全部失效；点波形即停并恢复；
+        中文句 / 出处单击不再发音但双击仍能删除；?raw=1 里没有波形层
     10b) 播放与波形严格同步：波形只由音频事件驱动（`playing` 才升，`pause` / `ended` / `error`
          / `emptied` 即收），`play()` 的 Promise 只用于报错；没有音频文件、或 play() 成功但
          始终不出声（静默失败）都**不出波形**；音频被外部暂停、或 currentTime 卡死时看门狗
          在几秒内收起；`inspect().voiceDiag` 自证每次收尾的原因与时长
+    10c) 冷启动首点：桩模拟「mp3 还没下完」（play 挂 1 秒才 settle，期间被 pause 就是 AbortError）
+         —— 必须照样出声出波形，不打断挂起的 play、errName 为空
+    10d) 海报圆角（32 设计值）：**画进成品**（画布四角透明、圆角内不透明），屏幕用同一半径显示
+         （= 32 × 显示比例）；口径是「圆角只许画进 canvas，不许只加 CSS」，不是「不许有圆角」
     11) 换图调整层：独立不透明弹层，**原海报完全不动**；层里只有居中的换图区与这张图
         （窗口内清晰、窗外是这张图压暗 62% 的其余部分、窗口是圆角矩形）；
         没有任何描边 / 虚线（源码里不再有 drawEditFrame）；点窗口 = 换同一张、点窗外 = 完成；
@@ -65,7 +69,8 @@ const TEMPLATE = path.join(__dirname, 'public/assets/template.jpg');   /* 1179×
  */
 const AUDIO_STUB = () => {
   const made = [];
-  let mode = 'normal';
+  let mode = 'normal';        /* normal 正常 | silent play 成功但永不出声 | cold 冷缓存（play 挂 1s 才 settle） */
+  const COLD_MS = 1000;
   class StubAudio extends EventTarget {
     constructor(src) {
       super();
@@ -95,17 +100,41 @@ const AUDIO_STUB = () => {
           }
         }, 250);
       }
+      if (mode === 'cold') {
+        /* 冷缓存模型：play() 要等一会儿才 settle；**这段时间里被 pause，按规范以 AbortError
+           打断**（老实现就是这样：prime 那次 play 还挂着，speak 又去 pause 它 → 第一次点必失败） */
+        this.__pending = true;
+        return new Promise((res, rej) => {
+          this.__abort = () => {
+            if (!this.__pending) return;
+            this.__pending = false;
+            const e = new Error('The play() request was interrupted by a call to pause()');
+            e.name = 'AbortError';
+            rej(e);
+          };
+          this.__timer = setTimeout(() => {
+            if (!this.__pending) return;
+            this.__pending = false;
+            if (!this.paused) this.dispatchEvent(new Event('playing'));
+            res();
+          }, COLD_MS);
+        });
+      }
       if (mode !== 'silent') setTimeout(() => this.dispatchEvent(new Event('playing')), 20);
       return Promise.resolve();
     }
-    pause() { this.paused = true; this.pauses++; }
+    pause() {
+      this.paused = true;
+      this.pauses++;
+      if (this.__pending && this.__abort) this.__abort();      /* 打断挂起的 play */
+    }
   }
   window.Audio = StubAudio;
   window.__audioStub = {
     made,
     last: () => made[made.length - 1] || null,
     count: () => made.length,
-    mode: (m) => { mode = m || 'normal'; },      /* 'silent' = play() 成功但永远不出声 */
+    mode: (m) => { mode = m || 'normal'; },
     /* 模拟「被外部暂停」（真浏览器会派发 pause 事件） */
     pauseExternally: (a) => {
       const el = a || window.__audioStub.last();
@@ -345,7 +374,32 @@ function ok(label, cond, extra) {
   ok('显示等比且宽度充满优先（宽 = min(舞台宽, 高×9/16)）',
     Math.abs(shown.w - fitW) < 1.5 && Math.abs(shown.w / shown.h - 1080 / 1920) < 0.002,
     `${shown.w.toFixed(1)}×${shown.h.toFixed(1)}（舞台 ${shown.stageW}×${shown.stageH}，期望宽 ${fitW.toFixed(1)}）`);
-  ok('海报不裁角（无圆角）', shown.radius === '0px', shown.radius);
+  /* 海报圆角（2026-09-22 用户要求）：**画进成品**、屏幕用同一半径显示 —— 这条同时钉三件事：
+     屏幕半径 = 32 设计值 × 显示比例、画布四角透明、圆角内与边中点不透明。
+     ⚠ 旧断言写的是「海报不裁角（无圆角）」：那是老口径（当时圆角只能在 CSS 上做，会破坏
+     「显示 = 成品」）。现在圆角画在 canvas 里、屏幕跟着同半径，显示与成品仍然一致，
+     口径改成「圆角只许画进 canvas，不许只加 CSS」。 */
+  const radius = await p.evaluate(() => {
+    const c = document.getElementById('poster');
+    const rect = c.getBoundingClientRect();
+    const ctx = c.getContext('2d');
+    const W = c.width;
+    const alphaAt = (x, y) => ctx.getImageData(Math.round(x), Math.round(y), 1, 1).data[3];
+    const k = W / 1080;                       /* 位图相对设计坐标的比例 */
+    return {
+      css: parseFloat(getComputedStyle(c).borderRadius),
+      expectCss: 32 * (rect.width / 1080),
+      corners: [alphaAt(1, 1), alphaAt(W - 2, 1), alphaAt(1, c.height - 2), alphaAt(W - 2, c.height - 2)],
+      inside: alphaAt(40 * k, 40 * k),
+      midEdge: alphaAt(W / 2, 1),
+    };
+  });
+  ok('海报圆角：屏幕半径 = 32 设计值 × 显示比例（画进成品、屏幕同半径）',
+    Math.abs(radius.css - radius.expectCss) < 0.6 && radius.css > 0,
+    `屏幕 ${radius.css}px / 期望 ${radius.expectCss.toFixed(2)}px`);
+  ok('海报四角确实是圆的：画布四角透明、圆角内与边中点不透明',
+    radius.corners.every((a) => a === 0) && radius.inside === 255 && radius.midEdge === 255,
+    `四角 alpha ${JSON.stringify(radius.corners)}｜圆角内 ${radius.inside}｜上边中点 ${radius.midEdge}`);
   ok('上下色块等宽（竖直居中）',
     Math.abs(shown.padTop - shown.padBottom) < 1 && shown.padTop > 0,
     `上 ${shown.padTop.toFixed(1)} / 下 ${shown.padBottom.toFixed(1)}（手机屏幕比 9:16 更高，坐实有留白）`);
@@ -660,11 +714,18 @@ function ok(label, cond, extra) {
     };
     const en = reg('en');
     const cn = reg('cn');
+    const enReg = window.__ds.state.regions.find((x) => x.id === 'en');
     const date = window.__ds.state.regions.find((x) => x.id === 'badge-date');
-    /* 宽度基准：正文列宽（屏幕像素）= 984 × 显示比例；波形应为它的 90% 且在列内居中 */
+    /* 宽度基准：正文列宽（屏幕像素）= 984 × 显示比例，波形 = 它的 90%；
+       居中基准是 **3 区文字框**（不是整列），偏移夹在列中心 ±10% 列宽内 */
     const c = document.getElementById('poster').getBoundingClientRect();
     const k = c.width / 1080;
     const colW = 984 * k;
+    const w0 = colW * 0.9;
+    const limit = colW * 0.1;
+    const colCenter = c.left + 48 * k + colW / 2;
+    const inkCenter = c.left + (enReg.x + enReg.w / 2) * k;
+    const center = Math.min(colCenter + limit, Math.max(colCenter - limit, inkCenter));
     return {
       hidden: w.hidden,
       show: w.classList.contains('show'),
@@ -682,8 +743,11 @@ function ok(label, cond, extra) {
       bars: bars.length,
       cover: r.width ? (bw * bars.length) / r.width : 0,
       colW,
-      expectW: colW * 0.9,
-      expectX: c.left + 48 * k + (colW - colW * 0.9) / 2,
+      expectW: w0,
+      expectX: center - w0 / 2,
+      /* 相对 3 区文字框的左右留白（用户要的就是这两个数相等） */
+      inkLeft: c.left + enReg.x * k,
+      inkRight: c.left + (enReg.x + enReg.w) * k,
     };
   });
 
@@ -706,9 +770,15 @@ function ok(label, cond, extra) {
     /drop-shadow/.test(wg.barFilter), wg.barFilter);
   ok('竖条细、不横穿字形（透过波形仍能读英文句）',
     wg.cover < 0.35 && wg.bars >= 8, `横向覆盖 ${(wg.cover * 100).toFixed(0)}%｜${wg.bars} 根`);
-  ok('波形宽度 = 正文列宽 × 90%，且在正文列内居中（不随句子长短变）',
-    Math.abs(wg.rect.w - wg.expectW) <= 1.5 && Math.abs(wg.rect.x - wg.expectX) <= 1.5,
-    `实测 ${Math.round(wg.rect.w)} / 期望 ${Math.round(wg.expectW)}｜左 ${Math.round(wg.rect.x)} / 期望 ${Math.round(wg.expectX)}（列宽 ${Math.round(wg.colW)}）`);
+  ok('波形宽度 = 正文列宽 × 90%（不随句子长短变）',
+    Math.abs(wg.rect.w - wg.expectW) <= 1.5,
+    `实测 ${Math.round(wg.rect.w)} / 期望 ${Math.round(wg.expectW)}（列宽 ${Math.round(wg.colW)}）`);
+  /* 2026-09-22 用户指出「左边比右边空得多」（正文左对齐、右侧参差，按整列居中必然不均）：
+     居中基准改成 3 区文字框 → 左右留白相等；偏移夹在列中心 ±10% 列宽内，短句也不会偏出。 */
+  ok('波形按 3 区文字框居中：相对文字的左右留白相等（差 ≤ 1px）',
+    Math.abs(wg.rect.x - wg.expectX) <= 1.5 &&
+    Math.abs((wg.rect.x - wg.inkLeft) - (wg.inkRight - (wg.rect.x + wg.rect.w))) <= 1,
+    `左留白 ${Math.round(wg.rect.x - wg.inkLeft)} / 右留白 ${Math.round(wg.inkRight - (wg.rect.x + wg.rect.w))}｜面板左 ${Math.round(wg.rect.x)} / 期望 ${Math.round(wg.expectX)}`);
   await shot(p, 's12-voice-playing');
 
   /* 独占：播放期间除波形区外，一切手势都失效 */
@@ -837,6 +907,30 @@ function ok(label, cond, extra) {
   ok('voiceDiag 记录收尾原因与实际播放时长（点波形 → tap）',
     diagTap.lastReason === 'tap' && diagTap.lastAt > 0 && diagTap.playedMs >= 0 && diagTap.dur > 0,
     JSON.stringify(diagTap));
+
+  /* ⑥ 冷启动首点 —— 用户报的「第一次点总失败、等一会儿再点就行」：
+        桩让 play() 挂 1 秒才 settle；老实现会在 300ms 后 pause 它（规范语义 = AbortError）→ 必失败。
+        新实现只 seek、不打断挂起的 play，所以照样出声出波形，且 errName 为空、该元素一次都没被 pause。 */
+  await p.evaluate(() => window.__audioStub.mode('cold'));
+  await tap(p, 'en');
+  await p.waitForTimeout(2400);
+  const cold = await p.evaluate(() => {
+    const el = window.__audioStub.last();
+    return {
+      voice: !!window.__ds.inspect().voice,
+      hidden: document.getElementById('wave').hidden,
+      diag: window.__ds.inspect().voiceDiag,
+      play: el ? { plays: el.plays, pauses: el.pauses, volume: el.volume, muted: el.muted } : null,
+    };
+  });
+  ok('冷启动首点：绝不打断挂起的 play（无 AbortError / play-rejected，该元素没被 pause）',
+    cold.diag.lastReason === '' && cold.diag.errName === '' && cold.play && cold.play.pauses === 0,
+    `reason「${cold.diag.lastReason}」errName「${cold.diag.errName}」${JSON.stringify(cold.play)}`);
+  ok('冷启动首点：仍然出声出波形（音量已复位、未静音）',
+    cold.voice && !cold.hidden && cold.play.volume === 1 && cold.play.muted === false,
+    `voice ${cold.voice}｜hidden ${cold.hidden}｜音量 ${cold.play ? cold.play.volume : '-'}`);
+  await tapWave(p);                              /* 收尾：停掉这次播放，别影响后面的断言 */
+  await p.evaluate(() => window.__audioStub.mode('normal'));
 
   /* 双击删除仍保留（单击语义收窄不影响它）—— 删完立刻刷新，免得影响后面几节 */
   await tap(p, 'cn', 0, true);

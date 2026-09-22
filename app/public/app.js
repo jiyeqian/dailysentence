@@ -169,6 +169,8 @@ function watchViewport() {
     t = setTimeout(() => {
       /* 旋转 / 独立形态启动时视口高度会变，居中补正跟着重算（幂等，只会写 CSS 变量） */
       syncStageCenter();
+      /* 显示尺寸变了 → 海报的屏幕圆角跟着换算（与成品里的半径保持一致） */
+      syncPosterRadius();
       /* 播放中遇到旋转：波形层跟着 3 区重新贴合，别飘走 */
       if (state.voice) layoutWave();
       /* 调整中遇到旋转：海报画布尺寸不变也要重排一次（弹层的画布与窗口尺寸都依赖视口） */
@@ -181,6 +183,7 @@ function watchViewport() {
 }
 
 /* 中部区域：日期胶囊固定在顶部靠右，英文 + 中文 + 出处在其下方的活动区里居中铺满 */
+const POSTER_RADIUS = 32;     // 海报四角圆角（设计值，2026-09-22 用户定）：画进成品，屏幕同半径显示
 const DATE_TOP_PAD = 24;      // 日期胶囊距顶部图片区底
 const DATE_H = 52;            // 日期胶囊高度（基准值；随 2 区的交互缩放一起等比放大）
 const GAP_DATE_BAND = 28;     // 日期胶囊 → 文字活动区
@@ -232,7 +235,11 @@ const state = {
      lastReason 是最近一次收尾的原因（ended / pause / stalled / error / emptied /
      timeout / tap / restart / reset / play-rejected），playedMs 是这次实际响了多久。
      每次 speak() 会重置成新的一次尝试；播放期间 lastReason 为空串。 */
-  voiceDiag: { lastReason: '', lastAt: 0, playedMs: 0, dur: 0, url: '', playedFrom: 0 },
+  voiceDiag: {
+    lastReason: '', lastAt: 0, playedMs: 0, dur: 0, url: '', playedFrom: 0,
+    errName: '',        // 播放失败时的错误名（NotAllowedError / AbortError / …）—— 真机自证用
+    retries: 0,         // 这次朗读自动重试了几次（0/1）
+  },
   viewDate: '',         // 正在看哪一天（''=今天）；往日数据来自服务端存档
   archived: false,      // 这份数据是从存档来的（不是上游实时）
   archiveOnly: false,   // 上游挂了，整份海报都是存档顶上的
@@ -496,6 +503,9 @@ async function loadDaily(force, date) {
   }
 
   state.apiData = data;
+  /* 进页面就把发音文件抓进 HTTP 缓存：冷启动时第一次点英文句才不用等它下载 ——
+     不预热的话 prime 那次 play() 会一直挂着，见 speak() 里关于 AbortError 的说明 */
+  preloadAudio();
   state.archived = !!data.fromArchive;
   state.archiveOnly = !!data.archiveOnly;
   state.viewDate = data.fromArchive ? (data.archiveDate || iso) : '';
@@ -1438,12 +1448,24 @@ function render() {
   ctx.imageSmoothingQuality = 'high';
   ctx.textBaseline = 'alphabetic';
 
+  /* 海报圆角（2026-09-22 用户要求）：**画进成品**，四角保持透明 ——
+     长按另存的 PNG 本身就是一张圆角卡片，屏幕侧用同一半径显示（syncPosterRadius），
+     所以「显示 = 成品」依旧成立。这是本项目**唯一**一个「画进 canvas 的显示属性」：
+     绝不许只在 CSS 里加圆角（那样屏幕与成品就不一致了）。
+     半径是设计值常量，不随 CH / U 变；clip 之后所有绘制（含 drawBackground 里那幅
+     铺满画布的 fillRect）都被限制在圆角内，四角自然透明。 */
+  ctx.save();
+  ctx.beginPath();
+  roundRectPath(ctx, 0, 0, CW, CH, POSTER_RADIUS);
+  ctx.clip();
+
   drawBackground(ctx, L);
   drawScrim(ctx, L);
   drawGrain(ctx);
   drawTopText(ctx, L);
   drawWordCard(ctx, L);
   drawProfileCard(ctx, L);
+  ctx.restore();
 
   /* 换图调整层：原海报不动，弹层里只有居中的换图区与这张图（预览画在自己的画布上）。
      放在这里（唯一落点 render）而不是在 startEdit 里另算一份 —— 换图、旋转、拖动重绘
@@ -1455,7 +1477,28 @@ function render() {
   state.regions = buildHitRegions(L);
   /* 版面标注：给人看的编号图与给 AI 读的坐标清单共用这份数据（仅调试模式） */
   if (DEBUG) state.annots = buildAnnots(ctx, L);
+  /* 屏幕上的圆角必须与成品里的半径一致（值没变不写 DOM） */
+  syncPosterRadius();
   return L;
+}
+
+let posterRadiusCss = -1;   /* 上次写进 #poster 的 CSS 圆角（px）；值没变就不碰 DOM */
+
+/**
+ * 把海报圆角的**屏幕半径**同步到 CSS：`#poster` 的 `border-radius` 必须等于
+ * 「设计值 32 × 显示比例（显示宽 / 1080）」，否则屏幕上的圆角与成品里的对不上，
+ * 「显示 = 成品」就破了。
+ *
+ * ⚠ **不能用百分比**：百分比圆角在横向与纵向分别按宽 / 高解析，9:16 的框会变成椭圆角。
+ * 与 syncStageCenter() 同一习惯：值没变就不写 DOM（render 每次都会调到它）。
+ */
+function syncPosterRadius() {
+  const rect = cvs.getBoundingClientRect();
+  if (!rect.width) return;
+  const px = Math.round(POSTER_RADIUS * (rect.width / CW) * 100) / 100;
+  if (px === posterRadiusCss) return;
+  posterRadiusCss = px;
+  cvs.style.borderRadius = px + 'px';
 }
 
 /* ===================== 图片手动调整（fit 模型） ===================== */
@@ -2187,11 +2230,14 @@ let voiceHooks = null;       // 挂在音频上的事件回调集合（停止时
 let waveHideTimer = null;    // 退场淡出后再真正 hidden
 
 const WAVE_W_RATIO = 0.9;    // 波形宽度 = 正文列宽 × 90%（用户定：比文字区域窄 10%）
+const WAVE_ALIGN_LIMIT = 0.1; // 波形中心相对列中心的最大偏移（列宽的 10%）：按 3 区文字框居中，但不许偏出
 const WAVE_PAD_Y = 12;       // 竖向相对 3 区框的外扩上限（设计值）
 const WAVE_BAR_W = 9;        // 竖条宽（设计值）
 const WAVE_BAR_GAP = 36;     // 竖条间距（设计值）→ 横向覆盖率约 20%，不遮笔画
 const VOICE_STALL_MS = 1500; // 看门狗判定「卡死」的阈值：这么久 currentTime 不前进就收
 const VOICE_TICK_MS = 500;   // 看门狗检查间隔
+const VOICE_KICK_MS = 1500;  // play() 迟迟没换来 playing 时「踢一下」的等待（见 speak）
+const VOICE_RETRY_MS = 400;  // play() 被拒 / 被打断后自动重试一次前的等待
 
 /** 波形横向基准：正文列宽（左右各 TEXT_X 的正文区）。列宽天天一样，波形宽度也就天天一样 */
 function waveColumnW() {
@@ -2201,10 +2247,14 @@ function waveColumnW() {
 /**
  * 波形层要盖的画布框（设计坐标）。3 区被删掉 / 还没渲染时返回 null（那就不显示波形）。
  *
- * 横向：宽度恒为**正文列宽 × 90%**、在正文列内居中（不再跟着 `en.w` 变 —— 句子短的时候
- * 那样会缩成一小截，竖条数量都不够）。竖向：以 3 区框为准，上下各外扩最多 12 设计值，
- * 但还要再受「邻居留给我的空间」约束（最多各吃 40%）—— 英文句与中文句 / 日期胶囊的间距
- * 随当天内容变化，固定外扩在某些天会顶到它们，而「波形只盖 3 区」是硬要求（回归里钉着）。
+ * 横向：宽度恒为**正文列宽 × 90%**（不跟着 `en.w` 变 —— 句子短的时候那样会缩成一小截，
+ * 竖条数量都不够）；居中基准是 **3 区文字框的中心**（不是整列）—— 正文是左对齐、右侧参差，
+ * 按整列居中会「左边空得多、右边空得少」（2026-09-22 用户指出，实测 49 对 24）。
+ * 为避免短句时波形被推得偏出正文列，中心相对列中心的偏移**夹在 ±10% 列宽内**：
+ * 正常句子完全按文字框对称，句子很短时才退化成列居中。
+ * 竖向：以 3 区框为准，上下各外扩最多 12 设计值，但还要再受「邻居留给我的空间」约束
+ * （最多各吃 40%）—— 英文句与中文句 / 日期胶囊的间距随当天内容变化，固定外扩在某些天会顶到
+ * 它们，而「波形只盖 3 区」是硬要求（回归里钉着）。
  */
 function voiceBox() {
   const regions = state.regions || [];
@@ -2218,8 +2268,12 @@ function voiceBox() {
   const padBottom = Math.min(WAVE_PAD_Y, roomBelow * 0.4);
   const colW = waveColumnW();
   const w = colW * WAVE_W_RATIO;
+  const limit = colW * WAVE_ALIGN_LIMIT;                 /* 允许偏离列中心的最大量 */
+  const colCenter = TEXT_X + colW / 2;
+  const inkCenter = en.x + en.w / 2;                     /* 3 区文字框（就是句子最长那行）的中心 */
+  const center = Math.min(colCenter + limit, Math.max(colCenter - limit, inkCenter));
   return {
-    x: TEXT_X + (colW - w) / 2,      /* 正文列内水平居中 */
+    x: center - w / 2,
     y: en.y - padTop,
     w,
     h: en.h + padTop + padBottom,
@@ -2331,6 +2385,8 @@ function playVoice(audio) {
 function stopVoice(reason) {
   clearTimeout(voiceTimer);
   voiceTimer = null;
+  clearTimeout(voiceRetryTimer);       /* 收尾时连带取消「自动重试 / 踢一下」，免得复位后又冒一次播放 */
+  voiceRetryTimer = null;
   clearInterval(voiceWatch);
   voiceWatch = null;
   const a = activeAudio;
@@ -2359,6 +2415,56 @@ function hasAudio() {
   return !!(state.apiData && state.apiData.audio && state.apiData.audio.normal);
 }
 
+let preloadEl = null;        // 预热用的音频元素（留引用，别让 GC 提前回收它）
+let primeSilent = null;      // 手势解锁用的静音元素（同上）
+let silentUri = '';          // 静音 WAV 的 data URI（懒生成一次）
+let voiceRetryTimer = null;  // 「自动重试一次」的定时器（stopVoice 里必清）
+
+/**
+ * 造一个 0.1 秒静音 WAV 的 data URI（运行时生成，不塞一长串 base64）。
+ * 用途见 primeAudio()：**在用户手势里播一段本地静音片段**，无网络、瞬间可播，
+ * 保证「手势里确实播过东西」这一步必定成功 —— 老 WebView 对这一步很挑剔，
+ * 拿远端 mp3 去解锁会被网络拖住。
+ */
+function silentAudioUri() {
+  if (silentUri) return silentUri;
+  const rate = 8000;
+  const n = Math.round(rate * 0.1);            /* 0.1 秒足够，别做长了白占内存 */
+  const b = new Uint8Array(44 + n);
+  const dv = new DataView(b.buffer);
+  const put = (off, s) => { for (let i = 0; i < s.length; i++) b[off + i] = s.charCodeAt(i); };
+  put(0, 'RIFF'); dv.setUint32(4, 36 + n, true); put(8, 'WAVE');
+  put(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, rate, true); dv.setUint32(28, rate, true);
+  dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);
+  put(36, 'data'); dv.setUint32(40, n, true); b.fill(0x80, 44);   /* 8bit 无符号，0x80 = 静音 */
+  let s = '';
+  for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+  silentUri = 'data:audio/wav;base64,' + btoa(s);
+  return silentUri;
+}
+
+/**
+ * 预热发音文件（daily 数据一到手就调，见 loadDaily）：只是把 mp3 提前抓进 HTTP 缓存，
+ * 不播、不出波形。**冷启动第一次点英文句失败的主因就是它没预热**：
+ * primeAudio 那次 play() 要等网络，而 300ms 后的 speak() 又会去打断它（AbortError）。
+ *
+ * ⚠ 用媒体元素自身的加载器（`preload` + `load()`），**不要用 fetch** ——
+ * 跨域音频用 fetch 会被 CORS 拦下，媒体元素不受这个限制。
+ */
+function preloadAudio() {
+  const url = state.apiData && state.apiData.audio && state.apiData.audio.normal;
+  if (!url) { preloadEl = null; return; }
+  try {
+    if (preloadEl && preloadEl.src === url) return;   /* 同一份音频已在预热 */
+    const a = new Audio(url);
+    a.preload = 'auto';
+    a.volume = 0;                                     /* 保险：万一被播到也不出声 */
+    try { a.load(); } catch (e) { /* 忽略 */ }
+    preloadEl = a;
+  } catch (e) { /* 预热失败不影响点读，只是首点可能慢一点 */ }
+}
+
 /**
  * 朗读今日句子；audio 传进来时复用它（iOS 必须在手势调用栈里先解锁）。
  *
@@ -2379,14 +2485,26 @@ function speak(audio) {
   a.__dsTaken = true;                      /* 接管：primeAudio 的复位逻辑从此不再碰这个元素 */
   activeAudio = a;
   state.lastSpeakAt = Date.now();
-  state.voiceDiag = { lastReason: '', lastAt: 0, playedMs: 0, dur: 0, url, playedFrom: 0 };
+  state.voiceDiag = {
+    lastReason: '', lastAt: 0, playedMs: 0, dur: 0, url, playedFrom: 0, errName: '', retries: 0,
+  };
+
+  /* ⚠ **绝不打断「还挂着的 play」**：prime 那次 play() 要等网络把 mp3 抓够才 settle，
+     此时对它 pause 会被浏览器以 `AbortError: The play() request was interrupted by a call
+     to pause()` 打断 —— 这正是「冷启动第一次点总失败、等一会儿再点就行」的根因
+     （那时 mp3 已进 HTTP 缓存、play 立刻 settle）。所以按「是否已在播 / play 是否还没 settle」
+     分两条路：挂着就只 seek（seek 不会打断 play），确实停了才 pause + 重播。
+     音量复位两条路都要做 —— 少了它就是「有波形没声音」。 */
+  const pending = !!a.__dsPlayPending || a.paused === false;
   try {
-    /* prime 解锁时被压到 0 —— 不复位就是「有波形没声音」；顺手清掉残留的播放位置 */
     a.muted = false;
     a.volume = 1;
-    a.pause();
-    a.currentTime = 0;
-  } catch (e) { /* 还没 ready 时忽略 */ }
+    if (pending) {
+      try { a.currentTime = 0; } catch (e) { /* 数据还没到就设不动，无妨（本来也是从头播） */ }
+    } else {
+      try { a.pause(); a.currentTime = 0; } catch (e) { /* 忽略 */ }
+    }
+  } catch (e) { /* 忽略 */ }
 
   const hooks = [
     ['playing', () => { state.voiceDiag.dur = isFinite(a.duration) ? a.duration : 0; playVoice(a); }],
@@ -2398,8 +2516,40 @@ function speak(audio) {
   voiceHooks = hooks;
   for (const h of hooks) a.addEventListener(h[0], h[1]);
 
-  const p = a.play();
-  if (p && p.catch) p.catch(() => { toast('发音播放失败'); stopVoice('play-rejected'); });
+  /** 这次播放彻底失败：记下错误名（真机自证用）后收尾 */
+  const fail = (err) => {
+    state.voiceDiag.errName = (err && err.name) || 'Error';
+    toast('发音播放失败');
+    stopVoice('play-rejected');
+  };
+  /** 再 play 一次（自动重试 / 「踢一下」共用）：已经出声或已收尾就不动，幂等无害 */
+  const kick = () => {
+    if (state.voice || state.voiceDiag.lastReason) return;
+    const p2 = a.play();
+    if (p2 && p2.catch) p2.catch(fail);
+  };
+
+  if (pending) {
+    /* 复用的 prime 元素已经 play 过了，只等它出声；但有些环境 play() 的 Promise 迟迟不 settle，
+       1.5s 后「踢一下」（再调一次 play()）能把它唤醒 —— 幂等，不会叠加播放 */
+    voiceRetryTimer = setTimeout(kick, VOICE_KICK_MS);
+  } else {
+    const p = a.play();
+    if (p && p.then) {
+      p.catch((err) => {
+        /* 被拒（NotAllowedError）/ 被中断（AbortError）：自动重试一次 —— 此时预热多半已就绪、
+           页面也已有用户手势激活，八成就起来了；仍失败才提示并收尾 */
+        if (state.voiceDiag.retries < 1) {
+          state.voiceDiag.retries = 1;
+          voiceRetryTimer = setTimeout(kick, VOICE_RETRY_MS);
+          return;
+        }
+        fail(err);
+      });
+    } else {
+      voiceRetryTimer = setTimeout(kick, VOICE_KICK_MS);   /* 老浏览器不返回 Promise */
+    }
+  }
   return a;
 }
 
@@ -2415,16 +2565,28 @@ function speak(audio) {
  */
 function primeAudio() {
   if (!hasAudio()) return null;
+  /* ① 本地静音片段：无网络、瞬间起播 → 保证「手势里确实播过东西」这一步必定成功。
+        老 WebView 对这一步很挑剔，而拿远端 mp3 去解锁会被网络拖住（那正是首点失败的土壤）。 */
+  try {
+    const s = new Audio(silentAudioUri());
+    s.volume = 0;
+    const ps = s.play();
+    if (ps && ps.catch) ps.catch(() => {});
+    primeSilent = s;
+  } catch (e) { /* 忽略：这只是保底，失败也不影响下面那条正路 */ }
   try {
     const a = new Audio(state.apiData.audio.normal);
+    a.preload = 'auto';
     a.volume = 0;
+    a.__dsPlayPending = true;               /* 记下「这次 play 还挂着」——speak() 靠它决定别打断 */
     const p = a.play();
+    const settle = () => { a.__dsPlayPending = false; };
     const restore = () => {
       if (a.__dsTaken) return;              /* 已被正式播放接管：绝不插手 */
       try { a.pause(); a.currentTime = 0; a.volume = 1; } catch (e) { /* 忽略 */ }
     };
-    if (p && p.then) p.then(restore).catch(() => {});
-    else restore();
+    if (p && p.then) p.then(settle, settle).then(restore, () => {});
+    else { settle(); restore(); }
     return a;
   } catch (e) {
     return null;

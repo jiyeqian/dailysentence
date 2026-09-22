@@ -101,10 +101,28 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   - 外观三条硬约束（用户明确要求）：**只有竖条、没有任何底板**（无背景 / 描边 / 圆角，
     `backdrop-filter` 一律不用 —— 一模糊就把底下的英文句糊掉），竖条自带极淡 `drop-shadow`
     保证亮背景上也看得见；**不可太突兀** → 竖条细（9 设计值）、间距大（36）、振幅压 45%–85%、
-    整组只占 58% 高度、横向覆盖率约 20%；**宽度恒为正文列宽 × 90%**（`WAVE_W_RATIO`，不随句子
-    长短变），在正文列内居中。
+    整组只占 58% 高度、横向覆盖率约 20%。
+  - **横向：宽度恒为正文列宽 × 90%**（`WAVE_W_RATIO`，不随句子长短变），
+    但**居中基准是 3 区文字框（`en`）而不是整列**（2026-09-22 用户指出「左边比右边空得多」）：
+    正文左对齐、右侧参差，按整列居中必然左边空得多。偏移量夹在列中心 **±10% 列宽**内
+    （`WAVE_ALIGN_LIMIT`）—— 正常句子完全按文字框对称（实测左右各 23px），句子很短时才退化成列居中。
   - 面板只盖 3 区：横向取列宽，竖向以 3 区框为准、外扩**自适应**（`voiceBox()`：上下最多各吃
     「邻居留出的空间」的 40%），所以永远不会顶到中文句或日期胶囊 —— 回归里按真实 rect 钉着。
+  - **冷启动首点必须一次成功**（2026-09-22 修，用户报「第一次点总失败、等一会儿再点就行」）：
+    - **根因**：`primeAudio()` 那次 `play()` 要等网络把 mp3 抓够才 settle；300ms 后 `speak()`
+      又对它 `pause()` → 浏览器按规范以 `AbortError: The play() request was interrupted by
+      a call to pause()` 打断 → `play-rejected`。等一会儿再点就好，是因为 mp3 已进 HTTP 缓存。
+    - **预热**：`loadDaily` 拿到数据就 `preloadAudio()`（`Audio` + `preload='auto'` + `load()`，
+      **不要用 fetch** —— 跨域音频会被 CORS 拦下）。
+    - **绝不打断挂起的 play**：`speak()` 复用元素时按 `a.__dsPlayPending || a.paused === false`
+      判断「已在播 / 还在挂起」，挂着就**只 seek**（`currentTime = 0`），确实停了才 `pause()` + 重播。
+      音量复位两条路都要做（少了它就是「有波形没声音」）。
+    - **本地静音片段保底解锁**：`primeAudio()` 里额外播一段运行时生成的 0.1s 静音 WAV
+      （`silentAudioUri()`，无网络、瞬间起播），保证「手势里确实播过东西」这一步必定成功。
+    - **自动重试一次**：`play()` 被拒 / 被打断 → `VOICE_RETRY_MS`(400ms) 后 `kick()` 一次；
+      `play()` 迟迟不 settle 时 `VOICE_KICK_MS`(1500ms) 也踢一下。`stopVoice()` 里连带取消这两个定时器。
+    - `voiceDiag` 因此多了 `errName`（`NotAllowedError` / `AbortError` / …）与 `retries`：
+      真机再失败时读 `?debug=1` 下的 `inspect().voiceDiag` 就能分辨是被拒还是被打断。
 
 - **换图后自动进入「手动调整模式」**（`state.edit = { target: 'img'|'card' }`）：
   默认什么都不动（`state.fits[target] = { scale: 1, ox: 0, oy: 0 }` 必须等于「刚换上的样子」），
@@ -140,8 +158,15 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   那张位图等比缩放，所以「显示 = 成品」永远成立；画布尺寸与窗口 / 旋转无关，
   **任何时候都不许因为视口变化而重排**（真机上出过「截屏与另存版面不一致」，就是这么来的）。
   - 显示规则：宽度充满优先（9:16 在竖直方向居中，上下留 `--bg` 色块）；窗口比 9:16 更扁时
-    按高度适配（`#poster` 的 `max-width/max-height` 等比 contain，不裁不扭）；**海报不加圆角**
-    （会裁掉四角 → 显示就不是成品了）
+    按高度适配（`#poster` 的 `max-width/max-height` 等比 contain，不裁不扭）
+  - **海报四角圆角 = 32 设计值，而且必须画进 canvas**（2026-09-22 用户要求，口径随之改写）：
+    `render()` 开头用 `roundRectPath(ctx, 0, 0, CW, CH, POSTER_RADIUS)` + `ctx.clip()`，
+    四角因此保持**透明**（长按另存的 PNG 就是一张圆角卡片）；屏幕侧由 `syncPosterRadius()`
+    把 `#poster` 的 `border-radius` 写成「32 × 显示比例」，与成品对齐。
+    ⚠ 原来是「**海报不加圆角**（会裁掉四角 → 显示就不是成品了）」—— 那是「圆角只存在于 CSS」
+    时代的结论；现在圆角画在 canvas 里、屏幕跟着同半径，**显示 = 成品依然成立**。
+    新口径一句话：**圆角只许画进 canvas，绝不许只加 CSS**（那样屏幕与成品就不一致了）；
+    CSS 里的半径也**不能写百分比**（按宽高分别解析，9:16 会变成椭圆角）。阴影仍然不加。
   - **「竖直居中」= 对物理屏居中，而不是对布局框居中**（`syncStageCenter()`）：
     加到主屏的独立全屏形态下，布局视口比物理屏**矮一个状态栏、且锚在屏幕顶端**
     （内容仍从 y=0 开始画、状态栏压在上面），在它里面居中会让整张海报偏上半个状态栏 ——

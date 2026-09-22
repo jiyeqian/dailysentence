@@ -75,8 +75,12 @@ body { position: fixed; inset: 0; overflow: hidden; touch-action: manipulation; 
   max-height: 100%;
   width: auto;
   height: auto;
-  /* 不加圆角 / 阴影：屏幕上显示的就是长按另存的那张位图，圆角会把四角裁掉，
-     那样「显示」与「成品」就不是同一张了 */
+  /* 圆角（2026-09-22 起）：**半径不在 CSS 里写死，由 JS 的 syncPosterRadius() 写内联样式** ——
+     它必须等于「设计值 32 × 显示比例」，而显示比例只有运行时才知道；写成百分比会变成椭圆角
+     （百分比圆角在宽 / 高上分别解析）。
+     ⚠ 铁律仍在：**圆角是画进 canvas 的**（render() 里 roundRectPath + clip，四角透明），
+     CSS 这边只是让屏幕与成品对得上 —— 不许出现「只在 CSS 加圆角、成品还是直角」的写法。
+     阴影仍然不加。 */
   touch-action: manipulation;
 }
 /* 长按是「保存」，双击是「隐藏」，上下拖动是「缩放字号」——
