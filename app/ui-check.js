@@ -155,14 +155,36 @@ function ok(label, cond, extra) {
   ok('浮框 / 控件仓库 / 引导已从 DOM 移除', gone.length === 0, gone.length ? '仍存在: ' + gone.join(',') : '');
 
   let d = await info(p);
-  const H0 = d.canvas.h;   /* 设备长边换算出的设计高度（桌面固定 1080×1920 → 1920） */
+  const H0 = d.canvas.h;   /* 画布高（设计坐标）；固定画布下恒为 1920 */
   ok('画布宽恒为设计基准 1080（设计坐标 = 标注通道的契约）', d.canvas.w === 1080, 'w=' + d.canvas.w);
-  ok('手机自适应：位图按屏幕比例，且不低于基准宽 1080',
-    d.canvas.adaptive === true && d.canvas.physW === 1080 && d.canvas.physH === 2338,
+  ok('画布固定 1080×1920（不按设备分辨率出图，adaptive 关闭）',
+    d.canvas.adaptive === false && d.canvas.physW === 1080 && d.canvas.physH === 1920 &&
+    d.canvas.u === 1 && d.canvas.h === 1920,
     JSON.stringify(d.canvas));
-  ok('设计高 = 位图高 ÷ U（比 1920 更高 → 句子活动区更大）',
-    d.canvas.h > 1920 && d.text.band.h > 576,
-    `设计高 ${Math.round(d.canvas.h)}，活动区 ${Math.round(d.text.band.h)}`);
+  ok('三段尺寸仍是设计值（活动区 576、图片区 648、卡片 496）',
+    Math.round(d.text.band.h) === 576 && box(d, 'bg')[3] === 648 && box(d, 'card')[3] === 496,
+    `${Math.round(d.text.band.h)} / ${box(d, 'bg')[3]} / ${box(d, 'card')[3]}`);
+
+  /* 显示规则：宽度充满优先 + 等比 + 上下留色块（竖直居中）+ 不裁角 ——
+     这几条合起来就是「屏幕上看到的 = 长按另存的那张位图」 */
+  const shown = await p.evaluate(() => {
+    const r = document.getElementById('poster').getBoundingClientRect();
+    const s = document.getElementById('stage').getBoundingClientRect();
+    const cs = getComputedStyle(document.getElementById('poster'));
+    return {
+      w: r.width, h: r.height, stageW: s.width, stageH: s.height,
+      padTop: r.top - s.top, padBottom: s.bottom - r.bottom,
+      radius: cs.borderRadius,
+    };
+  });
+  const fitW = Math.min(shown.stageW, (shown.stageH * 1080) / 1920);
+  ok('显示等比且宽度充满优先（宽 = min(舞台宽, 高×9/16)）',
+    Math.abs(shown.w - fitW) < 1.5 && Math.abs(shown.w / shown.h - 1080 / 1920) < 0.002,
+    `${shown.w.toFixed(1)}×${shown.h.toFixed(1)}（舞台 ${shown.stageW}×${shown.stageH}，期望宽 ${fitW.toFixed(1)}）`);
+  ok('海报不裁角（无圆角）', shown.radius === '0px', shown.radius);
+  ok('上下色块等宽（竖直居中）',
+    Math.abs(shown.padTop - shown.padBottom) < 1 && shown.padTop > 0,
+    `上 ${shown.padTop.toFixed(1)} / 下 ${shown.padBottom.toFixed(1)}（手机屏幕比 9:16 更高，坐实有留白）`);
   ok('标准版元素 = bg/badge-date/en/cn/source/card',
     JSON.stringify(ids(d)) === JSON.stringify(['bg', 'badge-date', 'en', 'cn', 'source', 'card']),
     ids(d).join(','));
@@ -538,8 +560,8 @@ function ok(label, cond, extra) {
     `${box(dd, 'bg')[3]} / ${box(dd, 'card')[3]} / ${Math.round(dd.text.band.h)}`);
   await dp.close();
 
-  /* ---------------- 手机自适应画布（位图 = 设备分辨率） ---------------- */
-  console.log('手机自适应画布');
+  /* ---------------- 手机：画布固定 + 显示规则 + 开关可用 ---------------- */
+  console.log('手机：固定 1080×1920 与显示规则');
   const mobileCtx = await browser.newContext({ ...devices['iPhone 15 Pro'] });   /* dpr 3，别覆盖 */
   const mp = await mobileCtx.newPage();
   mp.on('pageerror', (e) => errors.push('mobile pageerror: ' + e.message));
@@ -547,45 +569,51 @@ function ok(label, cond, extra) {
   await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
   await mp.waitForTimeout(700);
   const md = await info(mp);
-  ok('手机：位图 = 设备短边 × 长边 × dpr',
-    md.canvas.adaptive === true && md.canvas.physW === 1180 && md.canvas.physH === 1978,
-    JSON.stringify(md.canvas));
-  ok('手机：设计坐标仍是 1080 基准、U > 1（部件等比放大）',
-    md.canvas.w === 1080 && md.canvas.u > 1, `w=${md.canvas.w} u=${md.canvas.u}`);
-  ok('手机：标准版画布缓冲 = 设备位图（保存即设备原生分辨率）',
-    md.canvas.bitmapW === md.canvas.physW && md.canvas.bitmapH === md.canvas.physH,
+  ok('手机（dpr 3、纯触摸）：画布仍是固定 1080×1920',
+    md.canvas.adaptive === false && md.canvas.physW === 1080 && md.canvas.physH === 1920 &&
+    md.canvas.u === 1, JSON.stringify(md.canvas));
+  ok('手机：画布缓冲 = 1080×1920（长按另存就是这张）',
+    md.canvas.bitmapW === 1080 && md.canvas.bitmapH === 1920,
     `${md.canvas.bitmapW}x${md.canvas.bitmapH}`);
-  ok('手机：海报贴边（body.adaptive → #stage 无内边距）',
-    await mp.evaluate(() => document.body.classList.contains('adaptive') &&
-      getComputedStyle(document.getElementById('stage')).padding === '0px'));
-  ok('手机：安全区可读（Chromium 下为 0，真机为刘海 / Home 条）',
-    Number.isFinite(md.canvas.safe.top) && Number.isFinite(md.canvas.safe.bottom),
+  ok('手机：安全区不参与版面（卡片底边距恒为设计值，成品与设备无关）',
+    md.canvas.safe.top === 0 && md.canvas.safe.bottom === 0,
     JSON.stringify(md.canvas.safe));
   await shot(mp, 'm1-phone');
 
-  /* 旋转：画布尺寸与版式都不许跟着变（横屏暂不单独设计版面） */
+  /* 尺寸变化（旋转 / 工具栏收起展开 / 改窗口）都不许改画布与版面 ——
+     真机上「截屏与另存版面不一致」的根因就在这里，回归必须守住 */
   const beforePhys = md.canvas.physW + 'x' + md.canvas.physH;
   await mp.setViewportSize({ width: 659, height: 393 });
   await mp.waitForTimeout(800);
   const rd = await info(mp);
-  ok('旋转后画布尺寸不变（版式不跟着跳）',
+  ok('旋转后画布尺寸不变',
     rd.canvas.physW === md.canvas.physW && rd.canvas.physH === md.canvas.physH,
     `${beforePhys} → ${rd.canvas.physW}x${rd.canvas.physH}`);
-  ok('旋转后设计高与句子活动区不变',
+  ok('旋转后版面完全不变（设计高 / 活动区 / 字号都一致）',
     Math.round(rd.canvas.h) === Math.round(md.canvas.h) &&
-    Math.round(rd.text.band.h) === Math.round(md.text.band.h),
-    `设计高 ${Math.round(md.canvas.h)} → ${Math.round(rd.canvas.h)}`);
+    Math.round(rd.text.band.h) === Math.round(md.text.band.h) &&
+    rd.text.K === md.text.K,
+    `设计高 ${Math.round(md.canvas.h)} → ${Math.round(rd.canvas.h)}，K ${md.text.K} → ${rd.text.K}`);
 
-  /* 视口真的变了（Safari 工具栏收起 / 展开就是这种）→ 防抖后按新尺寸重排 */
   await mp.setViewportSize({ width: 500, height: 1000 });
   await mp.waitForTimeout(800);
   const vd = await info(mp);
-  ok('视口变化后画布跟着变（500×1000 @3x → 1500×3000）',
-    vd.canvas.physW === 1500 && vd.canvas.physH === 3000,
+  ok('改视口尺寸后画布仍不变（固定画布与窗口无关）',
+    vd.canvas.physW === 1080 && vd.canvas.physH === 1920 && Math.round(vd.canvas.h) === 1920,
     `${vd.canvas.physW}x${vd.canvas.physH}`);
-  ok('视口变化后设计高跟着变（更高的屏幕 → 更大的句子区）',
-    vd.canvas.h > md.canvas.h && vd.text.band.h > md.text.band.h,
-    `设计高 ${Math.round(md.canvas.h)} → ${Math.round(vd.canvas.h)}`);
+
+  /* 开关：?fit=device 时要能切回「按设备分辨率出图」—— 框架保留、不许腐烂 */
+  await mp.setViewportSize({ width: 393, height: 659 });
+  await mp.goto(BASE + '/?debug=1&fit=device', { waitUntil: 'load' });
+  await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await mp.waitForTimeout(700);
+  const fd = await info(mp);
+  ok('?fit=device 仍按设备比例出图（开关可用、框架未腐烂）',
+    fd.canvas.adaptive === true && fd.canvas.physW === 1180 && fd.canvas.physH === 1978 &&
+    fd.canvas.u > 1, JSON.stringify(fd.canvas));
+  ok('?fit=device 时设计高 = 位图高 ÷ U（自适应分支完好）',
+    Math.abs(fd.canvas.h - fd.canvas.physH / fd.canvas.u) < 2 && Math.round(fd.canvas.h) !== 1920,
+    `设计高 ${Math.round(fd.canvas.h)}，U=${fd.canvas.u}`);
   await mobileCtx.close();
 
   /* ---------------- 长版：本阶段必须没被动过 ---------------- */

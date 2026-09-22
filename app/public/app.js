@@ -31,17 +31,19 @@ const CARD_PAD = 48;          // 信息卡距左 / 右 / 底，三边等距
 const CARD_H = 496;           // 信息卡高度（沿用模板比例换算出的大小）
 const TEXT_X = CARD_PAD;      // 标准版正文左基线 = 卡片左线（同一条纵向边线）
 
-/* ------------------ 设备与实际位图（自适应画布） ------------------
- * 桌面（鼠标 / 非触摸）：U = 1，位图就是 1080×1920 —— 与改造前逐像素一致。
- * 手机 / PWA：位图 = 设备「短边 × 长边」× dpr（iPhone 15 Pro → 1179×2556），
- *   U = 位图宽 / 1080 → 全部件等比放大，而且**保存出来的就是设备原生分辨率的竖版海报**。
- * 取「短边 × 长边」而不是当前视口宽高：旋转屏幕时画布尺寸不变，版式就不会跟着跳
- *   （横屏等比缩小居中，暂不为横屏单独设计版面）。
+/* ------------------ 画布尺寸：固定 1080×1920（自适应留作开关） ------------------
+ * **默认固定**：位图恒 1080×1920（9:16），手机与桌面同一条路径 —— 屏幕上看到的就是长按
+ *   另存的那张位图，只是等比缩放，所以「显示 = 成品」永远成立。
+ *   真机实测过按设备分辨率出图（`?fit=device`）：虽然能铺满全屏，但版面在不同屏幕上差异
+ *   明显，且 iOS 启动瞬间视口高度会先大后小，导致版面跳一次 —— 不够美观，故不默认启用。
+ * **开关**：`?fit=device` 时按设备分辨率出图：位图 = 屏幕比例、宽度不低于 1080，
+ *   U = 位图宽 / 1080 → 部件等比放大（开关定义见下方 FIT_DEVICE，与 DEBUG 同一处）。
+ * 框架（U / PHYS / SAFE / watchViewport / inspect().canvas 字段 / 极端比例压缩上限）全部保留。
  */
-let U = 1;                            // 比例单位：设计值 × U = 位图像素
+let U = 1;                            // 比例单位：设计值 × U = 位图像素（固定画布下恒为 1）
 let PHYS = { w: CW, h: CH_MIN };      // 实际位图尺寸
-let ADAPTIVE = false;                 // 是否走自适应画布（移动设备）
-let SAFE = { top: 0, bottom: 0 };     // 设备安全区（已折算成设计坐标）
+let ADAPTIVE = false;                 // 是否走自适应画布（= FIT_DEVICE 且是移动设备）
+let SAFE = { top: 0, bottom: 0 };     // 设备安全区（仅自适应模式下参与版面）
 
 /**
  * 移动设备判定：纯触摸、无 hover，**且物理短边够宽**。
@@ -79,7 +81,8 @@ function computeCanvasSize() {
   const vh = Math.round(vv ? vv.height : window.innerHeight);
   const dpr = window.devicePixelRatio || 1;
 
-  ADAPTIVE = isMobileDevice(dpr);
+  /* 默认关：固定 1080×1920；只有显式开开关且确实是移动设备才走自适应分支 */
+  ADAPTIVE = FIT_DEVICE && isMobileDevice(dpr);
   let w = CW;
   let h = CH_MIN;
   if (ADAPTIVE) {
@@ -180,6 +183,8 @@ const cvs = $('poster');
 const QS = new URLSearchParams(location.search);
 /* 调试开关：挂 window.__ds、登记版面标注。生产路径不受影响 */
 const DEBUG = QS.get('debug') === '1';
+/* 画布尺寸开关：默认固定 1080×1920；`?fit=device` 才按设备分辨率出图（框架留着备用） */
+const FIT_DEVICE = QS.get('fit') === 'device';
 
 const FROST_OK = (() => {
   try {

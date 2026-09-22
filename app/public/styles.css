@@ -43,13 +43,17 @@ body { position: fixed; inset: 0; overflow: hidden; touch-action: manipulation; 
 [hidden] { display: none !important; }
 
 /* ---------------- 舞台：整屏只有海报 ---------------- */
+/* 海报固定 9:16：宽度优先充满（左右贴边），高度等比后在竖直方向居中，
+   上下多出来的区域露出 body 底色当色块。所以这里不留任何内边距 ——
+   留了就会让海报缩成"带边距的小卡片"，也就和另存的成品不是一回事了。
+   安全区不参与：9:16 居中后，上下色块（各约 80pt）本身就比状态栏 / Home 条更高。 */
 #stage {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: calc(var(--sat) + 12px) 12px calc(var(--sab) + 12px);
+  padding: 0;
 }
 .canvas-wrap {
   position: relative;
@@ -61,12 +65,13 @@ body { position: fixed; inset: 0; overflow: hidden; touch-action: manipulation; 
   min-height: 0;
 }
 #poster {
+  /* 等比 contain：宽度够就宽满；窗口比 9:16 更扁时按高度适配，不裁不扭、永不拉伸 */
   max-width: 100%;
   max-height: 100%;
   width: auto;
   height: auto;
-  border-radius: 16px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  /* 不加圆角 / 阴影：屏幕上显示的就是长按另存的那张位图，圆角会把四角裁掉，
+     那样「显示」与「成品」就不是同一张了 */
   touch-action: manipulation;
 }
 /* 长按是「保存」，双击是「隐藏」，上下拖动是「缩放字号」——
@@ -78,8 +83,9 @@ body { position: fixed; inset: 0; overflow: hidden; touch-action: manipulation; 
 }
 body:not(.raw) #stage { touch-action: none; }
 
-/* 自适应画布（手机 / PWA）：位图就是设备分辨率，海报要真正贴边 —— 安全区已经
-   画进画布内部（顶部图片顶到屏幕顶、信息卡让开 Home 指示条），所以这里不再留边距 */
+/* 自适应画布（`?fit=device`，默认关）：位图就是设备分辨率、海报要真正贴边，
+   安全区画进画布内部 —— 所以这里同样不留边距（与默认规则一致，留着是为了
+   开关打开时语义明确，不依赖默认值） */
 body.adaptive:not(.raw) #stage { padding: 0; }
 
 .overlay {
