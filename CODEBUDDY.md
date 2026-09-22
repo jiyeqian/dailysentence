@@ -72,19 +72,39 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
 - **语音播放期是「独占态」**（`state.voice`，2026-09-22 起）：
   - **只有 3 区（英文句 `en`）会发音**：`runSingleTap` 里只有 `en` 走 `speak()`，中文句 / 出处的
     单击是空操作（它们仍留在单槽 `pendingTap` 里，只为保住**双击删除**）。
-  - 播起来了才升起波形层（`play()` 成功之后）；波形本身就是**停止按钮**，面板里不放任何文字 / 图标。
+  - **波形只由音频事件驱动，绝不听 `play()` 的 Promise**（2026-09-22 修）：
+    `playing` 才升起（真出声才升）、`pause` / `ended` / `error` / `emptied` 立刻收起；
+    Promise 只负责「播不出来」的报错。**原因**：iOS / 独立 PWA 下 `play()` 的 Promise 有
+    迟迟不 settle 的情形（音频会话被抢、被系统中断），靠它把关就会出现「听到声音没波形」；
+    反过来它先 resolve 而真出声被吞掉，就会出现「有波形没声音」。
+  - **进度看门狗**（`VOICE_TICK_MS` 500ms 一跳）：`state.voice` 期间若音频 `paused`，
+    或 `currentTime` 连续 `VOICE_STALL_MS`(1500ms) 不前进，立刻收尾 —— 音频「被暂停 / 卡死」
+    时不一定派发 `ended`，没有它就是「播一会儿停了、波形还挂着」（旧实现会一路挂到 20s 兜底）。
+    另外仍保留 `min(20s, 时长 + 1500ms)` 的硬上限。
+  - **`primeAudio()` 的复位必须让位给正式播放**：元素上加 `__dsTaken` 标记，被 `speak()` 接管后
+    `restore()` 绝不插手；`speak()` 侧显式 `pause() → currentTime = 0 → muted = false → volume = 1`
+    再 `play()`。不复位音量 = 「有波形没声音」；复位晚到按停刚起播的音频 = 「播一会儿就停」。
+  - **没有音频文件 / 加载失败绝不出波形**：无 URL 时连 `primeAudio()` 都不调用（`hasAudio()`），
+    `speak()` 早退并给一句轻提示；因为波形只在 `playing` 升起，「没声音却有波形」结构上不可能。
+  - **可诊断**：`stopVoice(reason)` 落一条 `state.voiceDiag = { lastReason, lastAt, playedMs, dur }`
+    并作为 `inspect().voiceDiag` 透出（只增不改）。真机出现问题就读 `?debug=1` 下的它：
+    `ended` / `pause` / `stalled` / `error` / `emptied` / `timeout` / `tap` / `restart` / `reset` /
+    `play-rejected` 一看就知道是哪一类。
   - 播放期间**只有波形区可点**：长按保存 / 下拉更新 / 拖动缩放 / 双击删除 / 点图换图**全部让路**
     —— 照 `state.edit`（换图调整模式）的先例，在 `pointerdown` / `pointermove` / `pointerup`
     三处最前面短路。判定「按在波形区内」用**按下点**（按下后拖走 = 取消）。
-  - 停止只有一条出口 `stopVoice(reason)`：点波形 / `ended` / `error` / 兜底计时器
-    （音频时长 + 800ms，上限 20s）/ `resetToInitial('reset')`。**别在别处另写一份收尾**。
+  - 停止只有一条出口 `stopVoice(reason)`：点波形 / `pause` / `ended` / `error` / `emptied` /
+    看门狗 / 硬上限 / `resetToInitial('reset')`。**别在别处另写一份收尾**；
+    `state.voiceDiag.lastReason` 只在它里面写。
   - **波形层是 DOM 浮层，绝不画进 canvas** —— 画进去就污染了长按另存的 1080×1920，
     `?raw=1` 的 1:1 导出也会把波形拍进去（`body.raw` 的屏蔽清单里有它）。
-  - 两条硬约束（用户明确要求）：**不可太突兀** → 底只用 34% 深色，且 `backdrop-filter` 一律不用
-    （一模糊就把底下的英文句糊掉）；**透过波形要能读英文句** → 竖条细（9 设计值）、间距大（36）、
-    振幅压 45%–85%、整组只占 58% 高度，横向覆盖率约 20%。
-  - 面板只盖 3 区，外扩**自适应**（`voiceBox()`：上下最多各吃「邻居留出的空间」的 40%），
-    所以永远不会顶到中文句或日期胶囊 —— 回归里有一条断言按真实 rect 钉着。
+  - 外观三条硬约束（用户明确要求）：**只有竖条、没有任何底板**（无背景 / 描边 / 圆角，
+    `backdrop-filter` 一律不用 —— 一模糊就把底下的英文句糊掉），竖条自带极淡 `drop-shadow`
+    保证亮背景上也看得见；**不可太突兀** → 竖条细（9 设计值）、间距大（36）、振幅压 45%–85%、
+    整组只占 58% 高度、横向覆盖率约 20%；**宽度恒为正文列宽 × 90%**（`WAVE_W_RATIO`，不随句子
+    长短变），在正文列内居中。
+  - 面板只盖 3 区：横向取列宽，竖向以 3 区框为准、外扩**自适应**（`voiceBox()`：上下最多各吃
+    「邻居留出的空间」的 40%），所以永远不会顶到中文句或日期胶囊 —— 回归里按真实 rect 钉着。
 
 - **换图后自动进入「手动调整模式」**（`state.edit = { target: 'img'|'card' }`）：
   默认什么都不动（`state.fits[target] = { scale: 1, ox: 0, oy: 0 }` 必须等于「刚换上的样子」），

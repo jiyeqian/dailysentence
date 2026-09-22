@@ -228,6 +228,11 @@ const state = {
   lastSave: null,       // 最近一次保存：{ kind: 'sheet'|'share'|'download', name, at }
   voice: null,          // 非 null = 正在朗读（独占层）：{ target: 'en', style: 'bars', startedAt }
   lastVoiceStopAt: 0,   // 最近一次「波形停止」的时间戳（回归断言用）
+  /* 朗读自证（2026-09-22）：真机「有声没波形 / 有波形没声」的问题靠它定位 ——
+     lastReason 是最近一次收尾的原因（ended / pause / stalled / error / emptied /
+     timeout / tap / restart / reset / play-rejected），playedMs 是这次实际响了多久。
+     每次 speak() 会重置成新的一次尝试；播放期间 lastReason 为空串。 */
+  voiceDiag: { lastReason: '', lastAt: 0, playedMs: 0, dur: 0, url: '', playedFrom: 0 },
   viewDate: '',         // 正在看哪一天（''=今天）；往日数据来自服务端存档
   archived: false,      // 这份数据是从存档来的（不是上游实时）
   archiveOnly: false,   // 上游挂了，整份海报都是存档顶上的
@@ -1406,6 +1411,9 @@ function inspect() {
       style: state.voice.style,
       since: state.voice.startedAt,
     } : null,
+    /* 朗读自证（2026-09-22 新增，契约只增不改）：最后一次朗读为什么结束、实际响了多久。
+       真机出现问题（说话没波形 / 波形没声 / 播一半就断）时，读它就能定位，不必靠猜。 */
+    voiceDiag: Object.assign({}, state.voiceDiag),
   };
 }
 
@@ -2160,28 +2168,43 @@ function bindInputs() {
 }
 
 /* ===================== 语音独占层（波形即停止按钮，2026-09-22） =====================
-   点 3 区（英文句 en）朗读后，在 3 区「升起」一块半透明波形动画 —— 播放期间**只有它可点**，
+   点 3 区（英文句 en）朗读后，在 3 区「升起」一段波形动画 —— 播放期间**只有它可点**，
    点它就停、波形消失、交互恢复。中英文句子透过波形仍要能读出来，所以：
-     ① 底子只用 34% 深色、绝不 backdrop-filter（一模糊就把字糊掉了，见 styles.css）；
-     ② 竖条细、间距大、振幅收在 45%–85%（约 20% 横向覆盖率），不横穿字形。
-   波形层是 DOM 浮层，**绝不画进 canvas** —— 否则长按另存的 1080×1920 成品会被污染。 */
+     ① **只有竖条、没有任何底板**（2026-09-22 去掉原来的 34% 深色底），且绝不 backdrop-filter
+        （一模糊就把字糊掉了，见 styles.css）；竖条自带极淡投影，亮背景上也看得见；
+     ② 竖条细、间距大、振幅收在 45%–85%（约 20% 横向覆盖率），不横穿字形；
+     ③ **宽度固定 = 正文列宽 × 90%**（不随句子长短变，每天都一样宽），在正文列内水平居中。
+   波形层是 DOM 浮层，**绝不画进 canvas** —— 否则长按另存的 1080×1920 成品会被污染。
+
+   ⚠ 「波形何时升降」只听**音频元素自己的事件**（playing / pause / ended / error / emptied）
+   + 进度看门狗，**绝不再听 `play()` 的 Promise**：iOS 上那个 Promise 有不 settle 的情形，
+   靠它把关就会出现「有声音没波形」；反过来它先 resolve 而真出声被吞掉，就出现「有波形没声音」。 */
 
 let activeAudio = null;      // 当前播放的音频元素（旧实现不留引用 → 根本停不下来）
-let voiceTimer = null;       // 兜底计时器：音频事件没来也不会卡在独占态
-let voiceOnEnd = null;       // 挂在音频上的结束 / 出错回调（停止时摘掉，避免复用元素时串场）
+let voiceTimer = null;       // 硬上限计时器：min(20s, 时长 + 1500ms)
+let voiceWatch = null;       // 进度看门狗：500ms 一跳，paused 或 currentTime 停滞即收
+let voiceHooks = null;       // 挂在音频上的事件回调集合（停止时整体摘掉，避免复用元素时串场）
 let waveHideTimer = null;    // 退场淡出后再真正 hidden
 
-const WAVE_PAD_X = 16;       // 波形框相对 3 区的外扩（设计值）：给圆角留余量
-const WAVE_PAD_Y = 12;
+const WAVE_W_RATIO = 0.9;    // 波形宽度 = 正文列宽 × 90%（用户定：比文字区域窄 10%）
+const WAVE_PAD_Y = 12;       // 竖向相对 3 区框的外扩上限（设计值）
 const WAVE_BAR_W = 9;        // 竖条宽（设计值）
 const WAVE_BAR_GAP = 36;     // 竖条间距（设计值）→ 横向覆盖率约 20%，不遮笔画
+const VOICE_STALL_MS = 1500; // 看门狗判定「卡死」的阈值：这么久 currentTime 不前进就收
+const VOICE_TICK_MS = 500;   // 看门狗检查间隔
+
+/** 波形横向基准：正文列宽（左右各 TEXT_X 的正文区）。列宽天天一样，波形宽度也就天天一样 */
+function waveColumnW() {
+  return CW - 2 * TEXT_X;
+}
 
 /**
  * 波形层要盖的画布框（设计坐标）。3 区被删掉 / 还没渲染时返回 null（那就不显示波形）。
  *
- * 外扩量**自适应**：左右各 16 设计值的呼吸余量；上下默认 12，但再各受「邻居留给我的
- * 空间」约束（最多只吃 40%）—— 英文句与中文句 / 日期胶囊的间距随当天内容变化，
- * 固定外扩在某些天会顶到它们，而「波形只盖 3 区」是硬要求（回归里钉着）。
+ * 横向：宽度恒为**正文列宽 × 90%**、在正文列内居中（不再跟着 `en.w` 变 —— 句子短的时候
+ * 那样会缩成一小截，竖条数量都不够）。竖向：以 3 区框为准，上下各外扩最多 12 设计值，
+ * 但还要再受「邻居留给我的空间」约束（最多各吃 40%）—— 英文句与中文句 / 日期胶囊的间距
+ * 随当天内容变化，固定外扩在某些天会顶到它们，而「波形只盖 3 区」是硬要求（回归里钉着）。
  */
 function voiceBox() {
   const regions = state.regions || [];
@@ -2193,16 +2216,18 @@ function voiceBox() {
   const roomAbove = date ? Math.max(0, en.y - (date.y + date.h)) : WAVE_PAD_Y * 4;
   const padTop = Math.min(WAVE_PAD_Y, roomAbove * 0.4);
   const padBottom = Math.min(WAVE_PAD_Y, roomBelow * 0.4);
+  const colW = waveColumnW();
+  const w = colW * WAVE_W_RATIO;
   return {
-    x: en.x - WAVE_PAD_X,
+    x: TEXT_X + (colW - w) / 2,      /* 正文列内水平居中 */
     y: en.y - padTop,
-    w: en.w + WAVE_PAD_X * 2,
+    w,
     h: en.h + padTop + padBottom,
   };
 }
 
 /**
- * 建竖条：数量按 3 区宽度定，高低 / 周期 / 相位用**确定性函数**算
+ * 建竖条：数量按**波形宽度**（正文列宽 × 90%）定，高低 / 周期 / 相位用**确定性函数**算
  * —— 每次播放长得一样，截图与回归可复现，也不用 Math.random。
  */
 function buildWaveBars(box) {
@@ -2268,83 +2293,136 @@ function hideWave() {
 }
 
 /**
- * 开始独占：建立播放态、升起波形、挂结束 / 出错回调 + 兜底计时器。
- * audio 可省略（回归与截图可以用桩驱动，此时只显示面板）。
+ * 开始独占：建立播放态、升起波形、装进度看门狗。
+ * **只在音频真的开始出声时调用**（由 `playing` 事件触发，见 speak()）；
+ * 回归与截图也可以直接调它 —— 不传 audio 就只显示波形（不装看门狗）。
  */
 function playVoice(audio) {
   const box = voiceBox();
   if (!box) return;                          /* 3 区不在了，没有可盖的地方 */
   state.voice = { target: 'en', style: 'bars', startedAt: Date.now() };
+  state.voiceDiag.playedFrom = state.voice.startedAt;
   showWave();
   clearTimeout(voiceTimer);
-  if (audio) {
-    voiceOnEnd = (ev) => stopVoice(ev && ev.type === 'error' ? 'error' : 'ended');
-    audio.addEventListener('ended', voiceOnEnd);
-    audio.addEventListener('error', voiceOnEnd);
-  }
-  /* 兜底：音频事件没来（加载失败 / 被系统吞掉）也不会把人困在独占态 */
+  clearInterval(voiceWatch);
+  /* 硬上限：就算所有事件都没来（元素被系统吞掉），也不会把人困在独占态太久 */
   const dur = audio && isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
-  voiceTimer = setTimeout(() => stopVoice('timeout'), Math.min(20000, (dur ? dur * 1000 : 6000) + 800));
+  voiceTimer = setTimeout(() => stopVoice('timeout'), Math.min(20000, (dur ? dur * 1000 : 6000) + 1500));
+  /* 进度看门狗：音频「被暂停 / 卡死」时不一定会派发 ended，靠它兜住 ——
+     这正是「播一会儿就停了、波形还挂着」的根因（旧实现只有兜底计时器，最长要等 20s）。 */
+  if (audio) {
+    let lastT = -1;
+    let lastAt = Date.now();
+    voiceWatch = setInterval(() => {
+      let t = -1;
+      let paused = true;
+      try { t = audio.currentTime; paused = !!audio.paused; } catch (e) { paused = true; }
+      if (paused) { stopVoice('paused'); return; }                    /* 停了却没事件：收 */
+      if (t > lastT + 0.05) { lastT = t; lastAt = Date.now(); return; } /* 还在走：续命 */
+      if (Date.now() - lastAt > VOICE_STALL_MS) stopVoice('stalled');   /* 时间不走了：收 */
+    }, VOICE_TICK_MS);
+  }
 }
 
 /**
- * 停止播放并收掉波形 —— 唯一出口（点波形 / 播完 / 出错 / 兜底超时 / 复位都走这里）。
- * reason 只用于回归与自查，不参与任何逻辑。
+ * 停止播放并收掉波形 —— 唯一出口（点波形 / 播完 / 被暂停 / 出错 / 卡死 / 超时 / 复位都走这里）。
+ * reason 只用于自查与回归（落进 `state.voiceDiag.lastReason`），不参与任何逻辑。
  */
 function stopVoice(reason) {
   clearTimeout(voiceTimer);
   voiceTimer = null;
-  if (activeAudio) {
-    if (voiceOnEnd) {
+  clearInterval(voiceWatch);
+  voiceWatch = null;
+  const a = activeAudio;
+  if (a) {
+    /* ⚠ 先摘监听、再 pause：否则自己这一次 pause 会再触发一遍收尾（虽然幂等，但会写脏 reason） */
+    if (voiceHooks) {
       try {
-        activeAudio.removeEventListener('ended', voiceOnEnd);
-        activeAudio.removeEventListener('error', voiceOnEnd);
+        for (const [ev, fn] of voiceHooks) a.removeEventListener(ev, fn);
       } catch (e) { /* 老元素已释放，忽略 */ }
-      voiceOnEnd = null;
+      voiceHooks = null;
     }
-    try { activeAudio.pause(); activeAudio.currentTime = 0; } catch (e) { /* 同上 */ }
+    try { a.pause(); a.currentTime = 0; } catch (e) { /* 同上 */ }
   }
   if (!state.voice) { hideWave(); return; }   /* 幂等：没在独占时被调用也无害 */
+  const now = Date.now();
+  state.voiceDiag.lastReason = reason || 'stop';
+  state.voiceDiag.lastAt = now;
+  state.voiceDiag.playedMs = Math.max(0, now - (state.voiceDiag.playedFrom || now));
   state.voice = null;
-  state.lastVoiceStopAt = Date.now();
+  state.lastVoiceStopAt = now;
   hideWave();
 }
 
-/** 朗读今日句子；audio 传进来时复用它（iOS 必须在手势调用栈里先解锁） */
+/** 今天有没有可用的发音文件（没有就别解锁、别出波形） */
+function hasAudio() {
+  return !!(state.apiData && state.apiData.audio && state.apiData.audio.normal);
+}
+
+/**
+ * 朗读今日句子；audio 传进来时复用它（iOS 必须在手势调用栈里先解锁）。
+ *
+ * ⚠ **波形只由音频事件驱动**：`playing` 才升起（真出声才升）、
+ * `pause` / `ended` / `error` / `emptied` 立刻收起。`play()` 返回的 Promise
+ * 只用来报「播不出来」，**绝不用来决定波形出现** —— iOS 上那个 Promise 有
+ * 迟迟不 settle 的情形（音频会话被抢 / 被系统中断），靠它把关就会出现
+ * 「听到声音没波形」；反过来它先 resolve 而真出声被吞掉，就会出现「有波形没声音」。
+ */
 function speak(audio) {
   const url = state.apiData && state.apiData.audio && state.apiData.audio.normal;
   if (!url) {
-    toast('没有可用发音');
+    toast('没有可用发音');                 /* 没有音频文件：不出波形、不留任何播放态 */
     return null;
   }
-  stopVoice('restart');                                     /* 上一次没停就先停，绝不叠加播放 */
+  stopVoice('restart');                    /* 上一次没停就先停，绝不叠加播放 */
   const a = audio && audio.src ? audio : new Audio(url);
+  a.__dsTaken = true;                      /* 接管：primeAudio 的复位逻辑从此不再碰这个元素 */
   activeAudio = a;
   state.lastSpeakAt = Date.now();
-  try { a.currentTime = 0; } catch (e) { /* 还没 ready 时忽略 */ }
+  state.voiceDiag = { lastReason: '', lastAt: 0, playedMs: 0, dur: 0, url, playedFrom: 0 };
+  try {
+    /* prime 解锁时被压到 0 —— 不复位就是「有波形没声音」；顺手清掉残留的播放位置 */
+    a.muted = false;
+    a.volume = 1;
+    a.pause();
+    a.currentTime = 0;
+  } catch (e) { /* 还没 ready 时忽略 */ }
+
+  const hooks = [
+    ['playing', () => { state.voiceDiag.dur = isFinite(a.duration) ? a.duration : 0; playVoice(a); }],
+    ['ended', () => stopVoice('ended')],
+    ['error', () => { toast('发音播放失败'); stopVoice('error'); }],
+    ['emptied', () => stopVoice('emptied')],
+    ['pause', () => stopVoice('pause')],
+  ];
+  voiceHooks = hooks;
+  for (const h of hooks) a.addEventListener(h[0], h[1]);
+
   const p = a.play();
-  if (p && p.then) {
-    /* 播起来了才升起波形：播不出声还摆个波形在那儿，等于骗人 */
-    p.then(() => playVoice(a)).catch(() => toast('发音播放失败'));
-  } else {
-    playVoice(a);                                           /* 老浏览器 play() 不返回 Promise */
-  }
+  if (p && p.catch) p.catch(() => { toast('发音播放失败'); stopVoice('play-rejected'); });
   return a;
 }
 
 /**
  * 在用户手势的同步调用栈里解锁音频元素（iOS 只认这一步）。
  * 先静音播一下就暂停 —— 既完成解锁，又不会真的发出声音；
- * 300ms 后确认是单击时再复用这个元素正式播放。
+ * 300ms 后确认是单击时再由 speak() 接管这个元素正式播放。
+ *
+ * ⚠ 复位（restore）**必须在元素被正式播放接管后放弃动手**：旧实现把 restore 挂在
+ * play() 的 Promise 上，Promise 一 reject 就完全跳过 → 元素停不下来、volume 留在 0，
+ * 于是复用它的正式播放「有波形没声音」；反过来 restore 晚到，又会把刚起播的音频按停 ——
+ * 即「播一会儿就停了，但波形还在显示」。用 `__dsTaken` 标记一次解决两条路径。
  */
 function primeAudio() {
-  const url = state.apiData && state.apiData.audio && state.apiData.audio.normal;
-  if (!url) return null;
+  if (!hasAudio()) return null;
   try {
-    const a = new Audio(url);
+    const a = new Audio(state.apiData.audio.normal);
     a.volume = 0;
     const p = a.play();
-    const restore = () => { try { a.pause(); a.currentTime = 0; a.volume = 1; } catch (e) {} };
+    const restore = () => {
+      if (a.__dsTaken) return;              /* 已被正式播放接管：绝不插手 */
+      try { a.pause(); a.currentTime = 0; a.volume = 1; } catch (e) { /* 忽略 */ }
+    };
     if (p && p.then) p.then(restore).catch(() => {});
     else restore();
     return a;
@@ -2740,8 +2818,9 @@ function bindGestures() {
     if (state.opts.longPoster) return;              /* 长版本轮交互不动 */
     if (!SINGLE_TAP_REGIONS.has(hit.id)) return;
     /* iOS 只认手势调用栈里的播放：先静音播一下解锁，300ms 后再正式播。
-       只有 3 区（en）朗读 —— 中文句 / 出处的单击保留 300ms 判定只为双击删除，不发音 */
-    tapAt(hit.id, hit.id === 'en' ? primeAudio() : null);
+       只有 3 区（en）朗读 —— 中文句 / 出处的单击保留 300ms 判定只为双击删除，不发音。
+       **没有音频文件时连解锁都不做**（那句 toast 由 speak() 给，波形结构上不会出现） */
+    tapAt(hit.id, hit.id === 'en' && hasAudio() ? primeAudio() : null);
   });
 
   stage.addEventListener('pointercancel', () => {

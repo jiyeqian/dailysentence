@@ -10,9 +10,14 @@
      8) 下拉更新 → 回到初始状态（隐藏清空 / 缩放归位 / 相册图复原）
      9) 摆位：浏览器里不做竖直补正（--stage-pt 恒 0）；独立全屏桩下按「物理屏 − 布局框」
         补正并把海报中心对准物理屏中线（真机 bug：独立形态下整体偏上半个状态栏）
-    10) 语音独占层：点 3 区（英文句）朗读后升起半透明波形（只盖 3 区、不碰中文句 / 日期胶囊、
-        不模糊背景）；播放中其余手势全部失效；点波形即停并恢复；播完自动收起；
-        中文句 / 出处单击不再发音但双击仍能删除；?raw=1 里没有波形层
+    10) 语音独占层：点 3 区（英文句）朗读后升起波形 —— **只有竖条、没有任何底板**（无背景 / 描边 /
+        毛玻璃，竖条自带极淡投影），宽度 = 正文列宽 × 90% 且居中、只盖 3 区不碰中文句与日期胶囊；
+        播放中其余手势全部失效；点波形即停并恢复；中文句 / 出处单击不再发音但双击仍能删除；
+        ?raw=1 里没有波形层
+    10b) 播放与波形严格同步：波形只由音频事件驱动（`playing` 才升，`pause` / `ended` / `error`
+         / `emptied` 即收），`play()` 的 Promise 只用于报错；没有音频文件、或 play() 成功但
+         始终不出声（静默失败）都**不出波形**；音频被外部暂停、或 currentTime 卡死时看门狗
+         在几秒内收起；`inspect().voiceDiag` 自证每次收尾的原因与时长
     11) 换图调整层：独立不透明弹层，**原海报完全不动**；层里只有居中的换图区与这张图
         （窗口内清晰、窗外是这张图压暗 62% 的其余部分、窗口是圆角矩形）；
         没有任何描边 / 虚线（源码里不再有 drawEditFrame）；点窗口 = 换同一张、点窗外 = 完成；
@@ -47,18 +52,26 @@ const TEMPLATE = path.join(__dirname, 'public/assets/template.jpg');   /* 1179×
 
 /**
  * 可控的 Audio 桩（每个页面导航前注入）。
- * 语音独占层的出现依赖「真的播起来了」，而测试环境里 mp3 能否加载、能否自动播放都不确定，
- * 直接断言必然 flaky。桩只记录 play / pause、并允许手动派发 ended：
- * 既确定，又能顺手断言「点波形停止时确实调了 pause()」。
- * duration 故意给大值 —— 兜底计时器是 duration + 800ms，太小会在断言途中自动收起。
+ *
+ * ⚠ 2026-09-22 起语音改成**事件驱动**：波形只在音频真的派发 `playing` 时升起，
+ * 所以桩必须像真浏览器一样在 `play()` 之后派发 `playing` —— 否则新实现会被误判成「没波形」。
+ * `__audioStub.mode('silent')` 模拟「play() 成功但永远不出声」，用来钉死
+ * 「没有真出声就绝不升波形」这条要求。
+ *
+ * 模型忠于规范：`pause()` 只改状态、不派发事件（项目自己的收尾是「先摘监听再 pause」，
+ * 真实浏览器里那个 pause 事件也不会再被自己收到）；测试要模拟「被外部暂停」用
+ * `pauseExternally()`。duration 故意给大值 —— 硬上限是时长 + 1500ms（封顶 20s），
+ * 太小会在断言途中自动收起。
  */
 const AUDIO_STUB = () => {
   const made = [];
+  let mode = 'normal';
   class StubAudio extends EventTarget {
     constructor(src) {
       super();
       this.src = src || '';
       this.paused = true;
+      this.muted = false;
       this.volume = 1;
       this.currentTime = 0;
       this.duration = 30;
@@ -66,11 +79,48 @@ const AUDIO_STUB = () => {
       this.pauses = 0;
       made.push(this);
     }
-    play() { this.paused = false; this.plays++; return Promise.resolve(); }
+    play() {
+      this.paused = false;
+      this.plays++;
+      /* 模拟真实播放：currentTime 会走 —— 否则「进度看门狗」会把静止当成卡死（测试桩假阳性） */
+      if (!this.__tick) {
+        this.__tick = setInterval(() => {
+          if (this.paused || this.__stalled) return;
+          this.currentTime += 0.25;
+          if (this.currentTime >= this.duration) {     /* 放到头 = 真的播完 */
+            this.paused = true;
+            clearInterval(this.__tick);
+            this.__tick = null;
+            this.dispatchEvent(new Event('ended'));
+          }
+        }, 250);
+      }
+      if (mode !== 'silent') setTimeout(() => this.dispatchEvent(new Event('playing')), 20);
+      return Promise.resolve();
+    }
     pause() { this.paused = true; this.pauses++; }
   }
   window.Audio = StubAudio;
-  window.__audioStub = { made, last: () => made[made.length - 1] || null, count: () => made.length };
+  window.__audioStub = {
+    made,
+    last: () => made[made.length - 1] || null,
+    count: () => made.length,
+    mode: (m) => { mode = m || 'normal'; },      /* 'silent' = play() 成功但永远不出声 */
+    /* 模拟「被外部暂停」（真浏览器会派发 pause 事件） */
+    pauseExternally: (a) => {
+      const el = a || window.__audioStub.last();
+      el.pause();
+      el.dispatchEvent(new Event('pause'));
+      return el;
+    },
+    /* 模拟「卡死」：没暂停，但 currentTime 不再前进（解码卡住 / 被系统挂起） */
+    stall: (a) => {
+      const el = a || window.__audioStub.last();
+      el.paused = false;
+      el.__stalled = true;
+      return el;
+    },
+  };
 };
 
 let fails = 0;
@@ -611,6 +661,10 @@ function ok(label, cond, extra) {
     const en = reg('en');
     const cn = reg('cn');
     const date = window.__ds.state.regions.find((x) => x.id === 'badge-date');
+    /* 宽度基准：正文列宽（屏幕像素）= 984 × 显示比例；波形应为它的 90% 且在列内居中 */
+    const c = document.getElementById('poster').getBoundingClientRect();
+    const k = c.width / 1080;
+    const colW = 984 * k;
     return {
       hidden: w.hidden,
       show: w.classList.contains('show'),
@@ -618,10 +672,18 @@ function ok(label, cond, extra) {
       enY: en ? en.y : null,
       cnY: cn ? cn.y : null,
       dateBottom: date ? window.__ds.toClient(date.x, date.y + date.h).y : null,
-      alpha: parseFloat((cs.backgroundColor.match(/[\d.]+(?=,?\s*\)$)/) || ['0'])[0]),
+      /* 外观（2026-09-22）：只应有竖条，没有任何底板 / 描边 / 毛玻璃 */
+      bgColor: cs.backgroundColor,
+      bgImage: cs.backgroundImage,
+      radius: cs.borderRadius,
+      panelShadow: cs.boxShadow,
       blur: cs.backdropFilter || 'none',
+      barFilter: bar ? getComputedStyle(bar).filter : '',
       bars: bars.length,
       cover: r.width ? (bw * bars.length) / r.width : 0,
+      colW,
+      expectW: colW * 0.9,
+      expectX: c.left + 48 * k + (colW - colW * 0.9) / 2,
     };
   });
 
@@ -633,10 +695,20 @@ function ok(label, cond, extra) {
     wg.enY > wg.rect.y && wg.cnY > wg.rect.y + wg.rect.h &&
     (wg.dateBottom === null || wg.rect.y > wg.dateBottom),
     `面板 ${Math.round(wg.rect.y)}–${Math.round(wg.rect.y + wg.rect.h)}｜日期底 ${Math.round(wg.dateBottom)}｜3 区顶 ${Math.round(wg.enY)}｜中文句顶 ${Math.round(wg.cnY)}`);
-  ok('波形层半透明、不模糊背景、竖条不横穿字形（透过它仍能读英文句）',
-    wg.alpha > 0.15 && wg.alpha <= 0.5 && wg.blur === 'none' && wg.cover < 0.35,
-    `底 alpha ${wg.alpha}｜backdrop-filter ${wg.blur}｜竖条横向覆盖 ${(wg.cover * 100).toFixed(0)}%`);
-  ok('波形层用细竖条（等宽律动，非整片色块）', wg.bars >= 8, `${wg.bars} 根`);
+  /* 2026-09-22 用户要求：波形**不加背景框**，屏幕上只有竖条 —— 这条把「有没有底板」钉死，
+     顺带钉住「绝不 backdrop-filter」（一模糊就把底下的英文句糊掉）。 */
+  ok('波形没有任何底板（背景透明、无描边 / 圆角 / 毛玻璃），只有竖条',
+    (wg.bgColor === 'rgba(0, 0, 0, 0)' || wg.bgColor === 'transparent') &&
+    wg.bgImage === 'none' && wg.blur === 'none' &&
+    (wg.panelShadow === 'none' || wg.panelShadow === '') && parseFloat(wg.radius) === 0,
+    `${wg.bgColor} / image ${wg.bgImage} / shadow ${wg.panelShadow} / radius ${wg.radius} / blur ${wg.blur}`);
+  ok('竖条自带极淡投影（裸竖条在亮背景上也看得见）',
+    /drop-shadow/.test(wg.barFilter), wg.barFilter);
+  ok('竖条细、不横穿字形（透过波形仍能读英文句）',
+    wg.cover < 0.35 && wg.bars >= 8, `横向覆盖 ${(wg.cover * 100).toFixed(0)}%｜${wg.bars} 根`);
+  ok('波形宽度 = 正文列宽 × 90%，且在正文列内居中（不随句子长短变）',
+    Math.abs(wg.rect.w - wg.expectW) <= 1.5 && Math.abs(wg.rect.x - wg.expectX) <= 1.5,
+    `实测 ${Math.round(wg.rect.w)} / 期望 ${Math.round(wg.expectW)}｜左 ${Math.round(wg.rect.x)} / 期望 ${Math.round(wg.expectX)}（列宽 ${Math.round(wg.colW)}）`);
   await shot(p, 's12-voice-playing');
 
   /* 独占：播放期间除波形区外，一切手势都失效 */
@@ -691,6 +763,80 @@ function ok(label, cond, extra) {
   ok('音频播完波形自动收起、独占解除',
     (await info(p)).voice === null &&
     await p.evaluate(() => document.getElementById('wave').hidden === true || !document.getElementById('wave').classList.contains('show')));
+
+  /* ------------- 播放与波形严格同步（2026-09-22：波形只听音频事件，不看 play() 的 Promise） -------------
+     这几个场景就是用户报的「有声音没波形 / 有波形没声音 / 播一会儿停了波形还挂着」。
+     桩可以精确复现它们；真机上的 iOS 音频会话在 Chromium 里复现不了（所以真机复测才是最终验收）。 */
+  const voiceState = () => p.evaluate(() => ({
+    hidden: document.getElementById('wave').hidden,
+    show: document.getElementById('wave').classList.contains('show'),
+    voice: !!window.__ds.inspect().voice,
+    diag: window.__ds.inspect().voiceDiag,
+  }));
+
+  /* ① 没有音频文件：点 3 区不出波形（也不留播放态），只给一句轻提示 */
+  const savedAudio = await p.evaluate(() => {
+    const a = window.__ds.state.apiData.audio;
+    window.__ds.state.apiData.audio = null;
+    return a;
+  });
+  await tap(p, 'en');
+  await p.waitForTimeout(600);
+  const noAudio = await voiceState();
+  const noAudioToast = await p.evaluate(() => document.getElementById('toast').textContent);
+  ok('没有音频文件时点 3 区：不出波形、不留播放态（只给轻提示「没有可用发音」）',
+    noAudio.hidden && !noAudio.voice && noAudioToast === '没有可用发音',
+    `hidden ${noAudio.hidden}｜voice ${noAudio.voice}｜toast「${noAudioToast}」`);
+  await p.evaluate((a) => { window.__ds.state.apiData.audio = a; }, savedAudio);
+
+  /* ② play() 成功、但音频始终没派发 playing（静默失败）：也绝不出波形
+        —— 这正是「看到波形却没声音」的根治点：波形只认真的出声 */
+  await p.evaluate(() => window.__audioStub.mode('silent'));
+  await tap(p, 'en');
+  await p.waitForTimeout(700);
+  const silent = await voiceState();
+  const silentPlays = await p.evaluate(() => (window.__audioStub.last() || {}).plays || 0);
+  ok('音频 play() 成功但始终没派发 playing → 不出波形（真出声才升波形）',
+    silent.hidden && !silent.voice && silentPlays >= 1,
+    `play() 调了 ${silentPlays} 次｜hidden ${silent.hidden}`);
+  await p.evaluate(() => window.__audioStub.mode('normal'));
+
+  /* ③ 被外部暂停（来电 / 切 App / 系统抢占）：波形立刻收，而不是挂到 20 秒 */
+  await tap(p, 'en');
+  await p.waitForTimeout(620);
+  ok('（准备）重新进入独占', (await voiceState()).voice);
+  await p.evaluate(() => window.__audioStub.pauseExternally());
+  await p.waitForTimeout(460);
+  const extPaused = await voiceState();
+  ok('音频被外部暂停 → 波形立刻收起（voiceDiag = pause）',
+    extPaused.hidden && !extPaused.voice && extPaused.diag.lastReason === 'pause',
+    `reason ${extPaused.diag.lastReason}`);
+
+  /* ④ 卡死：没暂停、但 currentTime 不再前进 → 看门狗收（旧实现最长要挂 20 秒） */
+  await tap(p, 'en');
+  await p.waitForTimeout(620);
+  await p.evaluate(() => window.__audioStub.stall());
+  const w0 = Date.now();
+  let watchMs = 0;
+  for (let i = 0; i < 16 && !watchMs; i++) {
+    await p.waitForTimeout(250);
+    if ((await voiceState()).hidden) watchMs = Date.now() - w0;
+  }
+  const stalled = await voiceState();
+  /* 时限给到 4s：阈值是 1.5s，加上一个检查周期与上面的轮询粒度 —— 关键是「几秒内」，
+     而不是旧实现那样一路挂到兜底的 20 秒（那才是「播一会儿停了、波形还挂着」） */
+  ok('音频卡死（currentTime 不前进）→ 看门狗几秒内收起波形（voiceDiag = stalled）',
+    watchMs > 0 && watchMs < 4000 && stalled.diag.lastReason === 'stalled',
+    `${watchMs}ms｜reason ${stalled.diag.lastReason}`);
+
+  /* ⑤ 自证：点波形停下来的那次 reason = tap，并记下这次实际响了多久 */
+  await tap(p, 'en');
+  await p.waitForTimeout(620);
+  await tapWave(p);
+  const diagTap = (await voiceState()).diag;
+  ok('voiceDiag 记录收尾原因与实际播放时长（点波形 → tap）',
+    diagTap.lastReason === 'tap' && diagTap.lastAt > 0 && diagTap.playedMs >= 0 && diagTap.dur > 0,
+    JSON.stringify(diagTap));
 
   /* 双击删除仍保留（单击语义收窄不影响它）—— 删完立刻刷新，免得影响后面几节 */
   await tap(p, 'cn', 0, true);
