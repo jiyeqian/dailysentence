@@ -112,6 +112,23 @@ body.adaptive:not(.raw) #stage { padding: 0; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ---------------- 调整模式遮罩（换图后的手动调整，2026-09-22） ----------------
+   裁剪编辑器式的界面：正在调的那块被平移到屏幕中央，中间**透明**（图像原样清晰），
+   四周压暗 62%，透过它能看到这张图在窗口外的其余部分，作为拖动 / 缩放的引导。
+   用户明确要求「移除当前区域虚线边界，透明、半透明交界自然形成区域边界」——
+   所以这里**只有一个 box-shadow 造出的洞**，没有任何 border / outline / 描边；
+   洞的圆角由 JS 跟随目标（卡片 18 设计值），边界才与海报里那块自然吻合。
+   pointer-events:none：不抢任何事件，拖动与双指缩放照旧落在海报上。 */
+#editMask {
+  position: fixed;
+  z-index: 20;                 /* 低于 #hint(30)：那行调整说明要一直读得清 */
+  pointer-events: none;
+  box-shadow: 0 0 0 150vmax rgba(6, 10, 18, 0.62);
+  opacity: 0;
+  transition: opacity 0.2s ease-out;   /* 只淡入；退出时硬切，免得洞停在旧位置 */
+}
+#editMask.on { opacity: 1; }
+
 /* ---------------- 语音波形层（播放期独占，2026-09-22） ----------------
    波形就是「停止按钮」：播放期间只有它可点，点它就停。位置由 JS 按 3 区（英文句 en）
    的画布框换算成屏幕坐标写入，这里只管外观。
@@ -247,4 +264,5 @@ body.raw .hint,
 body.raw .overlay,
 body.raw #saveSheet,
 body.raw #wave,
+body.raw #editMask,
 body.raw .toast { display: none !important; }

@@ -13,10 +13,14 @@
     10) 语音独占层：点 3 区（英文句）朗读后升起半透明波形（只盖 3 区、不碰中文句 / 日期胶囊、
         不模糊背景）；播放中其余手势全部失效；点波形即停并恢复；播完自动收起；
         中文句 / 出处单击不再发音但双击仍能删除；?raw=1 里没有波形层
+    11) 调整模式新界面：该区被平移到屏幕中央；遮罩的透明洞与该区完全重合、窗外压暗 62%；
+        没有任何描边 / 虚线（源码里不再有 drawEditFrame）；窗口外画出这张图的其余部分；
+        退出后遮罩与位移归位
 
    跑法：先 node server.js（8787），再
      NODE_PATH=<node workspace>/node_modules node app/ui-check.js  */
 const path = require('path');
+const fs = require('fs');
 
 /* playwright 是外挂工具（不在 package.json 里），找不到就说明怎么借，而不是崩 */
 let chromium;
@@ -149,6 +153,12 @@ function ok(label, cond, extra) {
     await p.mouse.click(pt.x, pt.y);
     await p.waitForTimeout(420);
   }
+
+  /** 读画布位图上某一点的像素（设计坐标，固定画布下 U=1）—— 验证「画了什么」 */
+  const canvasPx = (p, x, y) => p.evaluate(([x, y]) => {
+    const d = document.getElementById('poster').getContext('2d').getImageData(x, y, 1, 1).data;
+    return d[0] + ',' + d[1] + ',' + d[2];
+  }, [x, y]);
 
   /** 点波形层中心 —— 它本身就是播放期间的停止按钮 */
   async function tapWave(p) {
@@ -572,6 +582,47 @@ function ok(label, cond, extra) {
       return !h.hidden && /双指/.test(h.textContent);
     }));
 
+  /* 新界面：该区平移到屏幕中央 + 窗外压暗（亮暗交界即边界）+ 不再有虚线框 */
+  const view = await p.evaluate(() => {
+    const m = document.getElementById('editMask');
+    const cs = getComputedStyle(m);
+    const mr = m.getBoundingClientRect();
+    const st = document.getElementById('stage').getBoundingClientRect();
+    const box = (window.__ds.state.regions || []).find((r) => r.id === 'img');
+    const tl = window.__ds.toClient(box.x, box.y);
+    const br = window.__ds.toClient(box.x + box.w, box.y + box.h);
+    return {
+      shiftY: window.__ds.inspect().edit.shiftY,
+      transform: document.getElementById('poster').style.transform,
+      hidden: m.hidden,
+      opacity: Number(cs.opacity),
+      shadow: cs.boxShadow,
+      border: cs.borderWidth,
+      outlineStyle: cs.outlineStyle,
+      rect: { x: mr.x, y: mr.y, w: mr.width, h: mr.height },
+      region: { x: tl.x, y: tl.y, r: br.x, b: br.y },
+      stageCenter: st.top + st.height / 2,
+    };
+  });
+  const regionCenter = (view.region.y + view.region.b) / 2;
+  ok('调整时该区被平移到屏幕中央（尺寸不变）',
+    Math.abs(regionCenter - view.stageCenter) < 2 && view.shiftY !== 0 &&
+    Math.abs((view.region.r - view.region.x) - 390) < 2,
+    `该区中心 ${regionCenter.toFixed(1)}｜舞台中心 ${view.stageCenter.toFixed(1)}｜位移 ${view.shiftY}px｜宽 ${(view.region.r - view.region.x).toFixed(1)}`);
+  ok('遮罩的透明洞与该区完全重合（交界就是边界）',
+    !view.hidden && Math.abs(view.rect.x - view.region.x) < 2 && Math.abs(view.rect.y - view.region.y) < 2 &&
+    Math.abs(view.rect.w - (view.region.r - view.region.x)) < 2 &&
+    Math.abs(view.rect.h - (view.region.b - view.region.y)) < 2,
+    `洞 ${Math.round(view.rect.x)},${Math.round(view.rect.y)} ${Math.round(view.rect.w)}×${Math.round(view.rect.h)}｜该区 ${Math.round(view.region.x)},${Math.round(view.region.y)} ${Math.round(view.region.r - view.region.x)}×${Math.round(view.region.b - view.region.y)}`);
+  ok('窗外半透明压暗约 62%，且没有任何描边 / 虚线',
+    view.opacity > 0.9 && /rgba\(6, 10, 18, 0\.62\)/.test(view.shadow) &&
+    view.border === '0px' && view.outlineStyle === 'none',
+    `${view.shadow}｜border ${view.border}｜outline ${view.outlineStyle}`);
+  ok('虚线框已被彻底移除（源码里不再有 drawEditFrame）',
+    !fs.readFileSync(path.join(__dirname, 'public/app.js'), 'utf8').includes('drawEditFrame'));
+  ok('调整预览按「不裁切」绘制（窗口外才有这张图的其余部分）',
+    d.edit.unclipped === true, JSON.stringify(d.edit));
+
   /* 调整期间其它手势让路：长按不保存、点句子不朗读 */
   const saveBefore = await p.evaluate(() => window.__ds.state.lastSave);
   const speakBefore = speakAt(d);
@@ -605,9 +656,17 @@ function ok(label, cond, extra) {
   ok('拖动没有改变其它元素', JSON.stringify(box(d, 'card')) === JSON.stringify(cb));
   await shot(p, 's10-adjust-img');
 
-  /* 调整模式下单击**另一块**也是单击即开相册（不必先「完成」再点第二下） */
+  /* 调整模式下单击**另一块**也是单击即开相册（不必先「完成」再点第二下）。
+     注意：该区居中后海报整体位移，海报下半部分（含卡片）会移出屏幕 ——
+     所以这里点卡片露在外面的那一段，而不是它的中心。 */
+  const cardVisible = await p.evaluate(() => {
+    const r = window.__ds.state.regions.find((x) => x.id === 'card');
+    const t = window.__ds.toClient(r.x + r.w / 2, r.y);
+    return { x: Math.round(t.x), y: Math.round(Math.min(t.y + 14, window.innerHeight - 10)) };
+  });
   const swapChooser = p.waitForEvent('filechooser', { timeout: 5000 });
-  await tap(p, 'card');
+  await p.mouse.click(cardVisible.x, cardVisible.y);
+  await p.waitForTimeout(420);
   ok('调整模式下单击信息卡一次即唤起相册', !!(await swapChooser));
   await (await swapChooser).setFiles(TEMPLATE);
   await p.waitForTimeout(800);
@@ -622,14 +681,28 @@ function ok(label, cond, extra) {
   ok('之前对图片的调整结果仍在', d.fits.img.scale > 1.1, 'scale=' + d.fits.img.scale.toFixed(2));
   await shot(p, 's5-new-card');
 
+  /* 窗口外能看到「这张图的其余部分」：取卡片窗口正上方那一点（平时是海报底色，
+     调整中应当被这张图的不裁切预览盖住）。卡片的 fits 从头到尾没被动过，
+     所以这个像素在退出前后可以直接对比。 */
+  const PX_PROBE = [540, 1250];
+  const pxInEdit = await canvasPx(p, PX_PROBE[0], PX_PROBE[1]);
+
   /* 点被调区域以外 = 完成（且不触发朗读） */
   await finishAdjust(p);
   d = await info(p);
   ok('点区域外退出调整模式', d.edit === null, JSON.stringify(d.edit));
+  ok('退出后遮罩收起、海报位移归零',
+    await p.evaluate(() => document.getElementById('editMask').hidden &&
+      document.getElementById('poster').style.transform === ''),
+    'transform=' + (await p.evaluate(() => document.getElementById('poster').style.transform)));
   ok('退出时不会顺带朗读', speakAt(d) === speakBefore, `lastSpeakAt ${speakBefore} → ${speakAt(d)}`);
   ok('退出后提示收起',
     await p.evaluate(() => { const h = document.getElementById('hint'); return !h || h.hidden || h.classList.contains('hide'); }));
   ok('调整结果被保留（退出不等于复原）', d.fits.img.scale > 1.1, 'scale=' + d.fits.img.scale.toFixed(2));
+  const pxInPoster = await canvasPx(p, PX_PROBE[0], PX_PROBE[1]);
+  ok('窗口外确实画出了这张图的其余部分（退出后回到海报本身）',
+    pxInEdit !== pxInPoster,
+    `调整中 ${pxInEdit} → 退出后 ${pxInPoster}`);
 
   /* ---------------- 长按保存（界面无按钮，保存只能靠长按） ---------------- */
   console.log('标准版 · 长按保存');

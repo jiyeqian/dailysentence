@@ -171,7 +171,9 @@ function watchViewport() {
       syncStageCenter();
       /* 播放中遇到旋转：波形层跟着 3 区重新贴合，别飘走 */
       if (state.voice) layoutWave();
-      if (computeCanvasSize()) scheduleRender();
+      /* 调整中遇到旋转：画布尺寸不变也要重排一次（遮罩与居中都依赖视口 rect） */
+      if (state.edit) editSig = '';
+      if (computeCanvasSize() || state.edit) scheduleRender();
     }, 300);
   };
   window.addEventListener('resize', onResize);
@@ -1256,8 +1258,15 @@ function inspect() {
     gaps: buildGaps(L),
     opts: Object.assign({}, state.opts),
     ratios: Object.assign({}, state.ratios),
-    /* 图片手动调整：正在调哪一块（null = 没在调）+ 两块各自的缩放/位移 */
-    edit: state.edit ? { target: state.edit.target, moved: !!state.edit.moved } : null,
+    /* 图片手动调整：正在调哪一块（null = 没在调）+ 两块各自的缩放/位移。
+       unclipped = 预览是否按「不裁切」画（窗口外能看到这张图的其余部分）；
+       shiftY = 为了让该区居中，海报当前的竖直位移（px，退出后归 0）。 */
+    edit: state.edit ? {
+      target: state.edit.target,
+      moved: !!state.edit.moved,
+      unclipped: true,
+      shiftY: editShiftY,
+    } : null,
     fits: {
       img: Object.assign({}, state.fits.img),
       card: Object.assign({}, state.fits.card),
@@ -1320,8 +1329,10 @@ function render() {
   drawWordCard(ctx, L);
   drawProfileCard(ctx, L);
 
-  /* 调整模式：给正在调的那块描一圈虚线，让人知道现在在调什么 */
-  if (state.edit) drawEditFrame(ctx, L);
+  /* 调整模式：把正在调的那块平移到屏幕中央，并摆好四周压暗的遮罩。
+     放在这里（唯一落点 render）而不是在 startEdit 里另算一份 —— 换图、旋转、拖动重绘
+     都会经过它，位置永远跟着最新版面走，也不会出现「两个地方各算一套」的漂移。 */
+  layoutEditView(L);
 
   /* 版面即「可点区域地图」：留下坐标供点击命中与引导框使用 */
   state.layout = L;
@@ -1420,11 +1431,17 @@ function drawBackground(ctx, L) {
     const blockH = L.imgBlock.h;
     const base = fitBase('img', L);
     const d = fitDraw(base, state.fits.img);
+    /* 调整模式：正在调的这块**不裁切**地画出来 —— 窗口外的其余部分露在外面，
+       正是用户要的「作为图像拖动缩放之引导」。这只影响预览：下面 bgDraw 仍按
+       成品口径记录（blockH / clipped 不变），所以「显示 = 成品」与既有断言不受影响。 */
+    const previewing = !!state.edit && state.edit.target === 'img';
 
     ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, CW, blockH);
-    ctx.clip();
+    if (!previewing) {
+      ctx.beginPath();
+      ctx.rect(0, 0, CW, blockH);
+      ctx.clip();
+    }
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(base.im, d.x, d.y, d.w, d.h);
     ctx.restore();
@@ -1657,8 +1674,11 @@ function drawProfileCard(ctx, L) {
   const q = currentFitDraw('card', L);
   if (q) {
     ctx.save();
-    roundRect(ctx, c.x, c.y, c.w, c.h, 18);
-    ctx.clip();
+    /* 调整模式：与顶部图片区同一条规则 —— 不裁切，窗口外露出这张图的其余部分 */
+    if (!(state.edit && state.edit.target === 'card')) {
+      roundRect(ctx, c.x, c.y, c.w, c.h, 18);
+      ctx.clip();
+    }
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(q.base.im, q.x, q.y, q.w, q.h);
     ctx.restore();
@@ -1692,15 +1712,76 @@ function finishEdit() {
   scheduleRender();
 }
 
-/** 调整模式的视觉反馈：正在调的那块描一圈青色虚线 */
-function drawEditFrame(ctx, L) {
+let editShiftY = 0;      /* 调整模式下海报的竖直位移（CSS px）；退出时归零 */
+let editSig = '';        /* 位置没变就不重复量 / 写（拖动重绘时每帧都会走到这里） */
+
+/**
+ * 调整模式的视图：① 把正在调的那块平移到屏幕中央；② 摆好四周压暗的遮罩。
+ *
+ * **没有描边、没有虚线** —— 用户明确要求「移除当前区域虚线边界，透明、半透明交界
+ * 自然形成区域边界」，边界就是遮罩那个透明洞的边缘，别再加任何 stroke / border。
+ *
+ * 为什么用 CSS transform 平移 `#poster`，而不是在 canvas 里 `ctx.translate`：
+ *   纯平移不改变画布的 rect.width，且 getBoundingClientRect() 会带上位移 ——
+ *   于是 toClient / hitTestAt / pxToCanvas 全部自动正确，「点区域外完成」不会错位；
+ *   在 canvas 里平移则会让整张命中表与 hitTest 一起错位。
+ *   顺带的好处：画布位图仍是干净成品，长按另存与 ?raw=1 导出都不受影响。
+ */
+function layoutEditView(L) {
+  const mask = $('editMask');
+
+  if (!state.edit) {
+    editSig = '';
+    if (editShiftY !== 0) {
+      editShiftY = 0;
+      cvs.style.transform = '';
+    }
+    /* 退出时硬切：留着淡出会让那个洞停在旧位置、而海报已经弹回去了 */
+    if (mask && !mask.hidden) {
+      mask.classList.remove('on');
+      mask.hidden = true;
+    }
+    return;
+  }
+
   const box = fitBox(state.edit.target, L);
-  ctx.save();
-  ctx.setLineDash([26, 16]);
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = 'rgba(94,234,212,0.95)';
-  ctx.strokeRect(box.x + 3, box.y + 3, box.w - 6, box.h - 6);
-  ctx.restore();
+  const wrapRect = cvs.parentElement.getBoundingClientRect();
+  const stageRect = $('stage').getBoundingClientRect();
+  const size = cvs.getBoundingClientRect();          /* 宽高不受纯平移影响 */
+  const s = size.width / CW;
+  /* 画布在 .canvas-wrap 里是竖直居中的，offsetTop 又是布局值（不受 transform 影响），
+     所以「未平移时的顶边」可以直接算出来 —— 与当前位移无关，一步到位、不会来回抖。 */
+  const top0 = wrapRect.top + cvs.offsetTop;
+  /* 目标 = 可见屏幕中心：独立全屏下布局框比物理屏矮一个状态栏，补回半个差额 */
+  const want = stageRect.top + stageRect.height / 2 + STAGE_PT / 2;
+
+  const sig = [state.edit.target, box.x, box.y, box.w, box.h,
+    Math.round(size.left), Math.round(size.width), Math.round(want), Math.round(top0)].join('|');
+  if (sig === editSig) return;
+  editSig = sig;
+
+  const shift = Math.round(want - (top0 + (box.y + box.h / 2) * s));
+  if (shift !== editShiftY) {
+    editShiftY = shift;
+    cvs.style.transform = shift ? 'translateY(' + shift + 'px)' : '';
+  }
+
+  if (mask) {
+    mask.style.left = Math.round(size.left + box.x * s) + 'px';
+    mask.style.top = Math.round(top0 + shift + box.y * s) + 'px';
+    mask.style.width = Math.round(box.w * s) + 'px';
+    mask.style.height = Math.round(box.h * s) + 'px';
+    /* 洞的圆角跟海报里那块本身一致（卡片 18 设计值），边界看着才自然 */
+    mask.style.borderRadius = state.edit.target === 'card' ? (18 * s).toFixed(1) + 'px' : '0px';
+    if (mask.hidden) {
+      mask.hidden = false;
+      /* 下一帧再加 .on：否则首帧就带着终态，看不到淡入（海报是硬切、洞当场对齐，
+         只有压暗是渐显的，所以不会出现「洞在旧位置」那种错位） */
+      requestAnimationFrame(() => mask.classList.add('on'));
+    } else {
+      mask.classList.add('on');
+    }
+  }
 }
 
 /* --------------------------- 单词卡片 --------------------------- */
