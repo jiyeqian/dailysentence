@@ -8,6 +8,8 @@
      6) 单击顶部图片 / 信息卡 → 唤起相册选图；单击句子 → 朗读；单击日期 → 切今日/昨日
      7) 长按 → 保存：桌面走下载（文件名 YYYY-MM-DD），iOS 走「浮层原图 → 存储到照片」
      8) 下拉更新 → 回到初始状态（隐藏清空 / 缩放归位 / 相册图复原）
+     9) 摆位：浏览器里不做竖直补正（--stage-pt 恒 0）；独立全屏桩下按「物理屏 − 布局框」
+        补正并把海报中心对准物理屏中线（真机 bug：独立形态下整体偏上半个状态栏）
 
    跑法：先 node server.js（8787），再
      NODE_PATH=<node workspace>/node_modules node app/ui-check.js  */
@@ -185,6 +187,55 @@ function ok(label, cond, extra) {
   ok('上下色块等宽（竖直居中）',
     Math.abs(shown.padTop - shown.padBottom) < 1 && shown.padTop > 0,
     `上 ${shown.padTop.toFixed(1)} / 下 ${shown.padBottom.toFixed(1)}（手机屏幕比 9:16 更高，坐实有留白）`);
+
+  /* 竖直居中补正：浏览器里布局视口就是可见区，屏幕高远大于可见区（还含工具栏），
+     所以绝对不能加偏移 —— 加了会把海报整体顶出屏幕下沿。这条钉住「只在独立形态生效」。 */
+  const noShift = await p.evaluate(() => ({
+    css: getComputedStyle(document.getElementById('stage')).paddingTop,
+    info: window.__ds.inspect().stage,
+    standalone: window.matchMedia('(display-mode: standalone)').matches,
+  }));
+  ok('浏览器里不做居中补正（--stage-pt 恒 0、CSS 上内边距 0）',
+    noShift.css === '0px' && noShift.info.padTop === 0 && noShift.standalone === false,
+    JSON.stringify(noShift));
+
+  /* 独立全屏（加到主屏）形态：布局框比物理屏矮一个状态栏且锚在顶部 —— 真机量到的是
+     上 53pt / 下 112pt，而 iPhone 自己显示同一张图是 83pt / 80pt（整屏居中）。
+     这里用桩注入 standalone 与 screen.height（Chromium 复现不了真机形态），
+     视口取 402×812（= 874 − 62 状态栏）→ 应补 62px，补完海报中心对准物理屏中线。 */
+  const st = await browser.newPage({ viewport: { width: 402, height: 812 }, deviceScaleFactor: 2, hasTouch: true });
+  st.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  st.on('pageerror', (e) => errors.push('standalone pageerror: ' + e.message));
+  await st.addInitScript(() => {
+    Object.defineProperty(navigator, 'standalone', { get: () => true });
+    Object.defineProperty(window.screen, 'height', { get: () => 874 });
+  });
+  await st.goto(BASE + '/?debug=1', { waitUntil: 'load' });
+  await st.waitForFunction(() => window.__ds && window.__ds.state.layout, null, { timeout: 15000 });
+  await st.waitForTimeout(500);
+  const stub = await st.evaluate(() => {
+    const pad = window.__ds.syncStageCenter();
+    const r = document.getElementById('poster').getBoundingClientRect();
+    const s = document.getElementById('stage').getBoundingClientRect();
+    return {
+      pad, info: window.__ds.inspect().stage,
+      css: getComputedStyle(document.getElementById('stage')).paddingTop,
+      posterW: r.width, posterH: r.height, frameH: s.height,
+      top: r.top - s.top,   /* 屏幕坐标下海报上边缘 = 上部留白 */
+    };
+  });
+  const stubCenter = stub.top + stub.posterH / 2;      /* 屏幕坐标下的海报中心 */
+  ok('独立全屏桩：按「物理屏 − 布局框」补正 62px',
+    stub.pad === 62 && stub.css === '62px' && stub.info.standalone === true,
+    JSON.stringify({ pad: stub.pad, css: stub.css, info: stub.info }));
+  ok('独立全屏桩：补正后海报中心对准物理屏中线（整屏居中）',
+    Math.abs(stubCenter - 874 / 2) < 1.5,
+    `中心 ${stubCenter.toFixed(1)} / 期望 437（上留白 ${stub.top.toFixed(1)}）`);
+  ok('独立全屏桩：海报仍宽度充满、没被压小',
+    Math.abs(stub.posterW - 402) < 1.5 && Math.abs(stub.posterH - (402 * 1920) / 1080) < 1.5,
+    `${stub.posterW.toFixed(1)}×${stub.posterH.toFixed(1)}`);
+  await st.screenshot({ path: path.join(OUT, 's11-standalone.png') });
+  await st.close();
   ok('标准版元素 = bg/badge-date/en/cn/source/card',
     JSON.stringify(ids(d)) === JSON.stringify(['bg', 'badge-date', 'en', 'cn', 'source', 'card']),
     ids(d).join(','));

@@ -44,6 +44,8 @@ let U = 1;                            // 比例单位：设计值 × U = 位图�
 let PHYS = { w: CW, h: CH_MIN };      // 实际位图尺寸
 let ADAPTIVE = false;                 // 是否走自适应画布（= FIT_DEVICE 且是移动设备）
 let SAFE = { top: 0, bottom: 0 };     // 设备安全区（仅自适应模式下参与版面）
+let STAGE_PT = 0;                     // 竖直居中补正量（px，写进 CSS 变量 --stage-pt；浏览器里恒 0）
+let STAGE_INFO = { standalone: false, padTop: 0, screenH: 0, frameH: 0 };   // 最近一次量测，供 inspect 自证
 
 /**
  * 移动设备判定：纯触摸、无 hover，**且物理短边够宽**。
@@ -69,6 +71,60 @@ function readSafeArea() {
   const bottom = parseFloat(cs.paddingBottom) || 0;
   d.remove();
   return { top, bottom };
+}
+
+/**
+ * 独立全屏形态（已「添加到主屏幕」）：iOS 看 navigator.standalone，
+ * 标准看 display-mode。只有这种形态下页面才真的从物理屏顶端开始画。
+ */
+function isStandalone() {
+  if (navigator.standalone === true) return true;
+  return !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+}
+
+/**
+ * 竖直居中补正：算出 `--stage-pt`（`#stage` 的上内边距），返回补正后的值。
+ *
+ * 独立全屏下的实测现象（真机整屏截屏量出来的，不是猜）：
+ *   上留白 159px / 下留白 335px（设备像素，屏高 2622 = 874pt，状态栏 62pt），
+ *   而 iPhone 自己显示同一张 1080×1920 是 249px / 241px，即**整屏居中**。
+ *   海报显示尺寸两边完全一致，差的就是位置：我们偏上 90px = 30pt。
+ *
+ * 反推居中所在的框高 = 2×50 + 715 ≈ 812pt = 874（物理屏）− 62（状态栏）：
+ *   独立全屏下**布局视口比物理屏矮一个状态栏、且锚在屏幕顶端**（内容仍从 y=0
+ *   开始画，状态栏压在上面），于是 `#stage` 里那套 flex 居中是在「缺了底部一块
+ *   的框」里居中 → 整张海报偏上半个状态栏：照片顶在 53pt 落进状态栏区间（压刘海），
+ *   底部多出 112pt 黑区。
+ *
+ * 修法：量「物理屏高 − 舞台实际框高」，把框补回物理屏大小。数学上这是精确解：
+ *   在内容框 (pt .. F) 里居中得到的顶边 = (F + pt − P) / 2，要它等于 (S − P) / 2，
+ *   只需 pt = S − F，与海报高 P 无关。因全局是 border-box，加内边距不改舞台框高，
+ *   所以「量框高 → 写内边距」幂等、不会抖。
+ *
+ * **必须在浏览器里保持 0**：浏览器里布局视口就是可见区，而 screen.height 远大于
+ * 可见区（还含工具栏），无条件加偏移会把海报整体顶出屏幕下沿。这条有回归钉着。
+ */
+function syncStageCenter() {
+  const stage = $('stage');
+  let pt = 0;
+  const frameH = stage ? Math.round(stage.getBoundingClientRect().height) : 0;
+  const screenH = Math.round((window.screen && window.screen.height) || 0);
+  const standalone = isStandalone();
+
+  if (stage && standalone && frameH > 0 && screenH > 0) {
+    const posterH = Math.round(cvs.getBoundingClientRect().height);
+    const diff = screenH - frameH;
+    /* ① 差额必须在合理区间（比状态栏高很多 = 量错了，宁可不补）
+       ② 补完内容框还得装得下海报，否则海报会被压缩出左右黑边 */
+    if (diff > 0 && diff <= 240 && diff + posterH <= frameH) pt = diff;
+  }
+
+  const changed = pt !== STAGE_PT;
+  STAGE_PT = pt;
+  STAGE_INFO = { standalone, padTop: pt, screenH, frameH };
+  /* 值没变就不写 DOM：这个函数在每次旋转 / 视口变化后都会被调到 */
+  if (changed) document.documentElement.style.setProperty('--stage-pt', pt + 'px');
+  return pt;
 }
 
 /**
@@ -111,6 +167,8 @@ function watchViewport() {
   const onResize = () => {
     clearTimeout(t);
     t = setTimeout(() => {
+      /* 旋转 / 独立形态启动时视口高度会变，居中补正跟着重算（幂等，只会写 CSS 变量） */
+      syncStageCenter();
       if (computeCanvasSize()) scheduleRender();
     }, 300);
   };
@@ -1217,6 +1275,10 @@ function inspect() {
     },
     /* 顶部图片的实际绘制结果：clipped = 是否发生了裁切（竖图会为 true） */
     bg: state.bgDraw,
+    /* 竖直居中补正（syncStageCenter）：standalone = 是否独立全屏形态；
+       padTop = 实际补进 #stage 的上内边距；screenH / frameH = 物理屏高与舞台框高。
+       浏览器里 padTop 恒为 0 —— 那正是「没做无条件偏移」的自证。 */
+    stage: Object.assign({}, STAGE_INFO),
   };
 }
 
@@ -2503,6 +2565,9 @@ function setOverlay(show, text) {
   state.opts.bgStyle = initialBgStyle();
   /* 先定设备位图与比例单位：后面所有版面尺寸都建立在它上面 */
   computeCanvasSize();
+  /* 竖直居中补正：独立全屏下把布局框补回物理屏（浏览器里恒为 0）。
+     必须在首屏绘制前算好，免得先闪一下偏上的位置 */
+  syncStageCenter();
   watchViewport();
   bindInputs();
 
@@ -2530,6 +2595,7 @@ function setOverlay(show, text) {
     window.__ds = {
       state, hitTest, toClient, hitTestAt, hideElement,
       inspect,            // 版面清单：inspect.js 靠它导出 JSON 与标注图
+      syncStageCenter,    // 独立形态的居中补正：回归可用桩注入 standalone/screen.height 后手动驱动
       /* 排版中间量：排查「自适应倍率算错」时可以直接在页面里量 */
       textTotalAt: (k) => buildTextBlockStandard(cvs.getContext('2d'), k).total,
       solveAutoScale: (bandH) => solveAutoScale(cvs.getContext('2d'), bandH),

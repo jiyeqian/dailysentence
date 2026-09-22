@@ -44,16 +44,21 @@ body { position: fixed; inset: 0; overflow: hidden; touch-action: manipulation; 
 
 /* ---------------- 舞台：整屏只有海报 ---------------- */
 /* 海报固定 9:16：宽度优先充满（左右贴边），高度等比后在竖直方向居中，
-   上下多出来的区域露出 body 底色当色块。所以这里不留任何内边距 ——
+   上下多出来的区域露出 body 底色当色块。所以这里不留左右 / 下内边距 ——
    留了就会让海报缩成"带边距的小卡片"，也就和另存的成品不是一回事了。
-   安全区不参与：9:16 居中后，上下色块（各约 80pt）本身就比状态栏 / Home 条更高。 */
+   安全区不参与：9:16 居中后，上下色块（各约 80pt）本身就比状态栏 / Home 条更高。
+
+   `--stage-pt` 是**独立全屏形态下的居中补正**（默认 0，浏览器里恒为 0）：
+   那种形态下布局视口比物理屏矮一个状态栏且锚在顶部，不补就会整体偏上半个状态栏。
+   因为全局是 border-box，加内边距不会改变舞台自身框高，所以「量框高 → 写内边距」
+   是幂等的。写这段的原因与实测数据见 app.js 的 syncStageCenter()。 */
 #stage {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
+  padding: var(--stage-pt, 0px) 0 0;
 }
 .canvas-wrap {
   position: relative;
@@ -85,7 +90,10 @@ body:not(.raw) #stage { touch-action: none; }
 
 /* 自适应画布（`?fit=device`，默认关）：位图就是设备分辨率、海报要真正贴边，
    安全区画进画布内部 —— 所以这里同样不留边距（与默认规则一致，留着是为了
-   开关打开时语义明确，不依赖默认值） */
+   开关打开时语义明确，不依赖默认值）。
+   注意：这条的选择器权重更高，会**盖掉 `--stage-pt` 补正** —— 那是对的：
+   自适应模式下画布比例就等于框的比例、海报本来就填满框，没有可补的居中偏差；
+   真补上去反而会把画布压小、弄出左右黑边。 */
 body.adaptive:not(.raw) #stage { padding: 0; }
 
 .overlay {
