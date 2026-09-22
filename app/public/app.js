@@ -171,8 +171,7 @@ function watchViewport() {
       syncStageCenter();
       /* 播放中遇到旋转：波形层跟着 3 区重新贴合，别飘走 */
       if (state.voice) layoutWave();
-      /* 调整中遇到旋转：画布尺寸不变也要重排一次（遮罩与居中都依赖视口 rect） */
-      if (state.edit) editSig = '';
+      /* 调整中遇到旋转：海报画布尺寸不变也要重排一次（弹层的画布与窗口尺寸都依赖视口） */
       if (computeCanvasSize() || state.edit) scheduleRender();
     }, 300);
   };
@@ -261,15 +260,20 @@ const FROST_OK = (() => {
 
 /* ------------------------------ 小工具 ------------------------------- */
 
-function roundRect(ctx, x, y, w, h, r) {
+/** 只往当前路径里追加一个圆角矩形（不开新路径）—— 需要与别的子路径一起 fill 时用它 */
+function roundRectPath(ctx, x, y, w, h, r) {
   const rr = Math.max(0, Math.min(r, w / 2, h / 2));
-  ctx.beginPath();
   ctx.moveTo(x + rr, y);
   ctx.arcTo(x + w, y, x + w, y + h, rr);
   ctx.arcTo(x + w, y + h, x, y + h, rr);
   ctx.arcTo(x, y + h, x, y, rr);
   ctx.arcTo(x, y, x + w, y, rr);
   ctx.closePath();
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  roundRectPath(ctx, x, y, w, h, r);
 }
 
 const RE_LATIN = /[A-Za-z0-9][A-Za-z0-9'’\-.\u2011]*/;
@@ -1259,13 +1263,13 @@ function inspect() {
     opts: Object.assign({}, state.opts),
     ratios: Object.assign({}, state.ratios),
     /* 图片手动调整：正在调哪一块（null = 没在调）+ 两块各自的缩放/位移。
-       unclipped = 预览是否按「不裁切」画（窗口外能看到这张图的其余部分）；
-       shiftY = 为了让该区居中，海报当前的竖直位移（px，退出后归 0）。 */
+       window = 弹层里那个换图窗口的 rect（层内 CSS px）；radius = 它的圆角（CSS px）。
+       回归与标注通道靠这两个字段量「窗口是否居中 / 尺寸是否等于成品里那块」。 */
     edit: state.edit ? {
       target: state.edit.target,
       moved: !!state.edit.moved,
-      unclipped: true,
-      shiftY: editShiftY,
+      window: editWin ? [editWin.x, editWin.y, editWin.w, editWin.h] : null,
+      radius: editWin ? editWin.r : null,
     } : null,
     fits: {
       img: Object.assign({}, state.fits.img),
@@ -1329,10 +1333,10 @@ function render() {
   drawWordCard(ctx, L);
   drawProfileCard(ctx, L);
 
-  /* 调整模式：把正在调的那块平移到屏幕中央，并摆好四周压暗的遮罩。
+  /* 换图调整层：原海报不动，弹层里只有居中的换图区与这张图（预览画在自己的画布上）。
      放在这里（唯一落点 render）而不是在 startEdit 里另算一份 —— 换图、旋转、拖动重绘
      都会经过它，位置永远跟着最新版面走，也不会出现「两个地方各算一套」的漂移。 */
-  layoutEditView(L);
+  drawEditPreview(L);
 
   /* 版面即「可点区域地图」：留下坐标供点击命中与引导框使用 */
   state.layout = L;
@@ -1431,17 +1435,11 @@ function drawBackground(ctx, L) {
     const blockH = L.imgBlock.h;
     const base = fitBase('img', L);
     const d = fitDraw(base, state.fits.img);
-    /* 调整模式：正在调的这块**不裁切**地画出来 —— 窗口外的其余部分露在外面，
-       正是用户要的「作为图像拖动缩放之引导」。这只影响预览：下面 bgDraw 仍按
-       成品口径记录（blockH / clipped 不变），所以「显示 = 成品」与既有断言不受影响。 */
-    const previewing = !!state.edit && state.edit.target === 'img';
 
     ctx.save();
-    if (!previewing) {
-      ctx.beginPath();
-      ctx.rect(0, 0, CW, blockH);
-      ctx.clip();
-    }
+    ctx.beginPath();
+    ctx.rect(0, 0, CW, blockH);
+    ctx.clip();
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(base.im, d.x, d.y, d.w, d.h);
     ctx.restore();
@@ -1674,11 +1672,8 @@ function drawProfileCard(ctx, L) {
   const q = currentFitDraw('card', L);
   if (q) {
     ctx.save();
-    /* 调整模式：与顶部图片区同一条规则 —— 不裁切，窗口外露出这张图的其余部分 */
-    if (!(state.edit && state.edit.target === 'card')) {
-      roundRect(ctx, c.x, c.y, c.w, c.h, 18);
-      ctx.clip();
-    }
+    roundRect(ctx, c.x, c.y, c.w, c.h, 18);
+    ctx.clip();
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(q.base.im, q.x, q.y, q.w, q.h);
     ctx.restore();
@@ -1712,75 +1707,88 @@ function finishEdit() {
   scheduleRender();
 }
 
-let editShiftY = 0;      /* 调整模式下海报的竖直位移（CSS px）；退出时归零 */
-let editSig = '';        /* 位置没变就不重复量 / 写（拖动重绘时每帧都会走到这里） */
+const EDIT_DIM = 'rgba(6, 10, 18, 0.62)';   /* 窗口外的压暗（与用户选定的 62% 一致） */
+const EDIT_RADIUS_U = 18;                    /* 窗口圆角（设计值）= 海报里信息卡的圆角 */
+let editWin = null;      /* 本次调整的窗口（层内 CSS px）：{ x, y, w, h, r }，命中判定与回归都用它 */
 
 /**
- * 调整模式的视图：① 把正在调的那块平移到屏幕中央；② 摆好四周压暗的遮罩。
+ * 换图调整层：**原海报完全不动**，弹出的不透明层里只有居中的换图区与这张图。
  *
- * **没有描边、没有虚线** —— 用户明确要求「移除当前区域虚线边界，透明、半透明交界
- * 自然形成区域边界」，边界就是遮罩那个透明洞的边缘，别再加任何 stroke / border。
+ * 窗口内清晰、窗口外是同一张图半透明压暗后的其余部分（拖动 / 缩放的引导）；
+ * 窗口与压暗都由本函数画在 #editCvs 上，**没有任何描边 / 虚线** ——
+ * 亮暗交界就是这块区域的边界（用户明确要求）。
  *
- * 为什么用 CSS transform 平移 `#poster`，而不是在 canvas 里 `ctx.translate`：
- *   纯平移不改变画布的 rect.width，且 getBoundingClientRect() 会带上位移 ——
- *   于是 toClient / hitTestAt / pxToCanvas 全部自动正确，「点区域外完成」不会错位；
- *   在 canvas 里平移则会让整张命中表与 hitTest 一起错位。
- *   顺带的好处：画布位图仍是干净成品，长按另存与 ?raw=1 导出都不受影响。
+ * 为什么窗口尺寸 = 该区设计尺寸 × 海报显示比例 s：
+ *   ① 于是窗口在屏幕上的大小与海报里那块一模一样（用户要的「尺寸不变」）；
+ *   ② pxToCanvas()（= CW / posterRect.width）的手势灵敏度自动保持正确；
+ *   ③ fit 数学与 commitFit() 一行都不用改。
+ *
+ * 由 render() 末尾调用（沿用「单一落点 render()」）；海报照常渲染在弹层后面，
+ * 不可见但保证 inspect() / bgDraw 状态永远最新，退出时无需补画。
  */
-function layoutEditView(L) {
-  const mask = $('editMask');
+function drawEditPreview(L) {
+  const layer = $('editLayer');
+  const ecvs = $('editCvs');
+  if (!layer || !ecvs) return;
 
   if (!state.edit) {
-    editSig = '';
-    if (editShiftY !== 0) {
-      editShiftY = 0;
-      cvs.style.transform = '';
-    }
-    /* 退出时硬切：留着淡出会让那个洞停在旧位置、而海报已经弹回去了 */
-    if (mask && !mask.hidden) {
-      mask.classList.remove('on');
-      mask.hidden = true;
+    editWin = null;
+    if (!layer.hidden) {
+      /* 退出硬切：留着淡出会与底层海报的切换打架 */
+      layer.classList.remove('on');
+      layer.hidden = true;
     }
     return;
   }
 
+  /* 弹层是 inset:0 的 fixed，尺寸就是视口；不能量 layer.clientWidth ——
+     它是 hidden（display:none）时恒为 0，会变成「量不到尺寸就不显示」的自锁 */
+  const W = document.documentElement.clientWidth || window.innerWidth;
+  const H = document.documentElement.clientHeight || window.innerHeight;
+  if (!W || !H) return;
+  const dpr = window.devicePixelRatio || 1;
+  const bw = Math.round(W * dpr);
+  const bh = Math.round(H * dpr);
+  if (ecvs.width !== bw || ecvs.height !== bh) {
+    ecvs.width = bw;          /* 赋值会重置上下文状态，所以缩放变换下面才设 */
+    ecvs.height = bh;
+  }
+  const ctx = ecvs.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);   /* 之后的坐标就是 CSS px */
+  ctx.clearRect(0, 0, W, H);
+
+  /* 窗口：该区设计尺寸 × s，在层里水平 / 垂直都居中；圆角与信息卡一致 */
   const box = fitBox(state.edit.target, L);
-  const wrapRect = cvs.parentElement.getBoundingClientRect();
-  const stageRect = $('stage').getBoundingClientRect();
-  const size = cvs.getBoundingClientRect();          /* 宽高不受纯平移影响 */
-  const s = size.width / CW;
-  /* 画布在 .canvas-wrap 里是竖直居中的，offsetTop 又是布局值（不受 transform 影响），
-     所以「未平移时的顶边」可以直接算出来 —— 与当前位移无关，一步到位、不会来回抖。 */
-  const top0 = wrapRect.top + cvs.offsetTop;
-  /* 目标 = 可见屏幕中心：独立全屏下布局框比物理屏矮一个状态栏，补回半个差额 */
-  const want = stageRect.top + stageRect.height / 2 + STAGE_PT / 2;
+  const s = cvs.getBoundingClientRect().width / CW;
+  const winW = box.w * s;
+  const winH = box.h * s;
+  const winX = (W - winW) / 2;
+  const winY = (H - winH) / 2;
+  const R = EDIT_RADIUS_U * s;
+  editWin = { x: winX, y: winY, w: winW, h: winH, r: R };
 
-  const sig = [state.edit.target, box.x, box.y, box.w, box.h,
-    Math.round(size.left), Math.round(size.width), Math.round(want), Math.round(top0)].join('|');
-  if (sig === editSig) return;
-  editSig = sig;
-
-  const shift = Math.round(want - (top0 + (box.y + box.h / 2) * s));
-  if (shift !== editShiftY) {
-    editShiftY = shift;
-    cvs.style.transform = shift ? 'translateY(' + shift + 'px)' : '';
+  /* 整幅不裁切地画这张图：窗口内外都看得见（窗口外那一圈就是拖动 / 缩放的引导） */
+  const base = fitBase(state.edit.target, L);
+  if (base) {
+    const d = fitDraw(base, state.fits[state.edit.target]);
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(base.im,
+      winX + (d.x - box.x) * s, winY + (d.y - box.y) * s, d.w * s, d.h * s);
   }
 
-  if (mask) {
-    mask.style.left = Math.round(size.left + box.x * s) + 'px';
-    mask.style.top = Math.round(top0 + shift + box.y * s) + 'px';
-    mask.style.width = Math.round(box.w * s) + 'px';
-    mask.style.height = Math.round(box.h * s) + 'px';
-    /* 洞的圆角跟海报里那块本身一致（卡片 18 设计值），边界看着才自然 */
-    mask.style.borderRadius = state.edit.target === 'card' ? (18 * s).toFixed(1) + 'px' : '0px';
-    if (mask.hidden) {
-      mask.hidden = false;
-      /* 下一帧再加 .on：否则首帧就带着终态，看不到淡入（海报是硬切、洞当场对齐，
-         只有压暗是渐显的，所以不会出现「洞在旧位置」那种错位） */
-      requestAnimationFrame(() => mask.classList.add('on'));
-    } else {
-      mask.classList.add('on');
-    }
+  /* 压暗：整层矩形 + 窗口圆角矩形 一起 evenodd 填充 → 窗口内清晰、窗口外半透明 */
+  ctx.beginPath();
+  ctx.rect(0, 0, W, H);
+  roundRectPath(ctx, winX, winY, winW, winH, R);
+  ctx.fillStyle = EDIT_DIM;
+  ctx.fill('evenodd');
+
+  if (layer.hidden) {
+    layer.hidden = false;
+    /* 下一帧再加 .on：否则首帧就带着终态，看不到淡入 */
+    requestAnimationFrame(() => layer.classList.add('on'));
+  } else {
+    layer.classList.add('on');
   }
 }
 
@@ -2584,16 +2592,19 @@ function bindGestures() {
         resetAdjustPointers();
       }
       if (!rec || rec.moved) return;
-      const hit = hitTestAt(e.clientX, e.clientY);
-      /* 单击图片 / 信息卡 = 选图，调整模式里也一样 —— 否则「换另一块」要先点一下
-         完成、再点一下才开相册，别扭。选完图（change 事件）会按新目标重新进调整模式。 */
-      if (hit && (hit.id === 'img' || hit.id === 'card')) {
+      /* 弹层里看不到海报，命中判定不再走命中表，而是直接与窗口 rect 比坐标
+         （窗口 rect 就是层内坐标 = client 坐标，因为弹层是 inset:0）：
+         点在窗口里 = 换同一张（提示里那句「点图片换一张」），点在窗口外 = 完成。 */
+      const W = editWin;
+      const inside = !!W &&
+        e.clientX >= W.x && e.clientX <= W.x + W.w &&
+        e.clientY >= W.y && e.clientY <= W.y + W.h;
+      if (inside) {
         if (Date.now() - pickerAt < 400) return;
         pickerAt = Date.now();
-        openPicker(hit.id);
+        openPicker(state.edit.target);
         return;
       }
-      /* 其它地方 = 完成 */
       finishEdit();
       return;
     }
@@ -2869,6 +2880,7 @@ function setOverlay(show, text) {
       inspect,            // 版面清单：inspect.js 靠它导出 JSON 与标注图
       syncStageCenter,    // 独立形态的居中补正：回归可用桩注入 standalone/screen.height 后手动驱动
       playVoice, stopVoice, layoutWave,   // 语音独占层：回归可直接驱动（playVoice 不传参只显示波形）
+      scheduleRender,     // 换图调整层：回归合成纯色图后驱动一次重绘，做像素级判定
       /* 排版中间量：排查「自适应倍率算错」时可以直接在页面里量 */
       textTotalAt: (k) => buildTextBlockStandard(cvs.getContext('2d'), k).total,
       solveAutoScale: (bandH) => solveAutoScale(cvs.getContext('2d'), bandH),

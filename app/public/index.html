@@ -29,13 +29,14 @@
        落到海报上，由手势层按几何判定「是否点在波形框内」。面板里不放任何文字 / 图标：
        波形本身就是停止按钮。 -->
   <div id="wave" hidden><div class="wave-bars" id="waveBars" aria-hidden="true"></div></div>
-
-  <!-- 调整模式遮罩（换图后的手动调整，2026-09-22）：正在调的那块会被平移到屏幕中央，
-       这里只负责「中间透明、四周压暗」，洞的位置由 JS 按该区当前的屏幕 rect 写入。
-       亮暗交界就是这块区域的边界 —— 刻意不描边、不加虚线。
-       pointer-events:none：不抢事件，拖动与双指缩放照旧落在海报上由手势层处理。 -->
-  <div id="editMask" hidden></div>
 </div>
+
+<!-- 换图调整层（2026-09-22 重做）：换图后弹出**不透明的整屏层**，原海报完全不动、
+     也不出现在层里；层里只有居中的换图区与这张图 —— 窗口内清晰，窗口外是同一张图
+     半透明压暗后的其余部分。窗口位置 / 圆角 / 压暗全由 JS 画在 #editCvs 里
+     （亮暗交界即边界，不描边、不加虚线）。
+     pointer-events:none：不抢事件，拖动 / 双指 / 点击照旧落到海报上由手势层处理。 -->
+<div id="editLayer" hidden><canvas id="editCvs"></canvas></div>
 
 <!-- 相册选图入口：单击海报上的顶部图片 / 信息卡时由 JS 触发 -->
 <input id="fBgImage" type="file" accept="image/*" hidden>

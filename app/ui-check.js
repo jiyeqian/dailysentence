@@ -13,9 +13,10 @@
     10) 语音独占层：点 3 区（英文句）朗读后升起半透明波形（只盖 3 区、不碰中文句 / 日期胶囊、
         不模糊背景）；播放中其余手势全部失效；点波形即停并恢复；播完自动收起；
         中文句 / 出处单击不再发音但双击仍能删除；?raw=1 里没有波形层
-    11) 调整模式新界面：该区被平移到屏幕中央；遮罩的透明洞与该区完全重合、窗外压暗 62%；
-        没有任何描边 / 虚线（源码里不再有 drawEditFrame）；窗口外画出这张图的其余部分；
-        退出后遮罩与位移归位
+    11) 换图调整层：独立不透明弹层，**原海报完全不动**；层里只有居中的换图区与这张图
+        （窗口内清晰、窗外是这张图压暗 62% 的其余部分、窗口是圆角矩形）；
+        没有任何描边 / 虚线（源码里不再有 drawEditFrame）；点窗口 = 换同一张、点窗外 = 完成；
+        退出后弹层收起、海报没有位移
 
    跑法：先 node server.js（8787），再
      NODE_PATH=<node workspace>/node_modules node app/ui-check.js  */
@@ -137,28 +138,69 @@ function ok(label, cond, extra) {
     return pt;
   }
 
-  /** 在某个区域上按住拖动（dx/dy 为 CSS px）：调整模式的单指平移 */
-  async function dragBy(p, regionId, dx, dy) {
-    const pt = await pointOf(p, regionId);
-    await p.mouse.move(pt.x, pt.y);
+  /** 在某个区域上按住拖动（dx/dy 为 CSS px）—— 只在海报上可用（弹层里用 dragWin） */
+  /** 退出调整模式：点弹层里窗口以外的地方（左上角永远在窗口之外，两块都适用） */
+  async function finishAdjust(p) {
+    await p.mouse.click(12, 12);
+    await p.waitForTimeout(420);
+  }
+
+  /** 换图弹层里那个窗口的 rect / 中心（层内 CSS px，就是 client 坐标） */
+  const windowRect = (p) => p.evaluate(() => window.__ds.inspect().edit.window);
+  async function windowCenter(p) {
+    const w = await windowRect(p);
+    return { x: Math.round(w[0] + w[2] / 2), y: Math.round(w[1] + w[3] / 2) };
+  }
+
+  /** 在换图窗口上拖动（弹层里的单指平移）：坐标取自窗口 rect，而不是海报里的区域 */
+  async function dragWin(p, dx, dy) {
+    const c = await windowCenter(p);
+    await p.mouse.move(c.x, c.y);
     await p.mouse.down();
-    await p.mouse.move(pt.x + dx, pt.y + dy, { steps: 10 });
+    await p.mouse.move(c.x + dx, c.y + dy, { steps: 10 });
     await p.mouse.up();
     await p.waitForTimeout(260);
   }
 
-  /** 退出调整模式：点被调区域以外的地方（默认点中文句，且不该触发朗读） */
-  async function finishAdjust(p) {
-    const pt = await pointOf(p, 'cn');
-    await p.mouse.click(pt.x, pt.y);
-    await p.waitForTimeout(420);
+  /**
+   * 换图弹层的像素判定：塞一张纯白合成图，量
+   *   窗口内（应 255，清晰）、窗口外的这张图（应被压暗 62%）、窗口角上（应被压暗 → 圆角生效）。
+   * 白图让期望值可以精确算出来，不用靠肉眼。
+   */
+  async function whiteProbe(p, target) {
+    await p.evaluate((t) => {
+      const c = document.createElement('canvas');
+      c.width = 1080; c.height = 1440;
+      const x = c.getContext('2d');
+      x.fillStyle = '#ffffff';
+      x.fillRect(0, 0, c.width, c.height);
+      if (t === 'card') window.__ds.state.template = c;
+      else window.__ds.state.bgImage = c;
+      window.__ds.state.fits[t] = { scale: 1, ox: 0, oy: 0 };
+      window.__ds.scheduleRender();
+    }, target);
+    await p.waitForTimeout(450);
+    return p.evaluate((t) => {
+      const e = window.__ds.inspect().edit;
+      const [wx, wy, ww, wh] = e.window;
+      const cvs = document.getElementById('editCvs');
+      const dpr = window.devicePixelRatio || 1;
+      const ctx = cvs.getContext('2d');
+      const at = (x, y) => {
+        const d = ctx.getImageData(Math.round(x * dpr), Math.round(y * dpr), 1, 1).data;
+        return [d[0], d[1], d[2]];
+      };
+      return {
+        target: t, window: e.window, radius: e.radius,
+        center: at(wx + ww / 2, wy + wh / 2),
+        edgeMid: at(wx + 8, wy + wh / 2),
+        /* 角上取点按半径比例内缩：与圆弧中心的距离 = 1.13R > R，必然落在圆角之外
+           （固定写 3px 会随 radius 变化而落到弧内，那样就测不出圆角） */
+        corner: at(wx + e.radius * 0.2, wy + e.radius * 0.2),
+        outside: at(wx + ww / 2, wy + wh + 26),
+      };
+    }, target);
   }
-
-  /** 读画布位图上某一点的像素（设计坐标，固定画布下 U=1）—— 验证「画了什么」 */
-  const canvasPx = (p, x, y) => p.evaluate(([x, y]) => {
-    const d = document.getElementById('poster').getContext('2d').getImageData(x, y, 1, 1).data;
-    return d[0] + ',' + d[1] + ',' + d[2];
-  }, [x, y]);
 
   /** 点波形层中心 —— 它本身就是播放期间的停止按钮 */
   async function tapWave(p) {
@@ -582,51 +624,61 @@ function ok(label, cond, extra) {
       return !h.hidden && /双指/.test(h.textContent);
     }));
 
-  /* 新界面：该区平移到屏幕中央 + 窗外压暗（亮暗交界即边界）+ 不再有虚线框 */
+  /* 新界面：独立不透明弹层 —— 海报完全不动，层里只有居中的换图区与这张图 */
   const view = await p.evaluate(() => {
-    const m = document.getElementById('editMask');
-    const cs = getComputedStyle(m);
-    const mr = m.getBoundingClientRect();
-    const st = document.getElementById('stage').getBoundingClientRect();
-    const box = (window.__ds.state.regions || []).find((r) => r.id === 'img');
-    const tl = window.__ds.toClient(box.x, box.y);
-    const br = window.__ds.toClient(box.x + box.w, box.y + box.h);
+    const L = document.getElementById('editLayer');
+    const cs = getComputedStyle(L);
+    const cvsRect = document.getElementById('editCvs').getBoundingClientRect();
     return {
-      shiftY: window.__ds.inspect().edit.shiftY,
-      transform: document.getElementById('poster').style.transform,
-      hidden: m.hidden,
+      edit: window.__ds.inspect().edit,
+      hidden: L.hidden,
       opacity: Number(cs.opacity),
-      shadow: cs.boxShadow,
+      bg: cs.backgroundColor,
       border: cs.borderWidth,
       outlineStyle: cs.outlineStyle,
-      rect: { x: mr.x, y: mr.y, w: mr.width, h: mr.height },
-      region: { x: tl.x, y: tl.y, r: br.x, b: br.y },
-      stageCenter: st.top + st.height / 2,
+      posterTransform: document.getElementById('poster').style.transform,
+      cvs: { w: cvsRect.width, h: cvsRect.height },
+      vw: window.innerWidth,
+      vh: window.innerHeight,
+      s: document.getElementById('poster').getBoundingClientRect().width / 1080,
     };
   });
-  const regionCenter = (view.region.y + view.region.b) / 2;
-  ok('调整时该区被平移到屏幕中央（尺寸不变）',
-    Math.abs(regionCenter - view.stageCenter) < 2 && view.shiftY !== 0 &&
-    Math.abs((view.region.r - view.region.x) - 390) < 2,
-    `该区中心 ${regionCenter.toFixed(1)}｜舞台中心 ${view.stageCenter.toFixed(1)}｜位移 ${view.shiftY}px｜宽 ${(view.region.r - view.region.x).toFixed(1)}`);
-  ok('遮罩的透明洞与该区完全重合（交界就是边界）',
-    !view.hidden && Math.abs(view.rect.x - view.region.x) < 2 && Math.abs(view.rect.y - view.region.y) < 2 &&
-    Math.abs(view.rect.w - (view.region.r - view.region.x)) < 2 &&
-    Math.abs(view.rect.h - (view.region.b - view.region.y)) < 2,
-    `洞 ${Math.round(view.rect.x)},${Math.round(view.rect.y)} ${Math.round(view.rect.w)}×${Math.round(view.rect.h)}｜该区 ${Math.round(view.region.x)},${Math.round(view.region.y)} ${Math.round(view.region.r - view.region.x)}×${Math.round(view.region.b - view.region.y)}`);
-  ok('窗外半透明压暗约 62%，且没有任何描边 / 虚线',
-    view.opacity > 0.9 && /rgba\(6, 10, 18, 0\.62\)/.test(view.shadow) &&
-    view.border === '0px' && view.outlineStyle === 'none',
-    `${view.shadow}｜border ${view.border}｜outline ${view.outlineStyle}`);
+  const W = view.edit.window;
+  ok('换图弹出不透明弹层（覆盖整屏、底色不透明、无描边）',
+    !view.hidden && view.opacity > 0.9 && /^rgb\(/.test(view.bg) &&
+    view.border === '0px' && view.outlineStyle === 'none' &&
+    Math.abs(view.cvs.w - view.vw) < 1 && Math.abs(view.cvs.h - view.vh) < 1,
+    `${view.bg}｜border ${view.border}｜画布 ${view.cvs.w}×${view.cvs.h}｜视口 ${view.vw}×${view.vh}`);
+  ok('原海报完全不动（没有位移、也没有被改动绘制）',
+    view.posterTransform === '', JSON.stringify(view.posterTransform));
+  ok('窗口在弹层里正中，尺寸 = 该区成品尺寸（不放大）',
+    Math.abs(W[0] + W[2] / 2 - view.vw / 2) < 2 &&
+    Math.abs(W[1] + W[3] / 2 - view.vh / 2) < 2 &&
+    Math.abs(W[2] - 1080 * view.s) < 2 &&
+    Math.abs(W[3] - 648 * view.s) < 2,
+    `窗口 ${W.map((v) => Math.round(v)).join(',')}｜视口中心 ${view.vw / 2},${view.vh / 2}`);
+  ok('窗口是圆角矩形（圆角 = 18 设计值 × 显示比例）',
+    Math.abs(view.edit.radius - 18 * view.s) < 0.3, 'r=' + view.edit.radius.toFixed(2));
+
+  /* 像素级验证「内清晰 / 外半透明 / 圆角生效」：换成纯白图，期望值可直接算出来 */
+  const wp = await whiteProbe(p, 'img');
+  const DIM = [6, 10, 18];
+  const dimmed = [0.38 * 255 + 0.62 * DIM[0], 0.38 * 255 + 0.62 * DIM[1], 0.38 * 255 + 0.62 * DIM[2]];
+  ok('窗口内图像原样清晰（纯白图 → 255）',
+    wp.center.every((v) => v > 250), JSON.stringify(wp.center));
+  ok('窗口外这张图的其余部分被压暗成半透明（纯白图 → 约 101/103/108）',
+    wp.outside.every((v, i) => Math.abs(v - dimmed[i]) < 6),
+    JSON.stringify(wp.outside) + '｜期望 ' + dimmed.map((v) => Math.round(v)).join(','));
+  ok('窗口是圆角：角上被压暗、边中点是清晰的',
+    wp.corner.every((v) => v < 150) && wp.edgeMid.every((v) => v > 250),
+    `角 ${JSON.stringify(wp.corner)}｜边中 ${JSON.stringify(wp.edgeMid)}`);
   ok('虚线框已被彻底移除（源码里不再有 drawEditFrame）',
     !fs.readFileSync(path.join(__dirname, 'public/app.js'), 'utf8').includes('drawEditFrame'));
-  ok('调整预览按「不裁切」绘制（窗口外才有这张图的其余部分）',
-    d.edit.unclipped === true, JSON.stringify(d.edit));
 
-  /* 调整期间其它手势让路：长按不保存、点句子不朗读 */
+  /* 调整期间其它手势让路：长按不保存、点句子不朗读（都在窗口上操作） */
   const saveBefore = await p.evaluate(() => window.__ds.state.lastSave);
   const speakBefore = speakAt(d);
-  const imgMid = await pointOf(p, 'img');
+  const imgMid = await windowCenter(p);
   await p.mouse.move(imgMid.x, imgMid.y);
   await p.mouse.down();
   await p.waitForTimeout(760);
@@ -637,7 +689,7 @@ function ok(label, cond, extra) {
     'lastSave 未变');
 
   /* 双指捏合 = 缩放 */
-  const imgPt = await pointOf(p, 'img');
+  const imgPt = await windowCenter(p);
   await pinchOn(p, imgPt.x, imgPt.y, 1.8);
   d = await info(p);
   ok('双指捏合放大了图片', d.fits.img.scale > 1.1, 'scale=' + d.fits.img.scale.toFixed(2));
@@ -646,7 +698,7 @@ function ok(label, cond, extra) {
 
   /* 单指拖动 = 平移（把图片别处露出来），且不许把窗口拖出白边 */
   const fit0 = (await info(p)).fits.img;
-  await dragBy(p, 'img', 0, 120);
+  await dragWin(p, 0, 120);
   d = await info(p);
   const afterPan = d.fits.img;
   ok('单指拖动改变了图片位移', afterPan.oy !== fit0.oy, `oy ${fit0.oy} → ${afterPan.oy}`);
@@ -656,22 +708,19 @@ function ok(label, cond, extra) {
   ok('拖动没有改变其它元素', JSON.stringify(box(d, 'card')) === JSON.stringify(cb));
   await shot(p, 's10-adjust-img');
 
-  /* 调整模式下单击**另一块**也是单击即开相册（不必先「完成」再点第二下）。
-     注意：该区居中后海报整体位移，海报下半部分（含卡片）会移出屏幕 ——
-     所以这里点卡片露在外面的那一段，而不是它的中心。 */
-  const cardVisible = await p.evaluate(() => {
-    const r = window.__ds.state.regions.find((x) => x.id === 'card');
-    const t = window.__ds.toClient(r.x + r.w / 2, r.y);
-    return { x: Math.round(t.x), y: Math.round(Math.min(t.y + 14, window.innerHeight - 10)) };
-  });
-  const swapChooser = p.waitForEvent('filechooser', { timeout: 5000 });
-  await p.mouse.click(cardVisible.x, cardVisible.y);
+  /* 点窗口 = 换同一张。弹层里看不到海报，所以「点另一块换图」这条路径**已不存在**：
+     这里只断言「点窗口真会唤起相册」，不去 fulfill（否则会重置刚调好的 fits.img）。 */
+  const winC = await windowCenter(p);
+  const swapChooser = p.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
+  await p.mouse.click(winC.x, winC.y);
   await p.waitForTimeout(420);
-  ok('调整模式下单击信息卡一次即唤起相册', !!(await swapChooser));
-  await (await swapChooser).setFiles(TEMPLATE);
-  await p.waitForTimeout(800);
+  ok('点窗口一次即唤起相册（换同一张）', !!(await swapChooser));
+
+  /* 换信息卡：直接走它的入口（弹层里点不到另一块，这是本方案接受的代价） */
+  await p.setInputFiles('#fCardImage', TEMPLATE);
+  await p.waitForTimeout(900);
   d = await info(p);
-  ok('选自新图后调整目标切到该块', !!d.edit && d.edit.target === 'card', JSON.stringify(d.edit));
+  ok('换信息卡后进入调整模式、目标切到卡片', !!d.edit && d.edit.target === 'card', JSON.stringify(d.edit));
   ok('换信息卡后三边仍是 48',
     box(d, 'card')[0] === 48 &&
     Math.abs(d.canvas.h - (box(d, 'card')[1] + box(d, 'card')[3]) - 48) < 0.2,
@@ -681,28 +730,27 @@ function ok(label, cond, extra) {
   ok('之前对图片的调整结果仍在', d.fits.img.scale > 1.1, 'scale=' + d.fits.img.scale.toFixed(2));
   await shot(p, 's5-new-card');
 
-  /* 窗口外能看到「这张图的其余部分」：取卡片窗口正上方那一点（平时是海报底色，
-     调整中应当被这张图的不裁切预览盖住）。卡片的 fits 从头到尾没被动过，
-     所以这个像素在退出前后可以直接对比。 */
-  const PX_PROBE = [540, 1250];
-  const pxInEdit = await canvasPx(p, PX_PROBE[0], PX_PROBE[1]);
+  /* 卡片这块也做一次像素判定：窗口尺寸跟着目标变，窗外同样是这张图压暗后的其余部分 */
+  const wpc = await whiteProbe(p, 'card');
+  const sCard = await p.evaluate(() => document.getElementById('poster').getBoundingClientRect().width / 1080);
+  ok('信息卡窗口尺寸 = 984×496 设计值 × 显示比例（不放大）',
+    Math.abs(wpc.window[2] - 984 * sCard) < 2 && Math.abs(wpc.window[3] - 496 * sCard) < 2,
+    `${Math.round(wpc.window[2])}×${Math.round(wpc.window[3])}（期望 ${(984 * sCard).toFixed(1)}×${(496 * sCard).toFixed(1)}）`);
+  ok('信息卡窗口内清晰、窗外是这张图压暗后的其余部分',
+    wpc.center.every((v) => v > 250) && wpc.outside.every((v) => v > 60 && v < 150),
+    `内 ${JSON.stringify(wpc.center)}｜外 ${JSON.stringify(wpc.outside)}`);
 
-  /* 点被调区域以外 = 完成（且不触发朗读） */
+  /* 点窗口以外 = 完成（且不触发朗读） */
   await finishAdjust(p);
   d = await info(p);
   ok('点区域外退出调整模式', d.edit === null, JSON.stringify(d.edit));
-  ok('退出后遮罩收起、海报位移归零',
-    await p.evaluate(() => document.getElementById('editMask').hidden &&
-      document.getElementById('poster').style.transform === ''),
-    'transform=' + (await p.evaluate(() => document.getElementById('poster').style.transform)));
+  ok('退出后弹层收起、海报仍没有位移',
+    await p.evaluate(() => document.getElementById('editLayer').hidden &&
+      document.getElementById('poster').style.transform === ''));
   ok('退出时不会顺带朗读', speakAt(d) === speakBefore, `lastSpeakAt ${speakBefore} → ${speakAt(d)}`);
   ok('退出后提示收起',
     await p.evaluate(() => { const h = document.getElementById('hint'); return !h || h.hidden || h.classList.contains('hide'); }));
   ok('调整结果被保留（退出不等于复原）', d.fits.img.scale > 1.1, 'scale=' + d.fits.img.scale.toFixed(2));
-  const pxInPoster = await canvasPx(p, PX_PROBE[0], PX_PROBE[1]);
-  ok('窗口外确实画出了这张图的其余部分（退出后回到海报本身）',
-    pxInEdit !== pxInPoster,
-    `调整中 ${pxInEdit} → 退出后 ${pxInPoster}`);
 
   /* ---------------- 长按保存（界面无按钮，保存只能靠长按） ---------------- */
   console.log('标准版 · 长按保存');
@@ -801,7 +849,8 @@ function ok(label, cond, extra) {
   await tap(p, 'img');
   await (await fc2).setFiles(TEMPLATE);
   await p.waitForTimeout(800);
-  await pinchOn(p, (await pointOf(p, 'img')).x, (await pointOf(p, 'img')).y, 1.5);   /* 调整模式：放大一下 */
+  const winC2 = await windowCenter(p);        /* 弹层里的窗口中心（不是海报坐标） */
+  await pinchOn(p, winC2.x, winC2.y, 1.5);    /* 调整模式：放大一下 */
   await finishAdjust(p);                      /* 退出调整模式 */
   await dragY(p, 'en', -120);
   const messy = await info(p);
