@@ -182,12 +182,23 @@ function watchViewport() {
 
 /* 中部区域：日期胶囊固定在顶部靠右，英文 + 中文 + 出处在其下方的活动区里居中铺满 */
 const DATE_TOP_PAD = 24;      // 日期胶囊距顶部图片区底
-const DATE_H = 52;            // 日期胶囊高度
+const DATE_H = 52;            // 日期胶囊高度（基准值；随 2 区的交互缩放一起等比放大）
 const GAP_DATE_BAND = 28;     // 日期胶囊 → 文字活动区
 const GAP_TEXT_CARD = 48;     // 文字活动区距信息卡顶（同时是底部最小留白）
-const AUTO_MIN = 0.5;         // 自适应倍率下限
-const AUTO_MAX = 2.0;         // 自适应倍率上限（用户定的「最多翻倍」）
-const ZOOM_MIN = 0.6;         // 手动缩放范围
+
+/* ---- 设计基准字号（2026-09-22 重定，**只用于标准版**）----
+   用户以「当天实际显示大小」为基准各调一号，把结果定为新的设计基准：
+     当天 en/cn = 61.3（= 42 × 当天自适应 1.46）、source = 42.3（= 29 × 1.46）、
+     日期 = 25（它本来就不参与自适应）
+     → en/cn = 61.3 × 0.9 ≈ 55.2、source = 42.3 × 0.9 ≈ 38.1、日期 = 25 × 1.1 = 27.5
+   从此**进入应用就是这个字号**（不再自适应放大），用户靠上/下滑调整；
+   只有「整块装不下活动区」时才整块等比缩小保底（见 computeLayout）。
+   长版（?long=1）沿用旧的 42 / 29 / 25，不受影响。 */
+const SZ_EN = 55.2;           // 原 42
+const SZ_CN = 55.2;           // 原 42
+const SZ_SOURCE = 38.1;       // 原 29
+const SZ_DATE = 27.5;         // 原 25
+const ZOOM_MIN = 0.6;         // 每个文字区的交互缩放范围（相对新基准）
 const ZOOM_MAX = 1.6;
 const ZOOM_PER_PX = 0.001;    // 每像素缩放量：上滑 200px ≈ +20%
 const DEFAULT_BG = 'cover';   // 默认背景：铺满裁切
@@ -210,7 +221,10 @@ const state = {
   annots: [],           // 版面标注表（画布坐标，仅 ?debug=1 登记）
   /* 双击隐藏的元素：只在内存里，刷新即恢复（标准版才有这套交互） */
   hidden: { date: false, en: false, cn: false, source: false },
-  zoom: 1,              // 中部区域的用户缩放系数（叠在自适应倍率上，1 = 自动）
+  /* 每个文字区一份的「交互变换」：本次只有 scale（1 = 上面那套设计基准字号）。
+     2/3/4/5 都能上下滑动缩放；将来加「交互式移动」就在同一对象里补 dx/dy，
+     只改手势与绘制两处。默认值见 defaultFx()。 */
+  fx: defaultFx(),
   lastSpeakAt: 0,       // 最近一次朗读的时间戳（回归断言用）
   lastToggleAt: 0,      // 最近一次「今日⇄昨日」切换的时间戳（回归断言用）
   lastSave: null,       // 最近一次保存：{ kind: 'sheet'|'share'|'download', name, at }
@@ -238,6 +252,29 @@ const state = {
     bgStyle: DEFAULT_BG,
     longPoster: false,    // true = 长版海报（?long=1），本阶段保持旧版面不动
   },
+};
+
+/**
+ * 每个文字区一份的「交互变换」状态：本次只有 scale（1 = 设计基准字号）。
+ * 将来加「交互式移动」时，在同一对象里补 dx/dy、只改手势与绘制两处。
+ */
+function defaultFx() {
+  return {
+    'badge-date': { scale: 1 }, en: { scale: 1 }, cn: { scale: 1 }, source: { scale: 1 },
+  };
+}
+
+/** 取某区的交互变换；未知 id 也给一个稳定默认，调用方不必判空 */
+function regionFx(id) {
+  return (state.fx && state.fx[id]) || { scale: 1 };
+}
+
+/** 可交互缩放的文字区：3/4/5 联动（同一组），2 区独立 */
+const ZOOM_GROUP = {
+  'badge-date': ['badge-date'],
+  en: ['en', 'cn', 'source'],
+  cn: ['en', 'cn', 'source'],
+  source: ['en', 'cn', 'source'],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -621,16 +658,21 @@ function computeLayoutStandard(ctx) {
   const cardH = Math.min(CARD_H, CH * 0.28);
   const cardBottomPad = CARD_PAD + SAFE.bottom;   /* 底边还要让开 Home 指示条 */
 
-  /* 日期胶囊：不依赖图片区高度，先算它，「固定占用」才准 */
-  let date = { on: false, x: CW - TEXT_X, y: 0, w: 0, h: DATE_H };
+  /* 日期胶囊（2 区）：字号 / 字距 / 宽度随该区的交互缩放走；它不在活动区里，
+     所以**不参与**下面的「保底缩小」。先算它，「固定占用」才准。
+     ⚠ 胶囊**高度恒为 DATE_H**：高度会改变活动区高度，进而让句子被保底缩放 ——
+     那会破坏「2 区独立」（放日期不该动句子），所以这里刻意不跟着字号长高。 */
+  const dateScale = regionFx('badge-date').scale;
+  const dateSize = SZ_DATE * dateScale;
+  let date = { on: false, x: CW - TEXT_X, y: 0, w: 0, h: DATE_H, size: dateSize, k: dateScale };
   if (!state.hidden.date && state.content.date) {
-    ctx.font = T(25, 600, F_SANS);
-    const dw = measureSpaced(ctx, state.content.date, 2.5) + 56;
-    date = { on: true, x: CW - TEXT_X - dw, y: 0, w: dw, h: DATE_H };
+    ctx.font = T(dateSize, 600, F_SANS);
+    const dw = measureSpaced(ctx, state.content.date, 2.5 * dateScale) + 56 * dateScale;
+    date = { on: true, x: CW - TEXT_X - dw, y: 0, w: dw, h: DATE_H, size: dateSize, k: dateScale };
   }
 
   /* 除图片区以外、版面固定要占掉的高度（间距 + 日期行 + 卡片 + 底边距） */
-  const chrome = DATE_TOP_PAD + (date.on ? DATE_H + GAP_DATE_BAND : 0) +
+  const chrome = DATE_TOP_PAD + (date.on ? date.h + GAP_DATE_BAND : 0) +
     GAP_TEXT_CARD + cardBottomPad + cardH;
 
   /* 图片区高度：设计值 648 与「不超过画布 45%」取小；若这样会把句子区挤到不足画布
@@ -653,24 +695,28 @@ function computeLayoutStandard(ctx) {
   };
 
   /* 文字活动区：日期胶囊之下、信息卡之上；日期被删掉就把那一行还给句子 */
-  const bandTop = date.on ? dateTop + DATE_H + GAP_DATE_BAND : imgH + DATE_TOP_PAD;
+  const bandTop = date.on ? dateTop + date.h + GAP_DATE_BAND : imgH + DATE_TOP_PAD;
   const bandBottom = card.y - GAP_TEXT_CARD;
   const bandH = bandBottom - bandTop;
 
-  /* 自适应：找「尽量填满活动区」的倍率 —— 装得下就放大，装不下就缩小 */
-  const autoScale = solveAutoScale(ctx, bandH);
-
-  /* 手动缩放的倍率直接叠上去：放大到超出活动区是用户主动要的结果，让它居中溢出 */
-  const K = Math.max(AUTO_MIN, Math.round(autoScale * state.zoom * 100) / 100);
-  const text = buildTextBlockStandard(ctx, K);
+  /* 保底：只有「默认字号整块装不下活动区」时才整块等比缩小（保证不压到信息卡）。
+     正常内容下 base = 1 —— 2026-09-22 起不再有「尽量填满」的自动放大。
+     用户的交互缩放叠在它之上（base × fx[id].scale），所以放大仍可主动溢出活动区。 */
+  const base = textFit(ctx, bandH);
+  const text = buildTextBlockStandard(ctx, base);
 
   /* 在活动区里垂直居中；装不下时上下同量溢出，仍然是居中的 */
   const textTop = bandTop + (bandH - text.total) / 2;
 
   return {
-    K,
-    autoScale,
-    zoom: state.zoom,
+    /* 对外契约（inspect().text）：各区的交互倍率 + 保底倍率 base */
+    base,
+    fx: {
+      'badge-date': dateScale,
+      en: regionFx('en').scale,
+      cn: regionFx('cn').scale,
+      source: regionFx('source').scale,
+    },
     textX: TEXT_X,
     band: { top: bandTop, bottom: bandBottom, h: bandH },
     textTop,
@@ -689,39 +735,42 @@ function computeLayoutStandard(ctx) {
 }
 
 /**
- * 自适应倍率：在 [AUTO_MIN, AUTO_MAX] 内找最大的、能把文字块装进 bandH 的倍率。
- * 文字块高度对倍率单调，所以二分 12 次就够（比逐档步进少一个量级的 measureText）；
- * 结果按「文字块内容 + 可用高度」缓存，拖动缩放时不会重复求解。
+ * 标准版文字块的「基准总高」：各区交互倍率都为 1 时的总高。
+ * 按「内容 + 隐藏状态 + 各区 fx」缓存 —— 拖动缩放时内容没变，不必重复量测。
+ * （2026-09-22 起不再做「二分求最大铺满倍率」：字号是固定设计基准，
+ *   只有整块装不下活动区时才用它算保底缩小；原来二分要跑约 12 次 measureText，现在 1 次。）
  */
-let _autoCacheKey = '';
-let _autoCacheVal = 1;
-function solveAutoScale(ctx, bandH) {
+/** 各区 fx = 1 的「单位变换」：保底测量专用 */
+const UNIT_FX = { 'badge-date': 1, en: 1, cn: 1, source: 1 };
+
+let _fitCacheKey = '';
+let _fitCacheVal = 1;
+function textFitBase(ctx) {
   const h = state.hidden;
   const c = state.content;
-  const key = [bandH, h.date ? 1 : 0, h.en ? 1 : 0, h.cn ? 1 : 0, h.source ? 1 : 0,
+  /* key 里**不含用户缩放值**：保底只由「内容 + 隐藏状态」决定 —— 各区的 fx 是用户叠加的，
+     不参与保底求解（详见上面 fxAll 的注释） */
+  const key = [h.date ? 1 : 0, h.en ? 1 : 0, h.cn ? 1 : 0, h.source ? 1 : 0,
     c.en, c.cn, c.source].join('\u0001');
-  if (key === _autoCacheKey) return _autoCacheVal;
+  if (key === _fitCacheKey) return _fitCacheVal;
+  _fitCacheVal = buildTextBlockStandard(ctx, 1, UNIT_FX).total;
+  _fitCacheKey = key;
+  return _fitCacheVal;
+}
 
-  const totalAt = (k) => buildTextBlockStandard(ctx, k).total;
-  let K = AUTO_MIN;
-  if (totalAt(AUTO_MAX) <= bandH) {
-    K = AUTO_MAX;                       /* 连上限都装得下：用上限，短文不失控 */
-  } else {
-    let lo = AUTO_MIN;
-    let hi = AUTO_MAX;
-    for (let i = 0; i < 12; i++) {
-      const mid = (lo + hi) / 2;
-      if (totalAt(mid) <= bandH) { lo = mid; K = mid; } else { hi = mid; }
-    }
-    K = Math.floor(K * 100) / 100;
+/**
+ * 保底倍率：默认字号装得下活动区就是 1（按设计基准显示）；装不下才整块等比缩小。
+ * 下面那次复核是沿用旧版的一条教训：字号会被 T() 取整，倍率取整后文字块可能又撑破
+ * 活动区（1.367 → 1.37 让字号从 57 跳到 58、瞬间多一行），所以逐档退到真的装得下。
+ */
+function textFit(ctx, bandH) {
+  let base = Math.min(1, Math.round((bandH / Math.max(1, textFitBase(ctx))) * 100) / 100);
+  let guard = 0;
+  while (base > 0.1 && guard++ < 40 &&
+    buildTextBlockStandard(ctx, base, UNIT_FX).total > bandH) {
+    base = Math.round((base - 0.01) * 100) / 100;
   }
-  /* 字号会被 T() 取整（Math.round），所以倍率取整后必须复核一次：
-     1.367 → 1.37 会让字号从 57 跳到 58，文字块瞬间多一行、撑破活动区 */
-  while (K > AUTO_MIN && totalAt(K) > bandH) K = Math.round((K - 0.01) * 100) / 100;
-
-  _autoCacheKey = key;
-  _autoCacheVal = K;
-  return K;
+  return base;
 }
 
 /** 长版：原有流式版面（单词卡 + 例句），按内容长高 */
@@ -736,9 +785,10 @@ function computeLayoutLong(ctx) {
   if (bottomY > card.y) card.y = bottomY;
 
   return {
-    K: M.K,
-    autoScale: M.K,           /* 长版不做自适应缩放，这里只为字段形状统一 */
-    zoom: 1,
+    /* 长版版面本阶段不动：字号仍由它自己的流式倍率 M.K 决定（已落在 M.text.* 里）；
+       对外统一成新口径 —— fx 全 1、base 1，免得 inspect().text 出现两套形状 */
+    base: 1,
+    fx: { 'badge-date': 1, en: 1, cn: 1, source: 1 },
     textX: MX,                /* 长版继续用 84 的文字安全边距 */
     band: null,
     textTop: M.textTop,
@@ -829,7 +879,8 @@ function buildTextBlock(ctx, K) {
     total: sourceY + (sourceOn ? sourceSize * 1.4 : 0),
     title: { size: ts, h: titleH, text: word, badgeW },
     rule: Object.assign({}, rule, { y: titleH + rule.gapTop }),
-    date: { on: !!state.content.date, y: 4, h: 52, w: badgeW },
+    /* 长版的日期胶囊：字号与胶囊尺寸**沿用旧值**（长版版面本阶段不动） */
+    date: { on: !!state.content.date, y: 4, h: 52, w: badgeW, size: 25, k: 1 },
     en: { on: true, size: enSize, lh: enLH, lines: enLines, y: enY },
     cn: { on: true, size: cnSize, lh: cnLH, lines: cnLines, y: cnY },
     source: { on: sourceOn, size: sourceSize, y: sourceY, text: state.content.source },
@@ -841,15 +892,22 @@ function buildTextBlock(ctx, K) {
  * 没有关键词大标题与分隔线；被双击隐藏的元素直接不参与排版，其余内容自动上移补齐。
  * 返回的 y 都是「相对文字块顶端」的偏移，与长版同一套画法。
  */
-function buildTextBlockStandard(ctx, K) {
+function buildTextBlockStandard(ctx, K, fxAll) {
   const maxW = CW - 2 * TEXT_X;
   const h = state.hidden;
+  /* 该区最终倍率 = 保底 K（通常为 1，见 textFit）× 该区的交互值。
+     fxAll 给了就按它算 —— 「保底测量」必须按各区 fx = 1 来量（见 textFitBase），
+     否则用户一放大就会被保底再吃掉，滑了等于没滑。 */
+  const sc = (id) => (fxAll ? fxAll[id] : regionFx(id).scale);
+  const sx = (id) => K * sc(id);
+  /* 段落间距按「句子这一组」的倍率走：3/4/5 联动，缩放时行距跟着一起放大 */
+  const kb = K * sc('en');
 
   /* 日期胶囊不在这条流里（它固定在中部区域顶部靠右），所以从 0 开始量 */
   let y = 0;
 
-  /* 英文 */
-  const enSize = 42 * K;
+  /* 英文（3 区） */
+  const enSize = SZ_EN * sx('en');
   const enLH = enSize * 1.32;
   const enOn = !h.en && !!state.content.en;
   ctx.font = T(enSize, 400, F_SANS);
@@ -857,17 +915,17 @@ function buildTextBlockStandard(ctx, K) {
   const enY = y;
   if (enOn) y = enY + enLines.length * enLH;
 
-  /* 中文 */
-  const cnSize = 42 * K;
+  /* 中文（4 区） */
+  const cnSize = SZ_CN * sx('cn');
   const cnLH = cnSize * 1.46;
   const cnOn = !h.cn && !!state.content.cn;
   ctx.font = T(cnSize, 400, F_SANS);
   const cnLines = cnOn ? wrapText(ctx, state.content.cn, maxW) : [];
-  const cnY = y + (enOn && cnOn ? 34 * K : 0);
+  const cnY = y + (enOn && cnOn ? 34 * kb : 0);
   if (cnOn) y = cnY + cnLines.length * cnLH;
 
-  /* 出处 */
-  const sourceSize = 29 * K;
+  /* 出处（5 区） */
+  const sourceSize = SZ_SOURCE * sx('source');
   const sourceOn = !h.source && !!state.content.source;
   const sourceY = y + (sourceOn ? 30 * K : 0);
   if (sourceOn) y = sourceY + sourceSize * 1.4;
@@ -1088,8 +1146,9 @@ function buildAnnots(ctx, L) {
   }
 
   if (L.date && L.date.on) {
+    /* 字号读版面实际值，别写死 —— 否则标注图上的字号与实际不一致 */
     push('badge-date', '日期胶囊', L.date.x, L.date.y, L.date.w, L.date.h,
-      { font: 25, color: 'rgba(255,255,255,0.94)', text: c.date });
+      { font: r1(L.date.size == null ? 25 : L.date.size), color: 'rgba(255,255,255,0.94)', text: c.date });
   }
 
   if (L.rule.on) {
@@ -1275,11 +1334,13 @@ function inspect() {
       img: Object.assign({}, state.fits.img),
       card: Object.assign({}, state.fits.card),
     },
-    /* 中部区域的缩放三件套：K = autoScale × zoom（已夹紧），便于 --diff 自证「字体放大了多少」 */
+    /* 文字字号状态（2026-09-22 改口径）：fx = 2/3/4/5 各区的交互倍率（1 = 设计基准字号），
+       base = 保底倍率（只有整块装不下活动区时才 < 1）—— 「为什么字变小了」看它就知道 */
     text: {
-      K: L.K,
-      autoScale: L.autoScale,
-      zoom: L.zoom == null ? 1 : L.zoom,
+      fx: Object.assign({
+        'badge-date': 1, en: 1, cn: 1, source: 1,
+      }, L.fx),
+      base: L.base == null ? 1 : L.base,
       x: L.textX,
       band: L.band ? { top: L.band.top, h: L.band.h } : null,
     },
@@ -1632,7 +1693,10 @@ function drawTopText(ctx, L) {
      标准版固定在中部区域顶部靠右，长版与标题同行（坐标为画布绝对值） */
   if (L.date && L.date.on) {
     const label = state.content.date;
-    ctx.font = T(25, 600, F_SANS);
+    /* 字号 / 字距 / 内边距都读版面给的（标准版会随 2 区的交互缩放变化，长版恒为旧值） */
+    const dk = L.date.k == null ? 1 : L.date.k;
+    const dsz = L.date.size == null ? 25 : L.date.size;
+    ctx.font = T(dsz, 600, F_SANS);
     const pw = L.date.w;
     const ph = L.date.h;
     const px = L.date.x;
@@ -1647,7 +1711,7 @@ function drawTopText(ctx, L) {
     ctx.restore();
     ctx.fillStyle = 'rgba(255,255,255,0.94)';
     ctx.textBaseline = 'middle';
-    drawSpaced(ctx, label, px + 28, py + ph / 2 + 1, 2.5);
+    drawSpaced(ctx, label, px + 28 * dk, py + ph / 2 + 1, 2.5 * dk);
     ctx.textBaseline = 'alphabetic';
   }
 
@@ -2010,8 +2074,8 @@ async function resetToInitial(refetch) {
   state.edit = null;                        /* 调整模式也不是「初始状态」 */
   state.fits = { img: { scale: 1, ox: 0, oy: 0 }, card: { scale: 1, ox: 0, oy: 0 } };
   state.hidden = { date: false, en: false, cn: false, source: false };
-  state.zoom = 1;
-  _autoCacheKey = '';                       /* 让自适应倍率重新求解 */
+  state.fx = defaultFx();                   /* 四个文字区都回到设计基准字号 */
+  _fitCacheKey = '';                        /* 让保底倍率重新量测 */
   state.opts.bgStyle = initialBgStyle();
   state.ratios = { ...DEFAULT_RATIOS };
   try {
@@ -2329,8 +2393,8 @@ const PRESS = { moved: 8, maxMs: 620, holdMs: 520 };
 /** 双击能删掉的区域 → 隐藏状态里的键 */
 const HIDE_MAP = { 'badge-date': 'date', en: 'en', cn: 'cn', source: 'source' };
 
-/** 上下拖动 = 缩放字号（只有句子元素） */
-const ZOOM_REGIONS = new Set(['en', 'cn', 'source']);
+/** 上下拖动 = 缩放字号：2/3/4/5 四个文字区都可以（3/4/5 一组联动、2 区独立，见 ZOOM_GROUP） */
+const ZOOM_REGIONS = new Set(Object.keys(ZOOM_GROUP));
 
 /** 单击有动作、同时又要保留双击删除的区域 —— 单击要等 300ms 确认不是双击 */
 const SINGLE_TAP_REGIONS = new Set(['en', 'cn', 'source', 'badge-date']);
@@ -2357,7 +2421,7 @@ function bindGestures() {
   let holdTimer = null;
   let longFired = false;
   let pickerAt = 0;          /* 刚开过相册的防抖时间戳 */
-  let zoomDrag = null;       /* { startY, startZoom, active } */
+  let zoomDrag = null;       /* { id, startY, startZoom, active } —— id = 被拖的那个文字区 */
   let pullDrag = null;       /* { startY, armed } */
   let pendingTap = null;     /* { id, timer, audio } —— 单击要等双击确认，只留一个槽 */
   let limitHit = '';         /* 已经提示过的缩放极限，避免刷屏 */
@@ -2405,13 +2469,22 @@ function bindGestures() {
     pendingTap = { id, timer, audio };
   };
 
-  /** 改缩放系数并重绘；到上下限只提示一次 */
-  const applyZoom = (z) => {
+  /**
+   * 改某一区的缩放并重绘（到上下限只提示一次）。
+   * 3/4/5 属于同一联动组：拖其中任一，三个一起写同一个值；2 区自成一组。
+   */
+  const applyZoom = (id, z) => {
     const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
-    if (clamped !== state.zoom) {
-      state.zoom = clamped;
-      scheduleRender();
+    const group = ZOOM_GROUP[id] || [id];
+    let changed = false;
+    for (const key of group) {
+      const cur = regionFx(key);
+      if (cur.scale !== clamped) {
+        cur.scale = clamped;
+        changed = true;
+      }
     }
+    if (changed) scheduleRender();
     const limit = clamped >= ZOOM_MAX ? 'max' : (clamped <= ZOOM_MIN ? 'min' : '');
     if (limit && limit !== limitHit) {
       limitHit = limit;
@@ -2492,7 +2565,10 @@ function bindGestures() {
     if (!state.opts.longPoster) {
       const hit = hitTestAt(e.clientX, e.clientY);
       if (hit && ZOOM_REGIONS.has(hit.id)) {
-        zoomDrag = { startY: e.clientY, startZoom: state.zoom, active: false };
+        /* 记下拖的是哪一区，以及该区（组）的当前倍率 —— 联动组里三个值本来就相同 */
+        zoomDrag = {
+          id: hit.id, startY: e.clientY, startZoom: regionFx(hit.id).scale, active: false,
+        };
       } else if (!hit || hit.id === 'img' || hit.id === 'card') {
         pullDrag = { startY: e.clientY, moved: false, armed: false };
       }
@@ -2547,7 +2623,7 @@ function bindGestures() {
         dropPendingTap();
       }
       if (zoomDrag.active) {
-        applyZoom(zoomDrag.startZoom * (1 + (-dy) * ZOOM_PER_PX));
+        applyZoom(zoomDrag.id, zoomDrag.startZoom * (1 + (-dy) * ZOOM_PER_PX));
         return;
       }
     }
@@ -2883,7 +2959,7 @@ function setOverlay(show, text) {
       scheduleRender,     // 换图调整层：回归合成纯色图后驱动一次重绘，做像素级判定
       /* 排版中间量：排查「自适应倍率算错」时可以直接在页面里量 */
       textTotalAt: (k) => buildTextBlockStandard(cvs.getContext('2d'), k).total,
-      solveAutoScale: (bandH) => solveAutoScale(cvs.getContext('2d'), bandH),
+      textFit: (bandH) => textFit(cvs.getContext('2d'), bandH),   /* 保底倍率（通常为 1） */
     };
   }
 })();

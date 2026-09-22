@@ -17,6 +17,8 @@
         （窗口内清晰、窗外是这张图压暗 62% 的其余部分、窗口是圆角矩形）；
         没有任何描边 / 虚线（源码里不再有 drawEditFrame）；点窗口 = 换同一张、点窗外 = 完成；
         退出后弹层收起、海报没有位移
+    12) 文字字号：进入即按固定设计基准显示（短句 base=1、字号正好 55.2/38.1/27.5，不再自适应放大）；
+        2/3/4/5 各区一份交互变换，滑句子区 3/4/5 联动、滑日期只改日期；超长句整块等比缩小保底
 
    跑法：先 node server.js（8787），再
      NODE_PATH=<node workspace>/node_modules node app/ui-check.js  */
@@ -202,6 +204,20 @@ function ok(label, cond, extra) {
     }, target);
   }
 
+  /**
+   * 往 state.content 塞指定文案后重绘，返回新的 inspect()。
+   * 用来做「与线上当天句子无关」的确定性断言（短句正好等于设计基准、超长句触发保底）。
+   * 调用方记得 reload 收尾，别把注入的文案带进后面的断言。
+   */
+  async function withContent(p, patch) {
+    await p.evaluate((patch) => {
+      window.__ds.state.content = Object.assign({}, window.__ds.state.content, patch);
+      window.__ds.scheduleRender();
+    }, patch);
+    await p.waitForTimeout(420);
+    return info(p);
+  }
+
   /** 点波形层中心 —— 它本身就是播放期间的停止按钮 */
   async function tapWave(p) {
     const pt = await p.evaluate(() => {
@@ -368,19 +384,11 @@ function ok(label, cond, extra) {
   const gapTop = d.gaps.find((g) => g.id === 'gap-img-text').px;
   const gapBottom = d.gaps.find((g) => g.id === 'gap-text-card').px;
   ok('句子在中部区域里垂直居中', Math.abs(gapTop - gapBottom) <= 2, `上${gapTop} 下${gapBottom}`);
-  /* 「尽量铺满」的真实不变式：再放大一档（0.02）就会装不下。
-     字号要取整、断行是跳变的，所以填满度可能是 90% 出头，这不是 bug */
-  const fill = await p.evaluate(() => {
-    const L = window.__ds.state.layout;
-    return {
-      total: Math.round(L.textBottom - L.textTop),
-      bandH: Math.round(L.band.h),
-      next: Math.round(window.__ds.textTotalAt(L.autoScale + 0.02)),
-    };
-  });
-  ok('初始尽量铺满中部区域（再大一档就溢出）', fill.next > fill.bandH,
-    `文字块 ${fill.total} / 活动区 ${fill.bandH}，放大一档 → ${fill.next}`);
-  ok('字号自适应放大（基准 42）', d.text.autoScale > 1, 'autoScale=' + d.text.autoScale);
+  /* 字号口径（2026-09-22 重定）：进入即按固定设计基准显示，不再自适应放大；
+     只有整块装不下活动区时才整块等比缩小保底（base < 1）。详细断言见「字号基准与上下滑动缩放」一节 */
+  ok('文字块装得下活动区（保底倍率 base ≤ 1，且不越过信息卡）',
+    d.text.base <= 1 && (box(d, 'source')[1] + box(d, 'source')[3]) <= box(d, 'card')[1],
+    `base=${d.text.base}｜文字底 ${box(d, 'source')[1] + box(d, 'source')[3]} / 卡片顶 ${box(d, 'card')[1]}`);
 
   /* ---------------- 双击隐藏 ---------------- */
   console.log('标准版 · 双击隐藏');
@@ -419,20 +427,59 @@ function ok(label, cond, extra) {
   d = await info(p);
   ok('刷新后回到初始状态', ids(d).length === 6, ids(d).join(','));
 
-  /* ---------------- 中部区域：上下滑动缩放 ---------------- */
-  console.log('标准版 · 上下滑动缩放');
-  const fontOf = (x) => x.items.find((it) => it.id === 'en').font;
+  /* ---------------- 文字区：字号基准与上下滑动缩放 ---------------- */
+  console.log('标准版 · 字号基准与上下滑动缩放');
+  const fontAt = (x, id) => (x.items.find((it) => it.id === id) || {}).font;
+  const fontOf = (x) => fontAt(x, 'en');
   const f0 = fontOf(d);
+
+  /* 设计基准字号（2026-09-22 由用户定）：en/cn 55.2、source 38.1、日期 27.5；
+     实际字号 = 设计基准 × 保底 base × 该区交互值 —— 今天的长句会被保底缩小，比例仍精确 */
+  ok('字号 = 设计基准 × 保底 base（四个区逐一核对）',
+    Math.abs(fontAt(d, 'en') - 55.2 * d.text.base) < 0.6 &&
+    Math.abs(fontAt(d, 'cn') - 55.2 * d.text.base) < 0.6 &&
+    Math.abs(fontAt(d, 'source') - 38.1 * d.text.base) < 0.6 &&
+    Math.abs(fontAt(d, 'badge-date') - 27.5 * d.text.fx['badge-date']) < 0.6,
+    `en ${fontAt(d, 'en')}｜cn ${fontAt(d, 'cn')}｜source ${fontAt(d, 'source')}｜日期 ${fontAt(d, 'badge-date')}｜base ${d.text.base}`);
+  ok('每个文字区各有一份交互变换状态（架构：以后加移动就在同一对象里补 dx/dy）',
+    ['badge-date', 'en', 'cn', 'source'].every((k) => d.text.fx[k] === 1),
+    JSON.stringify(d.text.fx));
+
+  /* 短句：base 回到 1，字号正好等于设计基准（与线上当天的句子无关，确定可测） */
+  const shortD = await withContent(p, { en: 'Hi.', cn: '你好。', source: '—— 测试' });
+  ok('短句时不再自动放大（base = 1、字号就是设计基准，日期大一号）',
+    shortD.text.base === 1 && Math.abs(fontAt(shortD, 'en') - 55.2) < 0.6 &&
+    Math.abs(fontAt(shortD, 'source') - 38.1) < 0.6 && Math.abs(fontAt(shortD, 'badge-date') - 27.5) < 0.6,
+    `base=${shortD.text.base}｜en ${fontAt(shortD, 'en')}｜source ${fontAt(shortD, 'source')}｜日期 ${fontAt(shortD, 'badge-date')}`);
+  await p.reload({ waitUntil: 'load' });
+  await p.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  d = await info(p);
+
+  /* 3/4/5 联动：滑英文 → 三个一起变，日期不动 */
+  const dateF0 = fontAt(d, 'badge-date');
   await dragY(p, 'en', -120);                        /* 上滑 = 放大 */
   d = await info(p);
-  ok('上滑放大字号', fontOf(d) > f0 && d.text.zoom > 1,
-    `${f0} → ${fontOf(d)}（zoom ${d.text.zoom}）`);
+  ok('上滑放大字号', fontOf(d) > f0, `${f0} → ${fontOf(d)}`);
+  ok('3/4/5 联动：滑英文时英 / 中 / 出处同时变大，日期纹丝不动',
+    d.text.fx.en > 1 && d.text.fx.en === d.text.fx.cn && d.text.fx.en === d.text.fx.source &&
+    d.text.fx['badge-date'] === 1 && fontAt(d, 'badge-date') === dateF0,
+    `fx ${JSON.stringify(d.text.fx)}｜日期 ${dateF0} → ${fontAt(d, 'badge-date')}`);
   await shot(p, 's7-zoom-in');
 
   const f1 = fontOf(d);
   await dragY(p, 'en', 240);                         /* 下滑 = 缩小 */
   d = await info(p);
-  ok('下滑缩小字号', fontOf(d) < f1, `${f1} → ${fontOf(d)}（zoom ${d.text.zoom}）`);
+  ok('下滑缩小字号', fontOf(d) < f1, `${f1} → ${fontOf(d)}`);
+
+  /* 2 区独立：滑日期只改日期，句子三个纹丝不动 */
+  const senF = { en: fontAt(d, 'en'), cn: fontAt(d, 'cn'), src: fontAt(d, 'source') };
+  const dateF1 = fontAt(d, 'badge-date');
+  await dragY(p, 'badge-date', -110);
+  d = await info(p);
+  ok('2 区独立：滑日期只放大日期，句子三个一点不动',
+    fontAt(d, 'badge-date') > dateF1 && d.text.fx['badge-date'] > 1 &&
+    fontAt(d, 'en') === senF.en && fontAt(d, 'cn') === senF.cn && fontAt(d, 'source') === senF.src,
+    `日期 ${dateF1} → ${fontAt(d, 'badge-date')}｜en ${senF.en} → ${fontAt(d, 'en')}`);
 
   /* 缩到最小也不能压到卡片 */
   await dragY(p, 'en', 900);
@@ -444,8 +491,23 @@ function ok(label, cond, extra) {
   await p.reload({ waitUntil: 'load' });
   await p.waitForFunction(() => window.__ds && window.__ds.state.layout);
   d = await info(p);
-  ok('刷新后缩放归位', d.text.zoom === 1 && Math.abs(fontOf(d) - f0) < 0.6,
-    `zoom=${d.text.zoom} font=${fontOf(d)}（初始 ${f0}）`);
+  ok('刷新后各文字区的缩放都归位',
+    ['badge-date', 'en', 'cn', 'source'].every((k) => d.text.fx[k] === 1) &&
+    Math.abs(fontOf(d) - f0) < 0.6,
+    `fx=${JSON.stringify(d.text.fx)} font=${fontOf(d)}（初始 ${f0}）`);
+
+  /* 装不下时整块等比缩小保底：塞超长句 → base < 1，且文字不越过信息卡 */
+  const longD = await withContent(p, {
+    en: 'This is an extremely long sentence '.repeat(14),
+    cn: '这是一句被刻意拉得极长的话，用来验证装不下时整块等比缩小保底。'.repeat(6),
+  });
+  ok('超长句时整块等比缩小保底（base < 1、且不越过信息卡）',
+    longD.text.base < 1 &&
+    (box(longD, 'source')[1] + box(longD, 'source')[3]) <= box(longD, 'card')[1],
+    `base=${longD.text.base}｜文字底 ${box(longD, 'source')[1] + box(longD, 'source')[3]} / 卡片顶 ${box(longD, 'card')[1]}`);
+  await p.reload({ waitUntil: 'load' });
+  await p.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  d = await info(p);
 
   /* ---------------- 单击：句子朗读 / 日期切今日昨日 ---------------- */
   console.log('标准版 · 单击朗读与切日');
@@ -855,16 +917,18 @@ function ok(label, cond, extra) {
   await dragY(p, 'en', -120);
   const messy = await info(p);
   ok('（准备）状态已改乱',
-    messy.meta.hidden.date === true && messy.text.zoom > 1 &&
+    messy.meta.hidden.date === true && messy.text.fx.en > 1 &&
     messy.bg.clipped === true && messy.fits.img.scale > 1.1,
-    `hidden.date=${messy.meta.hidden.date} zoom=${messy.text.zoom} clipped=${messy.bg.clipped} scale=${messy.fits.img.scale.toFixed(2)}`);
+    `hidden.date=${messy.meta.hidden.date} fx.en=${messy.text.fx.en} clipped=${messy.bg.clipped} scale=${messy.fits.img.scale.toFixed(2)}`);
 
   await pullY(p, 'img', 150);                 /* 图片区向下拉 = 更新 */
   await p.waitForTimeout(2600);
   const back = await info(p);
   ok('下拉后隐藏状态被清空',
     JSON.stringify(back.meta.hidden) === JSON.stringify({ date: false, en: false, cn: false, source: false }));
-  ok('下拉后缩放归位', back.text.zoom === 1, 'zoom=' + back.text.zoom);
+  ok('下拉后各文字区缩放归位',
+    ['badge-date', 'en', 'cn', 'source'].every((k) => back.text.fx[k] === 1),
+    JSON.stringify(back.text.fx));
   ok('下拉后相册图被换回上游默认（不再裁切）', back.bg && back.bg.clipped === false,
     JSON.stringify(back.bg));
   ok('下拉后手动调整也一并归位',
@@ -929,8 +993,9 @@ function ok(label, cond, extra) {
   ok('旋转后版面完全不变（设计高 / 活动区 / 字号都一致）',
     Math.round(rd.canvas.h) === Math.round(md.canvas.h) &&
     Math.round(rd.text.band.h) === Math.round(md.text.band.h) &&
-    rd.text.K === md.text.K,
-    `设计高 ${Math.round(md.canvas.h)} → ${Math.round(rd.canvas.h)}，K ${md.text.K} → ${rd.text.K}`);
+    JSON.stringify(rd.text.fx) === JSON.stringify(md.text.fx) &&
+    rd.text.base === md.text.base,
+    `设计高 ${Math.round(md.canvas.h)} → ${Math.round(rd.canvas.h)}，base ${md.text.base} → ${rd.text.base}`);
 
   await mp.setViewportSize({ width: 500, height: 1000 });
   await mp.waitForTimeout(800);
