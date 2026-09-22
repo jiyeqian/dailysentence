@@ -30,6 +30,8 @@
         2/3/4/5 各区一份交互变换，滑句子区 3/4/5 联动、滑日期只改日期；超长句整块等比缩小保底
     13) 缩放上限按区不同：2 区（日期）3 倍、3/4/5 区 1.6 倍；胶囊（含高度）随字号等比变大、
         活动区随之下移（短句字号不受影响）；到上限提示「已放到最大」
+    14) 真机诊断页（?diag=1）：面板出现且放开文本选择、含形态/屏幕/安全区/舞台/海报/版面/音频自证；
+        该模式下长按不弹保存；不带参数与 ?raw=1 下都不出现
 
    跑法：先 node server.js（8787），再
      NODE_PATH=<node workspace>/node_modules node app/ui-check.js  */
@@ -950,6 +952,61 @@ function ok(label, cond, extra) {
   });
   ok('导出页（?raw=1）里波形层不显示', rawWave.display === 'none', JSON.stringify(rawWave));
   await rawP.close();
+
+  /* ---------------- 真机诊断页（?diag=1，2026-09-22） ----------------
+     手机上复现不了的问题（音频会话 / 装到主屏后的安全区 / 真机字形）改用纯文本上报：
+     面板可长按「全选 / 拷贝」，所以这个模式必须放开文本选择，并让「长按保存」让路。 */
+  console.log('标准版 · 真机诊断页');
+  const diagP = await browser.newPage({ viewport: { width: 402, height: 874 }, deviceScaleFactor: 2, hasTouch: true });
+  await diagP.addInitScript(AUDIO_STUB);
+  /* 断言要读 __ds.state.lastSave，所以顺带带上 debug=1（诊断面板本身只依赖模块状态，不需要它） */
+  await diagP.goto(BASE + '/?diag=1&debug=1', { waitUntil: 'load' });
+  await diagP.waitForFunction(() => window.__ds && window.__ds.state.layout, null, { timeout: 15000 });
+  await diagP.waitForTimeout(1400);
+  const diag = await diagP.evaluate(() => {
+    const el = document.getElementById('diag');
+    const cs = getComputedStyle(el);
+    return {
+      hidden: el.hidden,
+      z: Number(cs.zIndex),
+      select: cs.userSelect || cs.webkitUserSelect || '',
+      text: el.textContent || '',
+    };
+  });
+  ok('?diag=1 时诊断面板出现（纯文本、在最上层、放开文本选择）',
+    !diag.hidden && diag.text.length > 120 && diag.z >= 80 && /text/.test(diag.select),
+    `hidden ${diag.hidden}｜z ${diag.z}｜select「${diag.select}」｜${diag.text.length} 字`);
+  ok('诊断面板含关键字段（形态 / 屏幕 / 安全区 / 舞台补正 / 海报与圆角 / 版面 / 字号 / 音频自证）',
+    ['形态', '屏幕', '安全区', '舞台', '海报', '版面', '字号', '音频'].every((k) => diag.text.includes(k)) &&
+    /voiceDiag/.test(diag.text) && /活动区/.test(diag.text) && /padTop=/.test(diag.text) && /圆角/.test(diag.text),
+    diag.text.split('\n').slice(0, 2).join(' ／ '));
+  /* 长按落在面板**下方**未被遮住的海报上：诊断模式下不该弹保存浮层（长按留给「全选 / 拷贝」） */
+  await diagP.mouse.move(200, 820);
+  await diagP.mouse.down();
+  await diagP.waitForTimeout(780);
+  await diagP.mouse.up();
+  await diagP.waitForTimeout(420);
+  const diagHold = await diagP.evaluate(() => ({
+    save: window.__ds.state.lastSave,
+    sheet: document.getElementById('saveSheet').hidden,
+  }));
+  ok('诊断模式下长按不弹保存浮层（把长按让给系统的「全选 / 拷贝」）',
+    diagHold.save === null && diagHold.sheet === true, JSON.stringify(diagHold));
+  await diagP.close();
+
+  /* 不带参数 / 导出页：都不该有诊断面板 */
+  const noDiag = await p.evaluate(() => {
+    const el = document.getElementById('diag');
+    return { hidden: el ? el.hidden : true, display: el ? getComputedStyle(el).display : 'none' };
+  });
+  ok('不带 ?diag=1 时诊断面板不存在（默认 hidden）',
+    noDiag.hidden === true && noDiag.display === 'none', JSON.stringify(noDiag));
+  const rawDiagP = await browser.newPage({ viewport: { width: 1080, height: 1920 }, deviceScaleFactor: 1 });
+  await rawDiagP.goto(BASE + '/?raw=1&diag=1', { waitUntil: 'load' });
+  await rawDiagP.waitForTimeout(1200);
+  const rawDiag = await rawDiagP.evaluate(() => getComputedStyle(document.getElementById('diag')).display);
+  ok('导出页（?raw=1&diag=1）里诊断面板仍不显示', rawDiag === 'none', rawDiag);
+  await rawDiagP.close();
 
   const t0 = await p.evaluate(() => window.__ds.state.lastToggleAt || 0);
   await tap(p, 'badge-date');

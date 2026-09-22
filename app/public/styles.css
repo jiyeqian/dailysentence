@@ -258,6 +258,33 @@ body.adaptive:not(.raw) #stage { padding: 0; }
 }
 #saveTip { margin: 0; font-size: 15px; line-height: 1.6; color: #dbe4f5; text-align: center; }
 
+/* ---------------- 真机诊断页（只在 ?diag=1 出现，2026-09-22） ----------------
+   手机上复现不了的问题（音频会话、装到主屏后的安全区、真机字形）最省钱的上报方式不是截图，
+   而是把关键数字读成**纯文本**：带上 ?diag=1 时这里显示一段只读文本，并**放开长按选择**
+   （手势层里同时让「长按保存」让路），于是手机长按就能「全选 / 拷贝」贴回来 —— 零截图。
+   纯文本、零按钮；不带参数时这个元素始终 hidden，平时完全不存在。
+   z-index 80 = 高于所有既有浮层（#editLayer 25 / #hint 30 / #wave 40 / #toast 60 / #saveSheet 70）。 */
+#diag {
+  position: fixed;
+  left: 0; right: 0; top: 0;
+  z-index: 80;
+  margin: 0;
+  max-height: 64vh;
+  overflow: auto;
+  padding: 12px 14px;
+  background: rgba(4, 8, 16, 0.93);
+  color: #cfe3ff;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  /* 关键（照 #saveImg 的先例）：把 #stage 上那条全局的 touch-callout:none / user-select:none
+     覆盖回来，否则 iOS 长按弹不出系统的「全选 / 拷贝」菜单 */
+  -webkit-touch-callout: default;
+  -webkit-user-select: text;
+  user-select: text;
+}
+#diag[hidden] { display: none; }
+
 /* ---------------- 只显示海报本身（导出 / 调试）：?raw=1 ---------------- */
 body.raw { position: static; overflow: auto; height: auto; background: #000; }
 body.raw #stage { position: static; padding: 0; display: block; }
@@ -275,4 +302,5 @@ body.raw .overlay,
 body.raw #saveSheet,
 body.raw #wave,
 body.raw #editLayer,
+body.raw #diag,
 body.raw .toast { display: none !important; }

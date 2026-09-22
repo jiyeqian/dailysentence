@@ -336,6 +336,8 @@ const QS = new URLSearchParams(location.search);
 const DEBUG = QS.get('debug') === '1';
 /* 画布尺寸开关：默认固定 1080×1920；`?fit=device` 才按设备分辨率出图（框架留着备用） */
 const FIT_DEVICE = QS.get('fit') === 'device';
+/* 真机诊断页：`?diag=1` 时叠一段可长按复制的纯文本（见 startDiag）。平时完全不存在 */
+const DIAG = QS.get('diag') === '1';
 
 const FROST_OK = (() => {
   try {
@@ -2833,7 +2835,9 @@ function bindGestures() {
       }
     }
     clearTimeout(holdTimer);
-    /* 长按 = 保存海报 */
+    /* 长按 = 保存海报。**诊断页例外**（?diag=1）：那时长按要留给系统的「全选 / 拷贝」，
+       否则手机上长按弹出的是保存浮层、反而挡掉选择菜单（见 startDiag 的说明） */
+    if (DIAG) return;
     holdTimer = setTimeout(() => {
       longFired = true;
       dropPendingTap();
@@ -3056,6 +3060,60 @@ function showHintOnce() {
   showHint(hintDefault || '长按保存 · 下拉更新 · 点英文句朗读 · 点日期看昨天');
 }
 
+/* =================== 真机诊断页（?diag=1，2026-09-22） ===================
+   手机上复现不了的问题（音频会话、装到主屏后的安全区、真机字形）最省钱的报法不是截图，
+   而是把关键数字读成**纯文本**：带上 ?diag=1 时页面顶部叠一段只读文本，并放开长按选择
+   （手势层里同时让「长按保存」让路），手机长按就能「全选 / 拷贝」贴回来 —— 零截图、零重打字。
+   纯文本、**零按钮**；不带参数时 #diag 始终 hidden，平时完全不存在；也绝不参与海报绘制。 */
+
+/** 诊断文本：全部读模块内的既有状态（不依赖 ?debug=1 的 __ds，真机上默认没有 debug） */
+function diagText() {
+  const L = state.layout || {};
+  const safe = readSafeArea();          /* 现测：旋转 / 独立形态切换后要跟着变 */
+  const rect = cvs.getBoundingClientRect();
+  const r1 = (v) => Math.round(v * 10) / 10;
+  const q = (v) => (v == null ? '-' : v);
+  const fx = L.fx || {};
+  const said = (x) => (x && x.on ? r1(x.size) : '-');
+  const dm = window.matchMedia ? window.matchMedia('(display-mode: standalone)').matches : false;
+  const d = state.voiceDiag;
+  return [
+    '每日一句 · 诊断（?diag=1）  长按本段 → 全选 → 拷贝，贴回来即可',
+    '形态      standalone=' + (isStandalone() ? 'Y' : 'N') + '   display-mode=' + (dm ? 'standalone' : 'browser'),
+    '屏幕      screen ' + screen.width + '×' + screen.height + '   inner ' + window.innerWidth + '×' + window.innerHeight +
+      '   dpr ' + r1(window.devicePixelRatio || 1) +
+      (window.visualViewport ? '   vv ' + r1(window.visualViewport.height) : ''),
+    '安全区    top ' + r1(safe.top) + '   bottom ' + r1(safe.bottom),
+    '舞台      standalone=' + (STAGE_INFO.standalone ? 'Y' : 'N') + '   padTop=' + STAGE_INFO.padTop +
+      '   screenH=' + STAGE_INFO.screenH + '   frameH=' + STAGE_INFO.frameH,
+    '海报      显示 ' + r1(rect.width) + '×' + r1(rect.height) + ' @(' + r1(rect.left) + ', ' + r1(rect.top) + ')' +
+      '   圆角 ' + r1(POSTER_RADIUS * (rect.width / CW)) + 'px   位图 ' + PHYS.w + '×' + cvs.height + '   U=' + r1(U),
+    '版面      base ' + q(L.base) + '   活动区 ' + (L.band ? r1(L.band.top) + '..' + r1(L.band.bottom) : '-') +
+      '   卡片 ' + (L.card ? [L.card.x, Math.round(L.card.y), L.card.w, Math.round(L.card.h)].join(',') : '-') +
+      '   顶图 ' + (L.imgBlock ? Math.round(L.imgBlock.h) : '-'),
+    '字号      2 日期 ' + said(L.date) + ' (fx ' + q(fx['badge-date']) + ')   3 en ' + said(L.en) +
+      ' (fx ' + q(fx.en) + ')   4 cn ' + said(L.cn) + '   5 source ' + said(L.source),
+    '音频      hasAudio=' + (hasAudio() ? 'Y' : 'N') + '   正在播放=' + (state.voice ? 'Y' : 'N') +
+      '   voiceDiag ' + (d.lastReason || '(还没收尾过)') + ' / errName=' + (d.errName || '-') +
+      ' / retries=' + d.retries + ' / 响了 ' + r1(d.playedMs / 1000) + 's / 时长 ' + r1(d.dur) + 's',
+    '状态      voice=' + q(state.voice ? state.voice.target : null) +
+      '   edit=' + q(state.edit ? state.edit.target : null) + '   hidden=' + JSON.stringify(state.hidden),
+    'UA        ' + String(navigator.userAgent || '').slice(0, 80),
+  ].join('\n');
+}
+
+/** 启动诊断循环（只在 ?diag=1 时调用）：500ms 刷新一次纯文本，只写 textContent，不碰 render */
+function startDiag() {
+  const el = $('diag');
+  if (!el) return;
+  el.hidden = false;
+  const tick = () => {
+    try { el.textContent = diagText(); } catch (e) { el.textContent = '诊断失败：' + (e && e.message); }
+  };
+  tick();
+  setInterval(tick, 500);
+}
+
 /** sticky 提示不会被「一操作就收起」收掉，只能显式 force 收起 */
 function hideHint(force) {
   const el = $('hint');
@@ -3208,6 +3266,8 @@ function setOverlay(show, text) {
   }
   /* 界面没有按钮，首次进入给一次手势提示 */
   showHintOnce();
+  /* 真机诊断页：只在 ?diag=1 时存在（纯文本、可长按复制，见 startDiag） */
+  if (DIAG) startDiag();
 
   /* 调试/回归用具：?debug=1 时把命中表、坐标换算与版面标注暴露出来 */
   if (DEBUG) {

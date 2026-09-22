@@ -391,6 +391,13 @@ node app/parse-check.js     # 上游各种历史结构 + 今日结构的解析�
 - `?word=&en=&cn=&source=` —— 覆盖文案（方便排版测试）
 - `?ph=ˈɪmpʌls`｜`?ph=英:ɪɡˈzæmpl|美:ɪɡˈzɑːmpl` —— 覆盖音标（方便测试单/双音标排版）
 - `?debug=1` —— 把命中表与坐标换算挂到 `window.__ds`，供交互回归脚本按区域 id 反查屏幕坐标点击
+- `?diag=1` —— **真机诊断页**（2026-09-22 加）：页面顶部叠一段纯文本关键数字（`#diag`），
+  内容取自模块状态（不依赖 `debug=1`）：形态（standalone / display-mode）、屏幕与安全区、
+  舞台补正（`STAGE_INFO`）、海报显示尺寸与 CSS 圆角、版面（base / 活动区 / 卡片 / 顶图）、
+  四个文字区字号与 `fx`、`hasAudio` 与 `voiceDiag` 全字段、`state` 摘要、UA。
+  该模式下**放开文本选择**并**让「长按保存」让路**，所以手机长按面板就是系统的「全选 / 拷贝」——
+  报 iOS 专属问题（音频会话 / 主屏形态安全区 / 真机字形）不用截图。铁律不变：纯文本、零按钮、
+  不常驻（不带参数时 `#diag` 始终 hidden）、绝不画进 canvas（`body.raw` 隐藏清单里有它）
 - `?fit=device` —— **画布自适应开关（默认关）**：开启后按设备分辨率出图（位图 = 屏幕比例、宽度不低于 1080）。
   默认关闭是因为真机实测「满屏自适应不够美观」（版面随屏幕差异大、iOS 启动瞬间视口高度会变导致跳一下）；
   框架完整保留，将来想在个别设备启用只需带这个参数
@@ -422,6 +429,28 @@ node app/inspect.js --diff before after
 
 完整使用说明（就位检查、示例图、报修改句式、排查表）见
 [`../docs/标注通道-使用手册.md`](../docs/标注通道-使用手册.md)。
+
+### measure.js（2026-09-22 加）：按「现象」量数字，**默认不出图**
+
+与 `inspect.js` 互补：inspect 给「编号 → 坐标」的清单（给人看图认编号），measure 给
+「当前实现是否符合预期」的体检报告（给双方读数字，可 `--json` 给 AI 读、可 `--checks` 给 PASS/FAIL）。
+
+```bash
+NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
+  node app/measure.js                       # 默认手机视口 390×844@2x 一次性体检
+  node app/measure.js --voice --checks      # 连波形一起量 + 逐条 PASS/FAIL（有 FAIL 退出码 1）
+  node app/measure.js --zoom badge-date=3   # 先把 2 区放到 3 倍再量（可重复，走 __ds.setZoom）
+  node app/measure.js --standalone          # 独立全屏形态桩（量 --stage-pt 补正）
+  node app/measure.js --viewport desktop    # 也可写 402x874 这类具体尺寸；--long / --fit / --raw 同 inspect
+  node app/measure.js --json                # 机器可读（配置 + 全部读数 + checks）
+  node app/measure.js --voice --crop 3      # 唯一会写文件的开关：出 3 区的局部放大图（--dpr 可调倍数）
+```
+
+报告分五节：① 画布与显示（含**海报圆角 = 32 设计值 × 显示比例**）② 三段几何与四个文字区
+（`box` / `font` / `fx` / `base`）③ 波形（面板 rect、**相对 3 区文字框的左右留白**、与中文句 /
+日期胶囊的间距、竖条数与覆盖率、有没有底板）④ 圆角自证（画布四角 alpha / 圆角内 / 边中点）
+⑤ 语音自证（`hasAudio`、`state.voice`、`voiceDiag` 全字段）。读数全部走 `__ds.inspect()` 与
+`__ds` 既有出口（只有波形面板与画布像素必须碰 DOM），与 `ui-check.js` 的断言同一套算法。
 
 产物在 `app/shots/`（已 gitignore）：
 
