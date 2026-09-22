@@ -169,6 +169,8 @@ function watchViewport() {
     t = setTimeout(() => {
       /* 旋转 / 独立形态启动时视口高度会变，居中补正跟着重算（幂等，只会写 CSS 变量） */
       syncStageCenter();
+      /* 播放中遇到旋转：波形层跟着 3 区重新贴合，别飘走 */
+      if (state.voice) layoutWave();
       if (computeCanvasSize()) scheduleRender();
     }, 300);
   };
@@ -211,7 +213,8 @@ const state = {
   lastSpeakAt: 0,       // 最近一次朗读的时间戳（回归断言用）
   lastToggleAt: 0,      // 最近一次「今日⇄昨日」切换的时间戳（回归断言用）
   lastSave: null,       // 最近一次保存：{ kind: 'sheet'|'share'|'download', name, at }
-
+  voice: null,          // 非 null = 正在朗读（独占层）：{ target: 'en', style: 'bars', startedAt }
+  lastVoiceStopAt: 0,   // 最近一次「波形停止」的时间戳（回归断言用）
   viewDate: '',         // 正在看哪一天（''=今天）；往日数据来自服务端存档
   archived: false,      // 这份数据是从存档来的（不是上游实时）
   archiveOnly: false,   // 上游挂了，整份海报都是存档顶上的
@@ -1279,6 +1282,13 @@ function inspect() {
        padTop = 实际补进 #stage 的上内边距；screenH / frameH = 物理屏高与舞台框高。
        浏览器里 padTop 恒为 0 —— 那正是「没做无条件偏移」的自证。 */
     stage: Object.assign({}, STAGE_INFO),
+    /* 语音独占层：null = 没在朗读（其余区域都能操作）；非 null 时**只有波形区可点** */
+    voice: state.voice ? {
+      active: true,
+      target: state.voice.target,
+      style: state.voice.style,
+      since: state.voice.startedAt,
+    } : null,
   };
 }
 
@@ -1907,6 +1917,7 @@ async function toggleDay() {
  */
 async function resetToInitial(refetch) {
   closeSaveSheet();                         /* 保存浮层不算「初始状态」，一并收起 */
+  stopVoice('reset');                       /* 播放态也一样：停播 + 收波形 */
   state.edit = null;                        /* 调整模式也不是「初始状态」 */
   state.fits = { img: { scale: 1, ox: 0, oy: 0 }, card: { scale: 1, ox: 0, oy: 0 } };
   state.hidden = { date: false, en: false, cn: false, source: false };
@@ -1952,6 +1963,157 @@ function bindInputs() {
   bindGestures();
 }
 
+/* ===================== 语音独占层（波形即停止按钮，2026-09-22） =====================
+   点 3 区（英文句 en）朗读后，在 3 区「升起」一块半透明波形动画 —— 播放期间**只有它可点**，
+   点它就停、波形消失、交互恢复。中英文句子透过波形仍要能读出来，所以：
+     ① 底子只用 34% 深色、绝不 backdrop-filter（一模糊就把字糊掉了，见 styles.css）；
+     ② 竖条细、间距大、振幅收在 45%–85%（约 20% 横向覆盖率），不横穿字形。
+   波形层是 DOM 浮层，**绝不画进 canvas** —— 否则长按另存的 1080×1920 成品会被污染。 */
+
+let activeAudio = null;      // 当前播放的音频元素（旧实现不留引用 → 根本停不下来）
+let voiceTimer = null;       // 兜底计时器：音频事件没来也不会卡在独占态
+let voiceOnEnd = null;       // 挂在音频上的结束 / 出错回调（停止时摘掉，避免复用元素时串场）
+let waveHideTimer = null;    // 退场淡出后再真正 hidden
+
+const WAVE_PAD_X = 16;       // 波形框相对 3 区的外扩（设计值）：给圆角留余量
+const WAVE_PAD_Y = 12;
+const WAVE_BAR_W = 9;        // 竖条宽（设计值）
+const WAVE_BAR_GAP = 36;     // 竖条间距（设计值）→ 横向覆盖率约 20%，不遮笔画
+
+/**
+ * 波形层要盖的画布框（设计坐标）。3 区被删掉 / 还没渲染时返回 null（那就不显示波形）。
+ *
+ * 外扩量**自适应**：左右各 16 设计值的呼吸余量；上下默认 12，但再各受「邻居留给我的
+ * 空间」约束（最多只吃 40%）—— 英文句与中文句 / 日期胶囊的间距随当天内容变化，
+ * 固定外扩在某些天会顶到它们，而「波形只盖 3 区」是硬要求（回归里钉着）。
+ */
+function voiceBox() {
+  const regions = state.regions || [];
+  const en = regions.find((it) => it.id === 'en');
+  if (!en) return null;
+  const cn = regions.find((it) => it.id === 'cn');
+  const date = regions.find((it) => it.id === 'badge-date');
+  const roomBelow = cn ? Math.max(0, cn.y - (en.y + en.h)) : WAVE_PAD_Y * 4;
+  const roomAbove = date ? Math.max(0, en.y - (date.y + date.h)) : WAVE_PAD_Y * 4;
+  const padTop = Math.min(WAVE_PAD_Y, roomAbove * 0.4);
+  const padBottom = Math.min(WAVE_PAD_Y, roomBelow * 0.4);
+  return {
+    x: en.x - WAVE_PAD_X,
+    y: en.y - padTop,
+    w: en.w + WAVE_PAD_X * 2,
+    h: en.h + padTop + padBottom,
+  };
+}
+
+/**
+ * 建竖条：数量按 3 区宽度定，高低 / 周期 / 相位用**确定性函数**算
+ * —— 每次播放长得一样，截图与回归可复现，也不用 Math.random。
+ */
+function buildWaveBars(box) {
+  const host = $('waveBars');
+  if (!host || host.childElementCount) return;
+  const n = Math.max(8, Math.round(box.w / (WAVE_BAR_W + WAVE_BAR_GAP)));
+  for (let i = 0; i < n; i++) {
+    const bar = document.createElement('i');
+    /* 两条不同频率的正弦叠加 → 高低错落但不重复；振幅压在 0.45–0.85（用户要求「不可太突兀」） */
+    const k = (Math.sin(i * 1.7) + 0.7 * Math.sin(i * 0.63 + 1.1)) / 1.7;     /* -1 … 1 */
+    const h1 = Math.min(0.85, Math.max(0.45, 0.62 + 0.22 * k));
+    const h0 = 0.10 + 0.12 * (0.5 + 0.5 * Math.sin(i * 2.3 + 0.4));
+    bar.style.setProperty('--h1', h1.toFixed(3));
+    bar.style.setProperty('--h0', h0.toFixed(3));
+    bar.style.setProperty('--t', (900 + Math.round(520 * (0.5 + 0.5 * Math.sin(i * 1.13)))) + 'ms');
+    bar.style.setProperty('--d', Math.round(680 * (0.5 + 0.5 * Math.sin(i * 0.87 + 2))) + 'ms');
+    host.appendChild(bar);
+  }
+}
+
+/** 把波形层钉到 3 区上（画布框 → 屏幕坐标）；显示时与视口变化后各调一次，稳态零开销 */
+function layoutWave() {
+  const el = $('wave');
+  const box = voiceBox();
+  if (!el || !box) return;
+  const rect = cvs.getBoundingClientRect();
+  const s = rect.width / CW;
+  el.style.left = Math.round(rect.left + box.x * s) + 'px';
+  el.style.top = Math.round(rect.top + box.y * s) + 'px';
+  el.style.width = Math.round(box.w * s) + 'px';
+  el.style.height = Math.round(box.h * s) + 'px';
+  /* 条宽与间距也跟着显示比例缩放，换屏幕 / 换方向都不会变形 */
+  el.style.setProperty('--wave-w', Math.max(2, WAVE_BAR_W * s).toFixed(2) + 'px');
+  el.style.setProperty('--wave-gap', Math.max(6, WAVE_BAR_GAP * s).toFixed(2) + 'px');
+  buildWaveBars(box);
+}
+
+/** 屏幕坐标是否落在波形框内（用面板自身的 rect，与看到的完全一致） */
+function inWave(clientX, clientY) {
+  const el = $('wave');
+  if (!el || el.hidden) return false;
+  const r = el.getBoundingClientRect();
+  return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
+}
+
+function showWave() {
+  const el = $('wave');
+  if (!el) return;
+  clearTimeout(waveHideTimer);
+  layoutWave();
+  el.hidden = false;
+  /* 下一帧再加 .show：否则首帧就带着终态，看不到「由下升起」那一下 */
+  requestAnimationFrame(() => el.classList.add('show'));
+}
+
+/** 收起波形：先淡出（CSS transition），淡完再 hidden，避免占位与误判命中 */
+function hideWave() {
+  const el = $('wave');
+  if (!el || el.hidden) return;
+  el.classList.remove('show');
+  clearTimeout(waveHideTimer);
+  waveHideTimer = setTimeout(() => { el.hidden = true; }, 260);
+}
+
+/**
+ * 开始独占：建立播放态、升起波形、挂结束 / 出错回调 + 兜底计时器。
+ * audio 可省略（回归与截图可以用桩驱动，此时只显示面板）。
+ */
+function playVoice(audio) {
+  const box = voiceBox();
+  if (!box) return;                          /* 3 区不在了，没有可盖的地方 */
+  state.voice = { target: 'en', style: 'bars', startedAt: Date.now() };
+  showWave();
+  clearTimeout(voiceTimer);
+  if (audio) {
+    voiceOnEnd = (ev) => stopVoice(ev && ev.type === 'error' ? 'error' : 'ended');
+    audio.addEventListener('ended', voiceOnEnd);
+    audio.addEventListener('error', voiceOnEnd);
+  }
+  /* 兜底：音频事件没来（加载失败 / 被系统吞掉）也不会把人困在独占态 */
+  const dur = audio && isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+  voiceTimer = setTimeout(() => stopVoice('timeout'), Math.min(20000, (dur ? dur * 1000 : 6000) + 800));
+}
+
+/**
+ * 停止播放并收掉波形 —— 唯一出口（点波形 / 播完 / 出错 / 兜底超时 / 复位都走这里）。
+ * reason 只用于回归与自查，不参与任何逻辑。
+ */
+function stopVoice(reason) {
+  clearTimeout(voiceTimer);
+  voiceTimer = null;
+  if (activeAudio) {
+    if (voiceOnEnd) {
+      try {
+        activeAudio.removeEventListener('ended', voiceOnEnd);
+        activeAudio.removeEventListener('error', voiceOnEnd);
+      } catch (e) { /* 老元素已释放，忽略 */ }
+      voiceOnEnd = null;
+    }
+    try { activeAudio.pause(); activeAudio.currentTime = 0; } catch (e) { /* 同上 */ }
+  }
+  if (!state.voice) { hideWave(); return; }   /* 幂等：没在独占时被调用也无害 */
+  state.voice = null;
+  state.lastVoiceStopAt = Date.now();
+  hideWave();
+}
+
 /** 朗读今日句子；audio 传进来时复用它（iOS 必须在手势调用栈里先解锁） */
 function speak(audio) {
   const url = state.apiData && state.apiData.audio && state.apiData.audio.normal;
@@ -1959,11 +2121,18 @@ function speak(audio) {
     toast('没有可用发音');
     return null;
   }
+  stopVoice('restart');                                     /* 上一次没停就先停，绝不叠加播放 */
   const a = audio && audio.src ? audio : new Audio(url);
+  activeAudio = a;
   state.lastSpeakAt = Date.now();
   try { a.currentTime = 0; } catch (e) { /* 还没 ready 时忽略 */ }
   const p = a.play();
-  if (p && p.catch) p.catch(() => toast('发音播放失败'));
+  if (p && p.then) {
+    /* 播起来了才升起波形：播不出声还摆个波形在那儿，等于骗人 */
+    p.then(() => playVoice(a)).catch(() => toast('发音播放失败'));
+  } else {
+    playVoice(a);                                           /* 老浏览器 play() 不返回 Promise */
+  }
   return a;
 }
 
@@ -2122,10 +2291,10 @@ function bindGestures() {
     pendingTap = null;
   };
 
-  /** 单击真正落地：句子朗读、日期切今天/昨天 */
+  /** 单击真正落地：日期切今天/昨天、3 区（英文句）朗读 —— 其余元素单击无动作 */
   const runSingleTap = (id, audio) => {
     if (id === 'badge-date') toggleDay();
-    else speak(audio);
+    else if (id === 'en') speak(audio);
   };
 
   /**
@@ -2206,6 +2375,13 @@ function bindGestures() {
     if (e.button && e.button !== 0) return;
     hideHint();                /* 一有操作就收起手势提示 */
 
+    /* 播放态独占：除波形区外全部让路 —— 不建 pullDrag / zoomDrag，也不起长按计时器
+       （所以播放中按住不放不会保存）。只记下起点，真正的判定放在 pointerup。 */
+    if (state.voice) {
+      start = { x: e.clientX, y: e.clientY, t: Date.now() };
+      return;
+    }
+
     /* 调整模式：只认指针手势，其它一律让路
        —— 不建 pullDrag / zoomDrag，也不起长按（否则调图时会误保存） */
     if (state.edit) {
@@ -2243,6 +2419,9 @@ function bindGestures() {
   });
 
   stage.addEventListener('pointermove', (e) => {
+    /* 播放态独占：不缩放、不下拉、不判定长按 —— 一切等 pointerup 看在不在波形区 */
+    if (state.voice) return;
+
     /* 调整模式：双指 = 缩放（中点位移同时当平移，跟手感更好），单指 = 拖动 */
     if (state.edit) {
       const rec = ptrs.get(e.pointerId);
@@ -2301,6 +2480,17 @@ function bindGestures() {
   });
 
   stage.addEventListener('pointerup', (e) => {
+    /* 播放态独占：只有「按在波形区内、且没拖动」的那一下才停；
+       按在别处、或按下后拖走了，都当作没发生（其余区域一律不可操作） */
+    if (state.voice) {
+      const s = start;
+      const inside = s ? inWave(s.x, s.y) : false;      /* 判定按下点 */
+      const moved = s ? Math.hypot(e.clientX - s.x, e.clientY - s.y) > PRESS.moved : true;
+      clear();
+      if (inside && !moved) stopVoice('tap');
+      return;
+    }
+
     /* 调整模式：没拖过这一下、且落点在被调区域之外 → 「点别处完成」 */
     if (state.edit) {
       const rec = ptrs.get(e.pointerId);
@@ -2362,8 +2552,9 @@ function bindGestures() {
     /* 句子 / 日期：单击有动作、双击是删除 → 进槽等 300ms 确认 */
     if (state.opts.longPoster) return;              /* 长版本轮交互不动 */
     if (!SINGLE_TAP_REGIONS.has(hit.id)) return;
-    /* iOS 只认手势调用栈里的播放：先静音播一下解锁，300ms 后再正式播 */
-    tapAt(hit.id, hit.id === 'badge-date' ? null : primeAudio());
+    /* iOS 只认手势调用栈里的播放：先静音播一下解锁，300ms 后再正式播。
+       只有 3 区（en）朗读 —— 中文句 / 出处的单击保留 300ms 判定只为双击删除，不发音 */
+    tapAt(hit.id, hit.id === 'en' ? primeAudio() : null);
   });
 
   stage.addEventListener('pointercancel', () => {
@@ -2434,7 +2625,7 @@ function showHint(text, sticky) {
 function showHintOnce() {
   const el = $('hint');
   if (el && !hintDefault) hintDefault = el.textContent;
-  showHint(hintDefault || '长按保存 · 下拉更新 · 点句子朗读 · 点日期看昨天');
+  showHint(hintDefault || '长按保存 · 下拉更新 · 点英文句朗读 · 点日期看昨天');
 }
 
 /** sticky 提示不会被「一操作就收起」收掉，只能显式 force 收起 */
@@ -2596,6 +2787,7 @@ function setOverlay(show, text) {
       state, hitTest, toClient, hitTestAt, hideElement,
       inspect,            // 版面清单：inspect.js 靠它导出 JSON 与标注图
       syncStageCenter,    // 独立形态的居中补正：回归可用桩注入 standalone/screen.height 后手动驱动
+      playVoice, stopVoice, layoutWave,   // 语音独占层：回归可直接驱动（playVoice 不传参只显示波形）
       /* 排版中间量：排查「自适应倍率算错」时可以直接在页面里量 */
       textTotalAt: (k) => buildTextBlockStandard(cvs.getContext('2d'), k).total,
       solveAutoScale: (bandH) => solveAutoScale(cvs.getContext('2d'), bandH),

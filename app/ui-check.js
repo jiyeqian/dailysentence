@@ -10,6 +10,9 @@
      8) 下拉更新 → 回到初始状态（隐藏清空 / 缩放归位 / 相册图复原）
      9) 摆位：浏览器里不做竖直补正（--stage-pt 恒 0）；独立全屏桩下按「物理屏 − 布局框」
         补正并把海报中心对准物理屏中线（真机 bug：独立形态下整体偏上半个状态栏）
+    10) 语音独占层：点 3 区（英文句）朗读后升起半透明波形（只盖 3 区、不碰中文句 / 日期胶囊、
+        不模糊背景）；播放中其余手势全部失效；点波形即停并恢复；播完自动收起；
+        中文句 / 出处单击不再发音但双击仍能删除；?raw=1 里没有波形层
 
    跑法：先 node server.js（8787），再
      NODE_PATH=<node workspace>/node_modules node app/ui-check.js  */
@@ -33,6 +36,34 @@ const OUT = path.join(__dirname, 'shots');
 const BASE = 'http://127.0.0.1:8787';
 const TEMPLATE = path.join(__dirname, 'public/assets/template.jpg');   /* 1179×2098 竖图 */
 
+/**
+ * 可控的 Audio 桩（每个页面导航前注入）。
+ * 语音独占层的出现依赖「真的播起来了」，而测试环境里 mp3 能否加载、能否自动播放都不确定，
+ * 直接断言必然 flaky。桩只记录 play / pause、并允许手动派发 ended：
+ * 既确定，又能顺手断言「点波形停止时确实调了 pause()」。
+ * duration 故意给大值 —— 兜底计时器是 duration + 800ms，太小会在断言途中自动收起。
+ */
+const AUDIO_STUB = () => {
+  const made = [];
+  class StubAudio extends EventTarget {
+    constructor(src) {
+      super();
+      this.src = src || '';
+      this.paused = true;
+      this.volume = 1;
+      this.currentTime = 0;
+      this.duration = 30;
+      this.plays = 0;
+      this.pauses = 0;
+      made.push(this);
+    }
+    play() { this.paused = false; this.plays++; return Promise.resolve(); }
+    pause() { this.paused = true; this.pauses++; }
+  }
+  window.Audio = StubAudio;
+  window.__audioStub = { made, last: () => made[made.length - 1] || null, count: () => made.length };
+};
+
 let fails = 0;
 function ok(label, cond, extra) {
   console.log((cond ? '  ✓ ' : '  ✗ ') + label + (extra ? '   ' + extra : ''));
@@ -46,6 +77,7 @@ function ok(label, cond, extra) {
   async function open(url, viewport = { width: 390, height: 844 }) {
     /* hasTouch：调整模式的「双指捏合」只能靠触摸事件模拟 */
     const p = await browser.newPage({ viewport, deviceScaleFactor: 2, hasTouch: true });
+    await p.addInitScript(AUDIO_STUB);        /* 语音不能依赖真实播放，见 AUDIO_STUB 注释 */
     p.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
     p.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
     await p.goto(url, { waitUntil: 'load' });
@@ -116,6 +148,16 @@ function ok(label, cond, extra) {
     const pt = await pointOf(p, 'cn');
     await p.mouse.click(pt.x, pt.y);
     await p.waitForTimeout(420);
+  }
+
+  /** 点波形层中心 —— 它本身就是播放期间的停止按钮 */
+  async function tapWave(p) {
+    const pt = await p.evaluate(() => {
+      const r = document.getElementById('wave').getBoundingClientRect();
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    });
+    await p.mouse.click(pt.x, pt.y);
+    await p.waitForTimeout(480);
   }
 
   /**
@@ -361,6 +403,128 @@ function ok(label, cond, extra) {
   d = await info(p);
   ok('单击句子会朗读', speakAt(d) > s0, `lastSpeakAt ${s0} → ${speakAt(d)}`);
   ok('单击不会把句子删掉', ids(d).includes('en'));
+
+  /* ---------------- 语音独占层：波形即停止按钮 ---------------- */
+  console.log('标准版 · 语音独占层');
+  const snap = () => p.evaluate(() => JSON.stringify({
+    hidden: window.__ds.state.hidden,
+    zoom: window.__ds.state.zoom,
+    viewDate: window.__ds.state.viewDate,
+    save: window.__ds.state.lastSave,
+  }));
+  const waveGeom = () => p.evaluate(() => {
+    const w = document.getElementById('wave');
+    const r = w.getBoundingClientRect();
+    const cs = getComputedStyle(w);
+    const bar = w.querySelector('i');
+    const bars = w.querySelectorAll('i');
+    const bw = bar ? parseFloat(getComputedStyle(bar).width) : 0;
+    const reg = (id) => {
+      const it = (window.__ds.state.regions || []).find((x) => x.id === id);
+      return it ? window.__ds.toClient(it.x, it.y) : null;
+    };
+    const en = reg('en');
+    const cn = reg('cn');
+    const date = window.__ds.state.regions.find((x) => x.id === 'badge-date');
+    return {
+      hidden: w.hidden,
+      show: w.classList.contains('show'),
+      rect: { x: r.x, y: r.y, w: r.width, h: r.height },
+      enY: en ? en.y : null,
+      cnY: cn ? cn.y : null,
+      dateBottom: date ? window.__ds.toClient(date.x, date.y + date.h).y : null,
+      alpha: parseFloat((cs.backgroundColor.match(/[\d.]+(?=,?\s*\)$)/) || ['0'])[0]),
+      blur: cs.backdropFilter || 'none',
+      bars: bars.length,
+      cover: r.width ? (bw * bars.length) / r.width : 0,
+    };
+  });
+
+  const wg = await waveGeom();
+  const voiceNow = (await info(p)).voice;
+  ok('朗读后 3 区升起波形层', !wg.hidden && wg.show && !!voiceNow && voiceNow.target === 'en',
+    JSON.stringify(voiceNow));
+  ok('波形层只盖 3 区（不碰中文句、也不顶到日期胶囊）',
+    wg.enY > wg.rect.y && wg.cnY > wg.rect.y + wg.rect.h &&
+    (wg.dateBottom === null || wg.rect.y > wg.dateBottom),
+    `面板 ${Math.round(wg.rect.y)}–${Math.round(wg.rect.y + wg.rect.h)}｜日期底 ${Math.round(wg.dateBottom)}｜3 区顶 ${Math.round(wg.enY)}｜中文句顶 ${Math.round(wg.cnY)}`);
+  ok('波形层半透明、不模糊背景、竖条不横穿字形（透过它仍能读英文句）',
+    wg.alpha > 0.15 && wg.alpha <= 0.5 && wg.blur === 'none' && wg.cover < 0.35,
+    `底 alpha ${wg.alpha}｜backdrop-filter ${wg.blur}｜竖条横向覆盖 ${(wg.cover * 100).toFixed(0)}%`);
+  ok('波形层用细竖条（等宽律动，非整片色块）', wg.bars >= 8, `${wg.bars} 根`);
+  await shot(p, 's12-voice-playing');
+
+  /* 独占：播放期间除波形区外，一切手势都失效 */
+  const before = await snap();
+  const fcIdle = p.waitForEvent('filechooser', { timeout: 1200 }).catch(() => null);
+  await tap(p, 'card');                           /* 点信息卡：不该弹相册 */
+  ok('播放中点信息卡不弹相册', !(await fcIdle));
+  await tap(p, 'badge-date', 0, true);            /* 双击日期：不该删除 */
+  await dragY(p, 'en', -140);                     /* 拖句子：不该缩放字号（且拖走了不算点波形） */
+  await pullY(p, 'img', 150);                     /* 下拉：不该更新 */
+  const holdPt = await pointOf(p, 'img');         /* 长按：不该保存 */
+  await p.mouse.move(holdPt.x, holdPt.y);
+  await p.mouse.down();
+  await p.waitForTimeout(760);
+  await p.mouse.up();
+  await p.waitForTimeout(400);
+  ok('播放中其余四种手势全部失效（双击删除 / 缩放 / 下拉 / 长按保存）',
+    (await snap()) === before, '状态与播放前完全一致');
+  ok('播放中波形层仍在（没被上一步的拖动误停）',
+    await p.evaluate(() => !document.getElementById('wave').hidden && !!window.__ds.inspect().voice));
+
+  /* 点波形 = 停止：波形消失、独占解除、真的 pause 了 */
+  const pauses0 = await p.evaluate(() => (window.__audioStub.last() || {}).pauses || 0);
+  await tapWave(p);
+  const stopped = await p.evaluate(() => ({
+    voice: window.__ds.inspect().voice,
+    stopAt: window.__ds.state.lastVoiceStopAt,
+    pauses: (window.__audioStub.last() || {}).pauses || 0,
+  }));
+  ok('点波形即停止播放（确实调了 pause）', stopped.pauses > pauses0 && stopped.stopAt > 0,
+    `pauses ${pauses0} → ${stopped.pauses}`);
+  ok('停止后波形消失、独占解除',
+    stopped.voice === null && await p.evaluate(() => document.getElementById('wave').hidden));
+  await shot(p, 's13-voice-stopped');
+
+  /* 独占解除后立刻可用：点日期又能切今日 / 昨日（下面就是原有断言） */
+  /* ---------------- 只点 3 区才播放：中文句 / 出处的单击不再发音 ---------------- */
+  const sCn = speakAt(await info(p));
+  await tap(p, 'cn');
+  await p.waitForTimeout(600);
+  ok('单击中文句不再朗读', speakAt(await info(p)) === sCn);
+  await tap(p, 'source');
+  await p.waitForTimeout(600);
+  ok('单击出处不再朗读', speakAt(await info(p)) === sCn);
+
+  /* 自然播完也自动收起：不把人困在独占态 */
+  await tap(p, 'en');
+  await p.waitForTimeout(600);
+  ok('（准备）再次进入独占', !!(await info(p)).voice);
+  await p.evaluate(() => { const a = window.__audioStub.last(); if (a) a.dispatchEvent(new Event('ended')); });
+  await p.waitForTimeout(520);
+  ok('音频播完波形自动收起、独占解除',
+    (await info(p)).voice === null &&
+    await p.evaluate(() => document.getElementById('wave').hidden === true || !document.getElementById('wave').classList.contains('show')));
+
+  /* 双击删除仍保留（单击语义收窄不影响它）—— 删完立刻刷新，免得影响后面几节 */
+  await tap(p, 'cn', 0, true);
+  ok('中文句双击仍能删除', !ids(await info(p)).includes('cn'));
+  await p.reload({ waitUntil: 'load' });
+  await p.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  d = await info(p);
+
+  /* 导出页（?raw=1）里永远没有波形层 */
+  const rawP = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
+  await rawP.addInitScript(AUDIO_STUB);
+  await rawP.goto(BASE + '/?raw=1&debug=1', { waitUntil: 'load' });
+  await rawP.waitForFunction(() => window.__ds && window.__ds.state.layout, null, { timeout: 15000 });
+  const rawWave = await rawP.evaluate(() => {
+    window.__ds.playVoice();
+    return { display: getComputedStyle(document.getElementById('wave')).display };
+  });
+  ok('导出页（?raw=1）里波形层不显示', rawWave.display === 'none', JSON.stringify(rawWave));
+  await rawP.close();
 
   const t0 = await p.evaluate(() => window.__ds.state.lastToggleAt || 0);
   await tap(p, 'badge-date');

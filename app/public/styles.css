@@ -112,6 +112,56 @@ body.adaptive:not(.raw) #stage { padding: 0; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ---------------- 语音波形层（播放期独占，2026-09-22） ----------------
+   波形就是「停止按钮」：播放期间只有它可点，点它就停。位置由 JS 按 3 区（英文句 en）
+   的画布框换算成屏幕坐标写入，这里只管外观。
+   两条刻意的约束（用户明确要求「不可太突兀」「透过波形看得到 3 区的英文句子」）：
+     ① 底子只用 34% 深色，且**绝不用 backdrop-filter** —— 一模糊就会把底下的英文句糊掉；
+     ② 竖条要细、间距要大、振幅只到 45%–85%、整组只占 58% 高度 —— 不把字形横穿成一片。 */
+#wave {
+  position: fixed;
+  z-index: 40;                 /* 高于海报与 #hint(30)，低于 #toast(60) / #saveSheet(70) */
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 18px;
+  background: rgba(6, 10, 18, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+  opacity: 0;
+  transform: translateY(14px);  /* 入场：从下往上「升起」 */
+  transition: opacity 0.24s ease-out, transform 0.28s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+#wave.show { opacity: 1; transform: translateY(0); }
+/* 竖条尺寸与间距由 JS 按显示比例写 --wave-w / --wave-gap，保证随海报等比缩放 */
+.wave-bars {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--wave-gap, 12px);
+  width: 100%;
+  height: 58%;
+}
+.wave-bars i {
+  display: block;
+  width: var(--wave-w, 3px);
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(34, 211, 238, 0.62), rgba(79, 141, 253, 0.40));
+  transform: scaleY(0.3);
+  animation: waveBars var(--t, 1100ms) ease-in-out infinite alternate;
+  animation-delay: var(--d, 0ms);
+}
+@keyframes waveBars {
+  from { transform: scaleY(var(--h0, 0.18)); }
+  to { transform: scaleY(var(--h1, 0.7)); }
+}
+/* 减少动态偏好：面板与波形都在，只停掉循环动画（静态高低错落仍看得出是波形） */
+@media (prefers-reduced-motion: reduce) {
+  .wave-bars i { animation: none; transform: scaleY(var(--h1, 0.7)); }
+  #wave { transform: none; transition: opacity 0.2s; }
+}
+
 /* ---------------- 一次性手势提示（非常驻：3 秒后 / 任意操作即消失） ---------------- */
 .hint {
   position: fixed;
@@ -196,4 +246,5 @@ body.raw #poster {
 body.raw .hint,
 body.raw .overlay,
 body.raw #saveSheet,
+body.raw #wave,
 body.raw .toast { display: none !important; }

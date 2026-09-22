@@ -23,6 +23,12 @@
     <canvas id="poster" width="1080" height="1920"></canvas>
     <div id="overlay" class="overlay"><div class="spinner"></div><span id="overlayText">加载中…</span></div>
   </div>
+
+  <!-- 语音波形层（播放期独占，2026-09-22）：位置由 JS 按 3 区（英文句 en）的画布框
+       换算成屏幕坐标写入。这里 pointer-events:none —— 它不抢任何事件，点它时事件照旧
+       落到海报上，由手势层按几何判定「是否点在波形框内」。面板里不放任何文字 / 图标：
+       波形本身就是停止按钮。 -->
+  <div id="wave" hidden><div class="wave-bars" id="waveBars" aria-hidden="true"></div></div>
 </div>
 
 <!-- 相册选图入口：单击海报上的顶部图片 / 信息卡时由 JS 触发 -->
@@ -30,7 +36,7 @@
 <input id="fCardImage" type="file" accept="image/*" hidden>
 
 <!-- 首次进入的一次性手势提示（3 秒后 / 任意操作立即消失，不做记忆） -->
-<p id="hint" class="hint" hidden>长按保存 · 下拉更新 · 点句子朗读 · 点日期看昨天</p>
+<p id="hint" class="hint" hidden>长按保存 · 下拉更新 · 点英文句朗读 · 点日期看昨天</p>
 
 <!-- 保存浮层：iOS 专用通道。Safari 上 <a download> 只会落进「文件」里弹 Quick Look
      预览（存不进相册），而 navigator.share 在长按的定时器里已脱离手势调用栈会被拒。
