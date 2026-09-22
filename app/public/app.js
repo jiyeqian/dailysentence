@@ -186,20 +186,18 @@ const DATE_H = 52;            // 日期胶囊高度（基准值；随 2 区的�
 const GAP_DATE_BAND = 28;     // 日期胶囊 → 文字活动区
 const GAP_TEXT_CARD = 48;     // 文字活动区距信息卡顶（同时是底部最小留白）
 
-/* ---- 设计基准字号（2026-09-22 重定，**只用于标准版**）----
-   用户以「当天实际显示大小」为基准各调一号，把结果定为新的设计基准：
-     当天 en/cn = 61.3（= 42 × 当天自适应 1.46）、source = 42.3（= 29 × 1.46）、
-     日期 = 25（它本来就不参与自适应）
-     → en/cn = 61.3 × 0.9 ≈ 55.2、source = 42.3 × 0.9 ≈ 38.1、日期 = 25 × 1.1 = 27.5
+/* ---- 设计基准字号（2026-09-22 第二次重定，**只用于标准版**）----
+   四个区各给一个**定值**（不再由「当天实际显示大小」按比例推）：
+     en / cn（3/4 区）= 44、source（5 区）= 36、日期（2 区）= 28
    从此**进入应用就是这个字号**（不再自适应放大），用户靠上/下滑调整；
    只有「整块装不下活动区」时才整块等比缩小保底（见 computeLayout）。
    长版（?long=1）沿用旧的 42 / 29 / 25，不受影响。 */
-const SZ_EN = 55.2;           // 原 42
-const SZ_CN = 55.2;           // 原 42
-const SZ_SOURCE = 38.1;       // 原 29
-const SZ_DATE = 27.5;         // 原 25
-const ZOOM_MIN = 0.6;         // 每个文字区的交互缩放范围（相对新基准）
-const ZOOM_MAX = 1.6;
+const SZ_EN = 44;             // 3 区（英文句）设计基准
+const SZ_CN = 44;             // 4 区（中文句）设计基准
+const SZ_SOURCE = 36;         // 5 区（出处）设计基准
+const SZ_DATE = 28;           // 2 区（日期胶囊）设计基准
+const ZOOM_MIN = 0.6;         // 交互缩放范围（相对设计基准）：全体共用下限
+const ZOOM_MAX = 1.6;         // 3/4/5 区的放大上限；2 区另有更高的上限，见 ZOOM_MAX_BY
 const ZOOM_PER_PX = 0.001;    // 每像素缩放量：上滑 200px ≈ +20%
 const DEFAULT_BG = 'cover';   // 默认背景：铺满裁切
 const DBL_MS = 300;           // 双击判定窗口
@@ -276,6 +274,48 @@ const ZOOM_GROUP = {
   cn: ['en', 'cn', 'source'],
   source: ['en', 'cn', 'source'],
 };
+
+/* 放大上限**按区不同**（2026-09-22）：2 区（日期胶囊）用户反馈「倍率太低」，提到 3 倍；
+   3/4/5 区仍是 ZOOM_MAX。凡是钳制缩放 / 判「已到最大」的地方一律走 zoomMaxOf(id) ——
+   直接引 ZOOM_MAX 会把日期的上限误判成 1.6（放到 1.6 就提示「已到最大」）。 */
+const ZOOM_MAX_BY = { 'badge-date': 3 };
+
+/** 某区的放大上限（未特别指定的区走共用值） */
+function zoomMaxOf(id) {
+  return ZOOM_MAX_BY[id] || ZOOM_MAX;
+}
+
+let limitHit = '';            /* 已经提示过的缩放极限（'max' / 'min' / ''），避免刷屏 */
+
+/**
+ * 改某一区的缩放并重绘（到上下限只提示一次）。
+ * 3/4/5 属于同一联动组：拖其中任一，三个一起写同一个值；2 区自成一组。
+ * 上限按区取（zoomMaxOf）：2 区可以放到 3 倍，其余仍是 1.6。
+ *
+ * 放在模块作用域（原来在 bindGestures 里）是为了让 `__ds.setZoom` 复用它 —— 调试面
+ * 与手势必须走**同一条钳制路径**，否则「回归里量到的上限」跟真机手感不是一回事。
+ */
+function applyZoom(id, z) {
+  const max = zoomMaxOf(id);
+  const clamped = Math.max(ZOOM_MIN, Math.min(max, z));
+  const group = ZOOM_GROUP[id] || [id];
+  let changed = false;
+  for (const key of group) {
+    const cur = regionFx(key);
+    if (cur.scale !== clamped) {
+      cur.scale = clamped;
+      changed = true;
+    }
+  }
+  if (changed) scheduleRender();
+  const limit = clamped >= max ? 'max' : (clamped <= ZOOM_MIN ? 'min' : '');
+  if (limit && limit !== limitHit) {
+    limitHit = limit;
+    toast(limit === 'max' ? '字号已放到最大' : '字号已缩到最小');
+  } else if (!limit) {
+    limitHit = '';
+  }
+}
 
 const $ = (id) => document.getElementById(id);
 const cvs = $('poster');
@@ -658,17 +698,20 @@ function computeLayoutStandard(ctx) {
   const cardH = Math.min(CARD_H, CH * 0.28);
   const cardBottomPad = CARD_PAD + SAFE.bottom;   /* 底边还要让开 Home 指示条 */
 
-  /* 日期胶囊（2 区）：字号 / 字距 / 宽度随该区的交互缩放走；它不在活动区里，
+  /* 日期胶囊（2 区）：字号 / 字距 / 宽 / 高都随该区的交互缩放等比走；它不在活动区里，
      所以**不参与**下面的「保底缩小」。先算它，「固定占用」才准。
-     ⚠ 胶囊**高度恒为 DATE_H**：高度会改变活动区高度，进而让句子被保底缩放 ——
-     那会破坏「2 区独立」（放日期不该动句子），所以这里刻意不跟着字号长高。 */
+     ⚠ 高度会随缩放长大（2026-09-22 用户明确选定「胶囊整体变大、句子区跟着下移」）：
+     胶囊底部往下推 → chrome 变大 → 顶图被压、活动区下移且变矮，极端时句子被保底略缩。
+     这是刻意的取舍：胶囊放大后不会压到句子，代价是句子在更矮的区域里重新居中。
+     绘制侧不用另改：圆角、基线、左内边距、字距本来就是按 k 的比例式（见 drawPoster）。 */
   const dateScale = regionFx('badge-date').scale;
   const dateSize = SZ_DATE * dateScale;
-  let date = { on: false, x: CW - TEXT_X, y: 0, w: 0, h: DATE_H, size: dateSize, k: dateScale };
+  const dateH = DATE_H * dateScale;
+  let date = { on: false, x: CW - TEXT_X, y: 0, w: 0, h: dateH, size: dateSize, k: dateScale };
   if (!state.hidden.date && state.content.date) {
     ctx.font = T(dateSize, 600, F_SANS);
     const dw = measureSpaced(ctx, state.content.date, 2.5 * dateScale) + 56 * dateScale;
-    date = { on: true, x: CW - TEXT_X - dw, y: 0, w: dw, h: DATE_H, size: dateSize, k: dateScale };
+    date = { on: true, x: CW - TEXT_X - dw, y: 0, w: dw, h: dateH, size: dateSize, k: dateScale };
   }
 
   /* 除图片区以外、版面固定要占掉的高度（间距 + 日期行 + 卡片 + 底边距） */
@@ -2424,7 +2467,6 @@ function bindGestures() {
   let zoomDrag = null;       /* { id, startY, startZoom, active } —— id = 被拖的那个文字区 */
   let pullDrag = null;       /* { startY, armed } */
   let pendingTap = null;     /* { id, timer, audio } —— 单击要等双击确认，只留一个槽 */
-  let limitHit = '';         /* 已经提示过的缩放极限，避免刷屏 */
   const ptrs = new Map();    /* 调整模式下按下的指针：pointerId → 最新坐标 */
   let pinch = null;          /* { d0, mid0, fit0 } —— 双指捏合的基准 */
   let panLast = null;        /* 单指拖动的上一个位置 */
@@ -2469,30 +2511,7 @@ function bindGestures() {
     pendingTap = { id, timer, audio };
   };
 
-  /**
-   * 改某一区的缩放并重绘（到上下限只提示一次）。
-   * 3/4/5 属于同一联动组：拖其中任一，三个一起写同一个值；2 区自成一组。
-   */
-  const applyZoom = (id, z) => {
-    const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
-    const group = ZOOM_GROUP[id] || [id];
-    let changed = false;
-    for (const key of group) {
-      const cur = regionFx(key);
-      if (cur.scale !== clamped) {
-        cur.scale = clamped;
-        changed = true;
-      }
-    }
-    if (changed) scheduleRender();
-    const limit = clamped >= ZOOM_MAX ? 'max' : (clamped <= ZOOM_MIN ? 'min' : '');
-    if (limit && limit !== limitHit) {
-      limitHit = limit;
-      toast(limit === 'max' ? '字号已放到最大' : '字号已缩到最小');
-    } else if (!limit) {
-      limitHit = '';
-    }
-  };
+  /* 缩放写入走模块级的 applyZoom（唯一路径，调试面 __ds.setZoom 也复用它） */
 
   /** CSS 像素 → 画布像素：手指移动 1px 对应海报上移动多少 */
   const pxToCanvas = () => {
@@ -2956,6 +2975,10 @@ function setOverlay(show, text) {
       inspect,            // 版面清单：inspect.js 靠它导出 JSON 与标注图
       syncStageCenter,    // 独立形态的居中补正：回归可用桩注入 standalone/screen.height 后手动驱动
       playVoice, stopVoice, layoutWave,   // 语音独占层：回归可直接驱动（playVoice 不传参只显示波形）
+      /* 字号缩放的**同一条**钳制路径（不是旁路）：回归靠它把 2 区直接放到上限，
+         不必在几百像素高的测试视口里反复拖动去累积倍率 */
+      setZoom: applyZoom,
+      zoomMax: zoomMaxOf,  // 某区的放大上限（2 区 3 倍、其余 1.6），自证用
       scheduleRender,     // 换图调整层：回归合成纯色图后驱动一次重绘，做像素级判定
       /* 排版中间量：排查「自适应倍率算错」时可以直接在页面里量 */
       textTotalAt: (k) => buildTextBlockStandard(cvs.getContext('2d'), k).total,

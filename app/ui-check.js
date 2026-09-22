@@ -17,8 +17,10 @@
         （窗口内清晰、窗外是这张图压暗 62% 的其余部分、窗口是圆角矩形）；
         没有任何描边 / 虚线（源码里不再有 drawEditFrame）；点窗口 = 换同一张、点窗外 = 完成；
         退出后弹层收起、海报没有位移
-    12) 文字字号：进入即按固定设计基准显示（短句 base=1、字号正好 55.2/38.1/27.5，不再自适应放大）；
+    12) 文字字号：进入即按固定设计基准显示（短句 base=1、字号正好 44/44/36/28，不再自适应放大）；
         2/3/4/5 各区一份交互变换，滑句子区 3/4/5 联动、滑日期只改日期；超长句整块等比缩小保底
+    13) 缩放上限按区不同：2 区（日期）3 倍、3/4/5 区 1.6 倍；胶囊（含高度）随字号等比变大、
+        活动区随之下移（短句字号不受影响）；到上限提示「已放到最大」
 
    跑法：先 node server.js（8787），再
      NODE_PATH=<node workspace>/node_modules node app/ui-check.js  */
@@ -406,12 +408,18 @@ function ok(label, cond, extra) {
   ok('隐藏后信息卡位置不变（贴底）', JSON.stringify(box(d, 'card')) === JSON.stringify(cb));
   await shot(p, 's2-hide-date');
 
-  /* 删掉一个元素后，剩下的内容自动放大补满中部区域 */
+  /* 删掉一个元素后**不会**自动放大填满中部区域（2026-09-22 起不再自适应放大）：
+     base 已经是 1 时字号纹丝不动；只有当天句子本来就被保底缩小时，空出的高度才让 base 回升。
+     旧断言写的是「字号自动放大」—— 那是老口径，且只在当天恰好触发保底时才碰巧成立。 */
   const fontBefore = d.items.find((it) => it.id === 'en').font;
+  const baseBefore = d.text.base;
   await tap(p, 'source', 0, true);
   d = await info(p);
   const fontAfter = d.items.find((it) => it.id === 'en').font;
-  ok('删掉出处后字号自动放大', fontAfter > fontBefore, `${fontBefore} → ${fontAfter}`);
+  ok('删掉出处后不再「自动放大填满」：base 为 1 时字号不动，否则只可能回升（绝不变小）',
+    fontAfter >= fontBefore - 0.01 && (baseBefore < 1 || Math.abs(fontAfter - fontBefore) < 0.01) &&
+    fontAfter <= 44 + 0.6,
+    `${fontBefore} → ${fontAfter}｜base ${baseBefore} → ${d.text.base}`);
 
   for (const id of ['en', 'cn']) {
     await tap(p, id, 0, true);
@@ -433,13 +441,13 @@ function ok(label, cond, extra) {
   const fontOf = (x) => fontAt(x, 'en');
   const f0 = fontOf(d);
 
-  /* 设计基准字号（2026-09-22 由用户定）：en/cn 55.2、source 38.1、日期 27.5；
+  /* 设计基准字号（2026-09-22 第二次由用户定值）：en/cn 44、source 36、日期 28；
      实际字号 = 设计基准 × 保底 base × 该区交互值 —— 今天的长句会被保底缩小，比例仍精确 */
   ok('字号 = 设计基准 × 保底 base（四个区逐一核对）',
-    Math.abs(fontAt(d, 'en') - 55.2 * d.text.base) < 0.6 &&
-    Math.abs(fontAt(d, 'cn') - 55.2 * d.text.base) < 0.6 &&
-    Math.abs(fontAt(d, 'source') - 38.1 * d.text.base) < 0.6 &&
-    Math.abs(fontAt(d, 'badge-date') - 27.5 * d.text.fx['badge-date']) < 0.6,
+    Math.abs(fontAt(d, 'en') - 44 * d.text.base) < 0.6 &&
+    Math.abs(fontAt(d, 'cn') - 44 * d.text.base) < 0.6 &&
+    Math.abs(fontAt(d, 'source') - 36 * d.text.base) < 0.6 &&
+    Math.abs(fontAt(d, 'badge-date') - 28 * d.text.fx['badge-date']) < 0.6,
     `en ${fontAt(d, 'en')}｜cn ${fontAt(d, 'cn')}｜source ${fontAt(d, 'source')}｜日期 ${fontAt(d, 'badge-date')}｜base ${d.text.base}`);
   ok('每个文字区各有一份交互变换状态（架构：以后加移动就在同一对象里补 dx/dy）',
     ['badge-date', 'en', 'cn', 'source'].every((k) => d.text.fx[k] === 1),
@@ -447,10 +455,11 @@ function ok(label, cond, extra) {
 
   /* 短句：base 回到 1，字号正好等于设计基准（与线上当天的句子无关，确定可测） */
   const shortD = await withContent(p, { en: 'Hi.', cn: '你好。', source: '—— 测试' });
-  ok('短句时不再自动放大（base = 1、字号就是设计基准，日期大一号）',
-    shortD.text.base === 1 && Math.abs(fontAt(shortD, 'en') - 55.2) < 0.6 &&
-    Math.abs(fontAt(shortD, 'source') - 38.1) < 0.6 && Math.abs(fontAt(shortD, 'badge-date') - 27.5) < 0.6,
-    `base=${shortD.text.base}｜en ${fontAt(shortD, 'en')}｜source ${fontAt(shortD, 'source')}｜日期 ${fontAt(shortD, 'badge-date')}`);
+  ok('短句时不再自动放大（base = 1、字号就是设计基准 44 / 44 / 36 / 28）',
+    shortD.text.base === 1 && Math.abs(fontAt(shortD, 'en') - 44) < 0.6 &&
+    Math.abs(fontAt(shortD, 'cn') - 44) < 0.6 &&
+    Math.abs(fontAt(shortD, 'source') - 36) < 0.6 && Math.abs(fontAt(shortD, 'badge-date') - 28) < 0.6,
+    `base=${shortD.text.base}｜en ${fontAt(shortD, 'en')}｜cn ${fontAt(shortD, 'cn')}｜source ${fontAt(shortD, 'source')}｜日期 ${fontAt(shortD, 'badge-date')}`);
   await p.reload({ waitUntil: 'load' });
   await p.waitForFunction(() => window.__ds && window.__ds.state.layout);
   d = await info(p);
@@ -480,6 +489,68 @@ function ok(label, cond, extra) {
     fontAt(d, 'badge-date') > dateF1 && d.text.fx['badge-date'] > 1 &&
     fontAt(d, 'en') === senF.en && fontAt(d, 'cn') === senF.cn && fontAt(d, 'source') === senF.src,
     `日期 ${dateF1} → ${fontAt(d, 'badge-date')}｜en ${senF.en} → ${fontAt(d, 'en')}`);
+
+  /* ---------------- 缩放上限按区不同：2 区 3 倍、3/4/5 区 1.6 倍（2026-09-22） ----------------
+     下面用 `__ds.setZoom` 驱动：它调用的就是手势那条 applyZoom（同一条钳制路径），
+     只是省掉「在几百像素高的测试视口里反复拖动去累积倍率」——真手势一次最多 +0.2~0.3 倍。 */
+  await p.reload({ waitUntil: 'load' });
+  await p.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  const caps = await p.evaluate(() => ({
+    date: window.__ds.zoomMax('badge-date'), en: window.__ds.zoomMax('en'), source: window.__ds.zoomMax('source'),
+  }));
+  ok('缩放上限按区不同：2 区 3 倍、3/4/5 区 1.6 倍', caps.date === 3 && caps.en === 1.6 && caps.source === 1.6,
+    JSON.stringify(caps));
+
+  /* 换成短句，让保底倍率恒为 1 —— 这样「句子字号动没动」才是干净的信号 */
+  const short2 = await withContent(p, { en: 'Hi.', cn: '你好。', source: '—— 测试' });
+  const b0 = {
+    box: box(short2, 'badge-date'),
+    band: Object.assign({}, short2.text.band),
+    font: { en: fontAt(short2, 'en'), cn: fontAt(short2, 'cn'), src: fontAt(short2, 'source') },
+  };
+  await p.evaluate(() => window.__ds.setZoom('badge-date', 9));       /* 远超上限 → 应被截在 3 */
+  await p.waitForTimeout(460);
+  const d3 = await info(p);
+  const b3 = { box: box(d3, 'badge-date'), band: Object.assign({}, d3.text.band) };
+  ok('2 区放到超上限被截在 3 倍（且不牵动 3/4/5 区）',
+    d3.text.fx['badge-date'] === 3 && d3.text.fx.en === 1 && d3.text.fx.cn === 1 && d3.text.fx.source === 1,
+    `fx ${JSON.stringify(d3.text.fx)}`);
+  ok('2 区到上限时提示「已放到最大」',
+    await p.evaluate(() => document.getElementById('toast').textContent) === '字号已放到最大',
+    await p.evaluate(() => document.getElementById('toast').textContent));
+  ok('胶囊整体等比变大：宽与高都长了 3 倍（高度不再固定）',
+    Math.abs(b3.box[3] / b0.box[3] - 3) < 0.06 && Math.abs(b3.box[2] / b0.box[2] - 3) < 0.06,
+    `胶囊 [${b0.box.map(Math.round)}] → [${b3.box.map(Math.round)}]`);
+  ok('活动区随胶囊下移并变矮（句子在更矮的区域里重新居中）',
+    b3.band.top > b0.band.top + 20 && b3.band.h < b0.band.h - 20,
+    `活动区 ${JSON.stringify(b0.band)} → ${JSON.stringify(b3.band)}`);
+  ok('2 区放大时短句字号一点不动（base 仍为 1，只有位置重新居中）',
+    d3.text.base === 1 && fontAt(d3, 'en') === b0.font.en &&
+    fontAt(d3, 'cn') === b0.font.cn && fontAt(d3, 'source') === b0.font.src,
+    `base ${d3.text.base}｜en ${b0.font.en} → ${fontAt(d3, 'en')}`);
+  await shot(p, 's14-date-zoom-3x');
+
+  /* 极端：2 区 ×3 的同时塞长句 → 活动区被压到下限，句子被保底略微缩小（用户已确认接受） */
+  const extreme = await withContent(p, {
+    en: 'This is a fairly long sentence used to check the fallback shrink when the date badge is huge.'.repeat(2),
+    cn: '这是一句用来验证「日期放很大时句子被保底缩小」的较长中文句子。'.repeat(2),
+  });
+  ok('极端情况：2 区 ×3 + 长句 → 句子保底略缩、活动区变矮，但仍不越过信息卡',
+    extreme.text.base < 1 && extreme.text.band.h < b0.band.h - 20 &&
+    box(extreme, 'source')[1] + box(extreme, 'source')[3] <= box(extreme, 'card')[1],
+    `base ${extreme.text.base}｜活动区 h ${Math.round(extreme.text.band.h)}（默认 ${Math.round(b0.band.h)}）`);
+
+  /* 3/4/5 仍被 1.6 截住（同一时刻 2 区仍是 3 倍，证明两组互不干扰） */
+  await p.evaluate(() => window.__ds.setZoom('en', 9));
+  await p.waitForTimeout(460);
+  const enCap = await info(p);
+  ok('3/4/5 放到超上限被截在 1.6 倍（2 区不受影响）',
+    enCap.text.fx.en === 1.6 && enCap.text.fx.cn === 1.6 && enCap.text.fx.source === 1.6 &&
+    enCap.text.fx['badge-date'] === 3,
+    JSON.stringify(enCap.text.fx));
+  await p.reload({ waitUntil: 'load' });
+  await p.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  d = await info(p);
 
   /* 缩到最小也不能压到卡片 */
   await dragY(p, 'en', 900);
