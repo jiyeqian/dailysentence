@@ -1105,6 +1105,81 @@ function ok(label, cond, extra) {
   ok('退出 URL 预览后回到记忆的主题', d.theme.id === 'pine');
   await sp.close();
 
+  /* iOS 授权链路（2026-09-24 真机踩坑后补）：授权必须由**收尾手势**（pointerup）触发 ——
+     旧实现挂在 pointerdown 上，iOS 不认它是有效手势，requestPermission 直接 reject
+     且被静默吞掉，系统弹窗一次都不出现。桌面 Chromium 没有 requestPermission，
+     所以这里 stub 出静态方法（granted / denied 两种桩）驱动真路径。 */
+  console.log('标准版 · 摇一摇 iOS 授权');
+  const authOf = async (result) => {
+    const ap = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true });
+    await ap.addInitScript(AUDIO_STUB);
+    /* 无条件打桩：新版 Chromium 也实现了 requestPermission，条件判断会漏桩、
+       走到真 API（evaluate 里派发的事件不算手势 → 返回 denied）。
+       用字符串脚本（不依赖 addInitScript 的 arg 传参）；只换静态方法，
+       不动构造器 —— 摇一摇的合成事件还要用 new DeviceMotionEvent(...) */
+    await ap.addInitScript('window.__permResult = ' + JSON.stringify(result) + ';' +
+      'if (window.DeviceMotionEvent) {' +
+      '  window.DeviceMotionEvent.requestPermission = () => Promise.resolve(window.__permResult);' +
+      '}');
+    await ap.goto(BASE + '/?debug=1', { waitUntil: 'load' });
+    await ap.waitForFunction(() => window.__ds && window.__ds.state.layout);
+    const before = await info(ap);
+    await ap.evaluate(() => window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })));
+    await ap.waitForTimeout(420);
+    const after = await info(ap);
+    return { ap, before, after };
+  };
+
+  {
+    const { ap, before, after } = await authOf('granted');
+    ok('没点过海报时 shakeDiag 是初始空态（还没问过）',
+      before.shakeDiag.state === '' && before.shakeDiag.asked === false);
+    ok('授权（granted 桩）：pointerup 触发请求、shakeDiag.state = granted',
+      after.shakeDiag.asked === true && after.shakeDiag.state === 'granted',
+      JSON.stringify(after.shakeDiag));
+    await ap.close();
+  }
+  {
+    const { ap, after } = await authOf('denied');
+    ok('授权（denied 桩）：shakeDiag.state = denied 且 toast 提示（不再无声）',
+      after.shakeDiag.state === 'denied' &&
+      (await ap.evaluate(() => document.getElementById('toast').textContent)) === '摇一摇未获权限，将无法换配色',
+      JSON.stringify(after.shakeDiag));
+    /* 被拒后页面必须依然健壮：合成摇动不抛错、主题/记忆状态自洽
+      （真机被拒后传感器事件根本不到，这里验证的是「就算到了也不崩」） */
+    const t = await ap.evaluate(async () => {
+      const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+      const fire = (v) => window.dispatchEvent(new DeviceMotionEvent('devicemotion', {
+        accelerationIncludingGravity: { x: v, y: 0.2, z: 9.8 } }));
+      for (const v of [25, -25, 25, -25, 25, -25]) { fire(v); await sleep(60); }
+      await sleep(150);
+      return { theme: window.__ds.state.theme, saved: localStorage.getItem('ds:theme') };
+    });
+    ok('被拒后摇动事件不崩（页面状态自洽，无 console error）',
+      typeof t.theme === 'string' && (t.saved === null || typeof t.saved === 'string'), JSON.stringify(t));
+    await ap.close();
+  }
+  {
+    /* requestPermission 抛错（NotAllowedError 形态）也要落 shakeDiag，不能静默 */
+    const ap = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true });
+    await ap.addInitScript(AUDIO_STUB);
+    await ap.addInitScript(() => {
+      if (window.DeviceMotionEvent) {
+        window.DeviceMotionEvent.requestPermission = () => Promise.reject(
+          Object.assign(new Error('Requires a user gesture'), { name: 'NotAllowedError' }));
+      }
+    });
+    await ap.goto(BASE + '/?debug=1', { waitUntil: 'load' });
+    await ap.waitForFunction(() => window.__ds && window.__ds.state.layout);
+    await ap.evaluate(() => window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })));
+    await ap.waitForTimeout(420);
+    const d4 = await info(ap);
+    ok('授权抛错（手势不被认）：shakeDiag 记下 error 与 errName（历史坑回归）',
+      d4.shakeDiag.state === 'error' && d4.shakeDiag.errName === 'NotAllowedError',
+      JSON.stringify(d4.shakeDiag));
+    await ap.close();
+  }
+
   /* ---------------- 真机诊断页（?diag=1，2026-09-22） ----------------
      手机上复现不了的问题（音频会话 / 装到主屏后的安全区 / 真机字形）改用纯文本上报：
      面板可长按「全选 / 拷贝」，所以这个模式必须放开文本选择，并让「长按保存」让路。 */

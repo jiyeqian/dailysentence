@@ -222,7 +222,13 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   > 12 m/s² 记越峰，600ms 内两次越峰算一次摇，900ms 冷却；**只在空闲态生效**
   （播放独占态 / 编辑调整态 / `?raw=1` 导出页一律忽略，回归有断言）。
   iOS 未授权时 devicemotion 事件**一个都收不到**且 `requestPermission` 必须由用户手势触发，
-  所以「首次摇→提示」探测不到 —— 实现为**第一次 pointerdown 顺带请求**（只问一次，拒绝静默放弃）。
+  所以「首次摇→提示」探测不到 —— 实现为**第一次 pointerup 顺带请求**（只问一次）。
+  ⚠ 手势必须用**收尾事件**：旧实现挂 pointerdown（手势开始），iOS 不认它是有效手势，
+  Promise 直接 reject 且被静默吞掉 → 系统弹窗一次都不出现（真机踩坑，2026-09-24 修复）。
+  结果无论成败都落 `shakeDiag = { asked, state: granted|denied|error|'', errName, at }`
+  （`inspect().shakeDiag` 只增字段，`?diag=1` 诊断页也透出）；被拒/出错时 toast 一条提示，
+  不再无声。桌面 Chromium 新版也实现了 requestPermission —— 回归打桩必须**无条件覆盖**
+  该静态方法，否则会漏桩走到真 API。
   切换时 toast 报主题名。**桌面没有加速度计**：预览与回归走 `?theme=<id>`（**只当次生效、
   不写存储**，防止污染用户记忆）；选择写入 `localStorage['ds:theme']`（按设备记忆 ——
   无账号体系，跨设备同步做不到，这是有意为之的粒度）。

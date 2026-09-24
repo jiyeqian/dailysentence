@@ -1533,6 +1533,9 @@ function inspect() {
     /* 当前主题（2026-09-24 摇一摇换配色）：id = THEMES 的 key，name = toast 里的中文名。
        只增不改：标注通道与旧回归不认识它也无碍，新回归靠它自证「进了哪个主题」 */
     theme: { id: state.theme, name: (THEMES[state.theme] || THEMES.night).name },
+    /* 摇一摇授权自证（只增字段）：state = granted / denied / error / ''（还没问过）。
+       真机「授权弹窗不出现」时读它分辨：被拒 / pointerdown 不被当手势（历史坑） / 没有 API */
+    shakeDiag: Object.assign({}, shakeDiag),
     ratios: Object.assign({}, state.ratios),
     /* 图片手动调整：正在调哪一块（null = 没在调）+ 两块各自的缩放/位移。
        window = 弹层里那个换图窗口的 rect（层内 CSS px）；radius = 它的圆角（CSS px）。
@@ -2360,6 +2363,10 @@ const SHAKE_COOLDOWN_MS = 900; // 触发一次后的冷却
 const SHAKE_G_ALPHA = 0.15;    // 重力低通系数：越小越「信历史」，甩动越容易被当作线性加速度
 
 let shakePermAsked = false;    // iOS 授权是否已请求过（无论结果，只问一次）
+/* 授权自证（2026-09-24 真机踩坑后加）：真机「弹窗不出现」不用再猜 ——
+   state 记录请求结果（granted / denied / error / 空串 = 还没问过），
+   errName 是被拒/出错时的异常名。inspect().shakeDiag 与 ?diag=1 都透出。 */
+const shakeDiag = { asked: false, state: '', errName: '', at: 0 };
 let shakeG = { x: 0, y: 0, z: 0 };  // 重力估计（低通）
 let shakeGInit = false;        // 首个采样直接当重力（不做低通），避免开机误判
 let shakeLastPeakAt = 0;       // 上一次越峰时间
@@ -2386,14 +2393,30 @@ function onShake() {
 function bindShake() {
   if (shakeBound) return;
   shakeBound = true;
-  /* iOS：requestPermission 必须发生在用户手势里。挂在 pointerdown 捕获段、只问一次；
-     桌面 Chrome 的 DeviceMotionEvent 没有 requestPermission，走不到这支 */
-  window.addEventListener('pointerdown', () => {
+  /* iOS：requestPermission 必须发生在**用户手势**里。
+     ⚠ 必须挂在**收尾事件**（pointerup）上 —— 真机踩过的坑：挂在 pointerdown（手势
+     开始）时 iOS 不认它是有效手势，Promise 直接 reject（NotAllowedError），系统弹窗
+     一次都不会出现。桌面 Chrome 的 DeviceMotionEvent 没有 requestPermission，
+     走不到这支；结果无论成败都落 shakeDiag（真机 ?diag=1 可读）。 */
+  window.addEventListener('pointerup', () => {
     if (shakePermAsked) return;
     const DME = window.DeviceMotionEvent;
     if (DME && typeof DME.requestPermission === 'function') {
       shakePermAsked = true;
-      DME.requestPermission().catch(() => {});   // 拒绝 → 静默放弃，本轮不再问
+      DME.requestPermission().then((res) => {
+        shakeDiag.asked = true;
+        shakeDiag.state = res === 'granted' ? 'granted' : 'denied';
+        shakeDiag.at = Date.now();
+        if (shakeDiag.state !== 'granted') {
+          toast('摇一摇未获权限，将无法换配色');   // 拒绝也不再无声（一次性，只问一次所以不会刷屏）
+        }
+      }).catch((err) => {
+        shakeDiag.asked = true;
+        shakeDiag.state = 'error';
+        shakeDiag.errName = (err && err.name) || String(err);
+        shakeDiag.at = Date.now();
+        toast('摇一摇未获权限，将无法换配色');
+      });
     }
   }, { capture: true });
   window.addEventListener('devicemotion', (e) => {
@@ -3337,6 +3360,11 @@ function diagText() {
     '音频      hasAudio=' + (hasAudio() ? 'Y' : 'N') + '   正在播放=' + (state.voice ? 'Y' : 'N') +
       '   voiceDiag ' + (d.lastReason || '(还没收尾过)') + ' / errName=' + (d.errName || '-') +
       ' / retries=' + d.retries + ' / 响了 ' + r1(d.playedMs / 1000) + 's / 时长 ' + r1(d.dur) + 's',
+    '摇一摇    DeviceMotionEvent=' + (typeof window.DeviceMotionEvent) +
+      '   requestPermission=' + (window.DeviceMotionEvent && typeof window.DeviceMotionEvent.requestPermission === 'function' ? 'Y' : 'N') +
+      '   theme=' + state.theme +
+      '   shakeDiag ' + (shakeDiag.state || '(还没请求过权限)') + ' / errName=' + (shakeDiag.errName || '-') +
+      (shakeDiag.state === 'denied' || shakeDiag.state === 'error' ? '（去 设置→Safari→清除网站数据 后重试可再弹授权）' : ''),
     '状态      voice=' + q(state.voice ? state.voice.target : null) +
       '   edit=' + q(state.edit ? state.edit.target : null) + '   hidden=' + JSON.stringify(state.hidden),
     'UA        ' + String(navigator.userAgent || '').slice(0, 80),
@@ -3491,7 +3519,7 @@ function setOverlay(show, text) {
   syncStageCenter();
   watchViewport();
   bindInputs();
-  bindShake();        /* 摇一摇换配色：监听与 iOS 授权的 pointerdown 都在这里挂 */
+  bindShake();        /* 摇一摇换配色：监听与 iOS 授权（pointerup 收尾手势）都在这里挂 */
 
   /* 字体度量必须先就绪，否则折行与居中会算错 —— 用回退字体的度量算出来的版面，
      和字体到位后重排的结果不一样（刷新前后观感不一致）。

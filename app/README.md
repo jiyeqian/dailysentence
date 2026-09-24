@@ -186,9 +186,20 @@ PORT=3000 node server.js  # 自定义端口
   **只在空闲态生效**（`state.voice` / `state.edit` / `body.raw` 一律忽略）。
   切换时 toast `配色 · <主题名>` 并写入 localStorage（按设备记忆）。
 - **iOS 授权**：未授权时 `devicemotion` 事件一个都收不到，`requestPermission` 又必须由
-  用户手势触发 —— 「首次摇→提示」探测不到，所以实现为**第一次 pointerdown 顺带请求**
-  （捕获段、只问一次、拒绝静默放弃）。桌面没有加速度计：`?theme=` 就是预览与回归的路径；
-  回归用 `new DeviceMotionEvent(...)` 合成**对称振荡**（±25，围绕重力）驱动真监听。
+  用户手势触发 —— 「首次摇→提示」探测不到，所以实现为**第一次 pointerup 顺带请求**
+  （捕获段、只问一次）。
+  ⚠ 手势必须用**收尾事件**：旧实现挂 pointerdown，iOS 不认它是有效手势，
+  Promise reject 被静默吞掉 → 系统弹窗一次都不出现（真机踩坑，2026-09-24 修复）。
+  结果落 `shakeDiag = { asked, state, errName, at }`（`inspect().shakeDiag` 只增字段、
+  `?diag=1` 诊断页透出）；被拒/出错 toast 一条提示。
+  真机排查「没弹窗/摇不动」：读 `?diag=1` 的「摇一摇」行 —— `denied/error` 表示被拒
+  （去 设置→Safari→清除网站数据 后可再弹），`(还没请求过权限)` 表示没点过海报，
+  `DeviceMotionEvent=undefined` 表示环境根本不支持（桌面/安卓旧浏览器）。
+  另：**低电量模式会停发传感器事件**，真机测摇一摇前先关掉。
+  桌面没有加速度计：`?theme=` 就是预览与回归的路径；
+  回归用 `new DeviceMotionEvent(...)` 合成**对称振荡**（±25，围绕重力）驱动真监听，
+  授权用**无条件覆盖** `DeviceMotionEvent.requestPermission` 的桩驱动（新版 Chromium
+  也实现了该 API，条件判断会漏桩）。
 
 ### 换图
 
