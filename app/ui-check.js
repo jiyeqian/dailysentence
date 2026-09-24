@@ -970,7 +970,140 @@ function ok(label, cond, extra) {
     return { display: getComputedStyle(document.getElementById('wave')).display };
   });
   ok('导出页（?raw=1）里波形层不显示', rawWave.display === 'none', JSON.stringify(rawWave));
+  const rawShake = await rawP.evaluate(async () => {
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    const fire = (v) => window.dispatchEvent(new DeviceMotionEvent('devicemotion', {
+      accelerationIncludingGravity: { x: v, y: 0.2, z: 9.8 },
+    }));
+    for (const v of [25, -25, 25, -25, 25, -25]) { fire(v); await sleep(60); }
+    await sleep(150);
+    return window.__ds.state.theme;
+  });
+  ok('导出页（?raw=1）里摇一摇不切主题（导出是独占的）', rawShake === 'night', rawShake);
   await rawP.close();
+
+  /* ---------------- 四主题调色板与摇一摇换配色（2026-09-24） ----------------
+     配色唯一来源是 THEMES；「显示 = 成品」要求主题画进 canvas（另存图随主题走），
+     所以除了 inspect().theme 自证，还从画布位图上**取色**核对底色真的变了。
+     摇一摇用合成 devicemotion 事件驱动**真监听**（对称振荡 ±25 —— 真实摇动就是
+     围绕重力的方向翻转；判定用线性加速度，见 bindShake 注释）。 */
+  console.log('标准版 · 四主题与摇一摇');
+  const sampleLum = (p, x = 1040, y = 1350) => p.evaluate(([x, y]) => {
+    const c = document.getElementById('poster');
+    const k = c.width / 1080;                       /* 位图 → 设计坐标 */
+    const ctx2 = c.getContext('2d');
+    const d2 = ctx2.getImageData(Math.round(x * k), Math.round(y * k), 1, 1).data;
+    return 0.3 * d2[0] + 0.59 * d2[1] + 0.11 * d2[2];   /* 感知亮度 */
+  }, [x, y]);
+  const themeEnter = async (qs) => {
+    const tp = await open(BASE + '/?debug=1' + (qs ? '&theme=' + qs : ''));
+    const d2 = await info(tp);
+    const cs = await tp.evaluate(() => ({
+      bg: getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(),
+      wave: getComputedStyle(document.documentElement).getPropertyValue('--wave-c1').trim(),
+      ds: document.documentElement.dataset.theme,
+    }));
+    return { tp, d2, cs };
+  };
+
+  {
+    const { tp, d2, cs } = await themeEnter('');
+    ok('默认进入 = 墨蓝夜空（inspect().theme 只增字段 + data-theme 同步）',
+      d2.theme.id === 'night' && d2.theme.name === '墨蓝夜空' && cs.ds === 'night',
+      JSON.stringify(d2.theme));
+    ok('night 画布底色是暗色（取色抽验：显示 = 成品）', (await sampleLum(tp)) < 60,
+      'lum=' + Math.round(await sampleLum(tp)));
+    ok('night 的页面底色 --bg 与波形强调色是默认值',
+      cs.bg === '#0b0f17' && cs.wave.startsWith('rgba(34,211,238'),
+      `--bg ${cs.bg}｜--wave-c1 ${cs.wave}`);
+    await tp.close();
+  }
+  {
+    const { tp, d2, cs } = await themeEnter('paper');
+    const lum = await sampleLum(tp);
+    ok('?theme=paper：暖纸墨字当次生效、底色反转为浅色（白天可读）',
+      d2.theme.id === 'paper' && lum > 150, 'lum=' + Math.round(lum));
+    ok('paper 的波形强调色换成琥珀墨（--wave-c1）', cs.wave.startsWith('rgba(194,118,42'), cs.wave);
+    await tp.close();
+  }
+  {
+    const { tp, d2, cs } = await themeEnter('pine');
+    ok('?theme=pine：松烟墨绿生效、底色仍是暗色',
+      d2.theme.id === 'pine' && (await sampleLum(tp)) < 60);
+    ok('pine 的波形强调色换成琥珀金（与 night/paper 都不同）',
+      cs.wave.startsWith('rgba(245,158,11'), cs.wave);
+    await tp.close();
+  }
+  {
+    const { tp, d2, cs } = await themeEnter('dusk');
+    ok('?theme=dusk：紫霞暮色生效、底色仍是暗色',
+      d2.theme.id === 'dusk' && (await sampleLum(tp)) < 60);
+    ok('dusk 的波形强调色换成玫瑰金（与 pine 不同）',
+      cs.wave.startsWith('rgba(232,160,168'), cs.wave);
+    await tp.close();
+  }
+  {
+    /* 无效参数必须回落默认，不能半白屏 */
+    const { tp, d2 } = await themeEnter('nope');
+    ok('?theme=nope（无效参数）回落默认 night', d2.theme.id === 'night');
+    await tp.close();
+  }
+
+  /* 摇一摇：真监听 + 空闲态守卫 + 冷却 + 记忆 */
+  const sp = await open(BASE + '/?debug=1');
+  await sp.evaluate(() => localStorage.removeItem('ds:theme'));   /* 干净起点 */
+  await sp.reload({ waitUntil: 'load' });
+  await sp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  const shakeInPage = () => sp.evaluate(async () => {
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    const fire = (v) => window.dispatchEvent(new DeviceMotionEvent('devicemotion', {
+      accelerationIncludingGravity: { x: v, y: 0.2, z: 9.8 },
+    }));
+    for (const v of [25, -25, 25, -25, 25, -25]) { fire(v); await sleep(60); }
+    await sleep(150);
+  });
+  await shakeInPage();
+  d = await info(sp);
+  ok('摇① 切到下一个主题（paper）并 toast 报主题名',
+    d.theme.id === 'paper' &&
+    (await sp.evaluate(() => document.getElementById('toast').textContent)) === '配色 · 暖纸墨字',
+    await sp.evaluate(() => document.getElementById('toast').textContent));
+  ok('摇出来的选择写入 localStorage（按设备记忆）',
+    (await sp.evaluate(() => localStorage.getItem('ds:theme'))) === 'paper');
+  await shakeInPage();
+  d = await info(sp);
+  ok('摇②（在 900ms 冷却内）不再切换 —— 防一次长摇连切',
+    d.theme.id === 'paper');
+  await sp.waitForTimeout(1000);
+  await shakeInPage();
+  d = await info(sp);
+  ok('出冷却后摇③ 切到 pine（循环顺序 night→paper→pine→dusk→night）',
+    d.theme.id === 'pine');
+  /* 播放独占态：摇动被忽略，不打断朗读 */
+  await sp.evaluate(() => window.__ds.playVoice());
+  await sp.waitForTimeout(400);
+  await shakeInPage();
+  d = await info(sp);
+  ok('播放独占态摇动不切主题（也不停播）',
+    d.theme.id === 'pine' && !!d.voice);
+  await sp.evaluate(() => window.__ds.stopVoice('tap'));
+  /* reload 记忆：无参进入应停在摇出来的主题上 */
+  await sp.reload({ waitUntil: 'load' });
+  await sp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  d = await info(sp);
+  ok('reload 后主题保留（localStorage 读回）', d.theme.id === 'pine');
+  /* URL 不污染记忆：?theme= 只当次生效 */
+  await sp.goto(BASE + '/?debug=1&theme=dusk', { waitUntil: 'load' });
+  await sp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  const urlVisit = await sp.evaluate(() => ({
+    theme: window.__ds.state.theme, saved: localStorage.getItem('ds:theme') }));
+  ok('?theme=dusk 只当次生效，不写入记忆', urlVisit.theme === 'dusk' && urlVisit.saved === 'pine',
+    JSON.stringify(urlVisit));
+  await sp.goto(BASE + '/?debug=1', { waitUntil: 'load' });
+  await sp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  d = await info(sp);
+  ok('退出 URL 预览后回到记忆的主题', d.theme.id === 'pine');
+  await sp.close();
 
   /* ---------------- 真机诊断页（?diag=1，2026-09-22） ----------------
      手机上复现不了的问题（音频会话 / 装到主屏后的安全区 / 真机字形）改用纯文本上报：

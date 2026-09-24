@@ -182,7 +182,8 @@ body.adaptive:not(.raw) #stage { padding: 0; }
   width: var(--wave-w, 3px);
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(180deg, rgba(34, 211, 238, 0.62), rgba(79, 141, 253, 0.40));
+  /* 强调色随主题：applyTheme() 写 --wave-c1/c2（缺省值 = night 墨蓝夜空的原色） */
+  background: linear-gradient(180deg, var(--wave-c1, rgba(34, 211, 238, 0.62)), var(--wave-c2, rgba(79, 141, 253, 0.40)));
   /* 极淡投影：让裸竖条在亮背景（雾天照片）上也不糊掉。半径小、几乎不扩散，观感上仍是「细线」 */
   filter: drop-shadow(0 0 3px rgba(6, 10, 18, 0.55));
   transform: scaleY(0.3);

@@ -218,12 +218,152 @@ const POS_COLOR = {
   'pron.': '#4f46e5', 'int.': '#ea580c', 'aux.': '#64748b', 'abbr.': '#64748b',
 };
 
+/* ===================== 主题调色板（2026-09-24 摇一摇换配色） =====================
+   配色的**唯一来源**：背景渐变、压暗层、四段文字色、强调色、卡片底与字色都从这里读
+   （在此之前的硬编码已全部改走 PAL()）。新增主题 = 在这里加一条；摇一摇的循环顺序 =
+   下面的书写顺序。铁律「显示 = 成品」：主题全部画进 canvas，长按另存的图就是当前主题。
+   页面底色（--bg / --bg-2）与波形强调色（--wave-c1 / --wave-c2）由 applyTheme() 同步。
+   POS_COLOR（词性色标）不进调色板 —— 它服务于白底卡面，四套主题卡面都是白的，共用不动。 */
+const THEMES = {
+  /* 墨蓝夜空：原默认配色，数值原样搬进来（改前什么样，现在还什么样） */
+  night: {
+    name: '墨蓝夜空',
+    pageBg: '#0b0f17', pageBg2: '#101623',
+    bgTop: '#16233a', bgBottom: '#070b13',
+    fade: '17,28,46',        /* 原比例图片下缘渐隐（rgb 三元组，透明度在绘制侧拼） */
+    scrim: '6,11,22',        /* 压暗层（同上，深浅不同的透明度共用这一个基色） */
+    colTitle: '#ffffff',
+    titleStroke: 'rgba(255,255,255,0.16)',
+    colDate: 'rgba(255,255,255,0.94)', colEn: 'rgba(255,255,255,0.97)',
+    colCn: 'rgba(255,255,255,0.88)', colSource: 'rgba(255,255,255,0.62)',
+    ruleA: 'rgba(255,255,255,0.95)', ruleB: 'rgba(255,255,255,0.12)',
+    dateBg: 'rgba(255,255,255,0.14)', dateBd: 'rgba(255,255,255,0.34)',
+    textShadow: 'rgba(3,8,18,0.55)',
+    cardBg: 'rgba(255,255,255,0.94)', cardBd: 'rgba(255,255,255,0.6)',
+    cardWord: '#0f172a', cardPh: '#7c8aa5', cardDef: '#334155',
+    cardExBar: 'rgba(15,23,42,0.06)', cardExEn: '#475569', cardExCn: '#8b98ad',
+    cardChip: '#475569', profileBg: '#ffffff',
+    accentA: '#4f8dfd', accentB: '#22d3ee',
+    waveA: 'rgba(34,211,238,0.62)', waveB: 'rgba(79,141,253,0.40)',
+  },
+  /* 暖纸墨字：米白纸质底 + 深墨文字（唯一浅色，反色）。白天户外可读性最好。
+     卡面仍接近白纸（词性色标照常工作）；文字阴影换成极淡暖灰 —— 深影在浅底上会显脏 */
+  paper: {
+    name: '暖纸墨字',
+    pageBg: '#ede7da', pageBg2: '#e2dbcb',
+    bgTop: '#f5f1e8', bgBottom: '#e6dfd0',
+    fade: '237,231,218', scrim: '74,66,52',
+    colTitle: '#2a2620',
+    titleStroke: 'rgba(26,26,23,0.16)',
+    colDate: 'rgba(26,26,23,0.90)', colEn: 'rgba(26,26,23,0.95)',
+    colCn: 'rgba(26,26,23,0.85)', colSource: 'rgba(26,26,23,0.60)',
+    ruleA: 'rgba(26,26,23,0.80)', ruleB: 'rgba(26,26,23,0.10)',
+    dateBg: 'rgba(26,26,23,0.08)', dateBd: 'rgba(26,26,23,0.35)',
+    textShadow: 'rgba(74,66,52,0.18)',
+    cardBg: 'rgba(255,255,255,0.92)', cardBd: 'rgba(26,26,23,0.28)',
+    cardWord: '#1a1a17', cardPh: '#8a8272', cardDef: '#3d3a33',
+    cardExBar: 'rgba(26,26,23,0.08)', cardExEn: '#4c473c', cardExCn: '#7d7666',
+    cardChip: '#5c5546', profileBg: '#fffdf8',
+    accentA: '#c2762a', accentB: '#8f5b1e',
+    waveA: 'rgba(194,118,42,0.62)', waveB: 'rgba(143,91,30,0.42)',
+  },
+  /* 松烟墨绿：深绿黑底 + 暖白文字 + 琥珀点缀。与墨蓝最接近，改动适中 */
+  pine: {
+    name: '松烟墨绿',
+    pageBg: '#05100c', pageBg2: '#0a1a13',
+    bgTop: '#0e1a14', bgBottom: '#05100c',
+    fade: '14,26,20', scrim: '4,12,9',
+    colTitle: '#f3efe6',
+    titleStroke: 'rgba(243,239,230,0.16)',
+    colDate: 'rgba(243,239,230,0.94)', colEn: 'rgba(243,239,230,0.97)',
+    colCn: 'rgba(243,239,230,0.88)', colSource: 'rgba(243,239,230,0.62)',
+    ruleA: 'rgba(243,239,230,0.95)', ruleB: 'rgba(243,239,230,0.12)',
+    dateBg: 'rgba(243,239,230,0.14)', dateBd: 'rgba(243,239,230,0.34)',
+    textShadow: 'rgba(2,8,6,0.55)',
+    cardBg: 'rgba(255,255,255,0.94)', cardBd: 'rgba(243,239,230,0.6)',
+    cardWord: '#0f172a', cardPh: '#7c8aa5', cardDef: '#334155',
+    cardExBar: 'rgba(15,23,42,0.06)', cardExEn: '#475569', cardExCn: '#8b98ad',
+    cardChip: '#475569', profileBg: '#ffffff',
+    accentA: '#d97706', accentB: '#f59e0b',
+    waveA: 'rgba(245,158,11,0.60)', waveB: 'rgba(217,119,6,0.40)',
+  },
+  /* 紫霞暮色：深紫底 + 暖白文字 + 玫瑰金点缀 */
+  dusk: {
+    name: '紫霞暮色',
+    pageBg: '#0a0616', pageBg2: '#140d24',
+    bgTop: '#1a1230', bgBottom: '#0a0616',
+    fade: '26,18,48', scrim: '10,6,22',
+    colTitle: '#f7f0eb',
+    titleStroke: 'rgba(247,240,235,0.16)',
+    colDate: 'rgba(247,240,235,0.94)', colEn: 'rgba(247,240,235,0.97)',
+    colCn: 'rgba(247,240,235,0.88)', colSource: 'rgba(247,240,235,0.62)',
+    ruleA: 'rgba(247,240,235,0.95)', ruleB: 'rgba(247,240,235,0.12)',
+    dateBg: 'rgba(247,240,235,0.14)', dateBd: 'rgba(247,240,235,0.34)',
+    textShadow: 'rgba(6,2,14,0.55)',
+    cardBg: 'rgba(255,255,255,0.94)', cardBd: 'rgba(247,240,235,0.6)',
+    cardWord: '#0f172a', cardPh: '#7c8aa5', cardDef: '#334155',
+    cardExBar: 'rgba(15,23,42,0.06)', cardExEn: '#475569', cardExCn: '#8b98ad',
+    cardChip: '#475569', profileBg: '#ffffff',
+    accentA: '#e8a0a8', accentB: '#c98a8f',
+    waveA: 'rgba(232,160,168,0.62)', waveB: 'rgba(201,138,143,0.42)',
+  },
+};
+
+/** 当前主题的调色板（state.theme 由 applyTheme 维护；未知 id 兜底回默认，绝不画错色） */
+function PAL() {
+  return THEMES[state.theme] || THEMES.night;
+}
+
+const THEME_KEY = 'ds:theme';
+
+/**
+ * 把主题落到整张页面：state → CSS 变量（页面底色 + 波形强调色）→ 重绘。
+ * save=false 用于启动读回与 URL 预览（那两个来源本来就带着值，不必再写存储）。
+ */
+function applyTheme(id, opts) {
+  if (!THEMES[id]) id = 'night';
+  const save = !(opts && opts.save === false);
+  state.theme = id;
+  const p = THEMES[id];
+  const root = document.documentElement.style;
+  root.setProperty('--bg', p.pageBg);
+  root.setProperty('--bg-2', p.pageBg2);
+  root.setProperty('--wave-c1', p.waveA);
+  root.setProperty('--wave-c2', p.waveB);
+  document.documentElement.dataset.theme = id;   /* 将来 CSS 侧按主题微调时的钩子 */
+  if (save) {
+    try { localStorage.setItem(THEME_KEY, id); } catch (e) {}
+  }
+  scheduleRender();
+}
+
+/**
+ * 启动时定主题：URL ?theme= **只当次生效**（预览与回归用，不写存储 —— 不污染用户记忆）；
+ * 否则读回上次摇一摇记住的选择；都没有 = night。
+ * 无痕模式 / 存储被禁时读不到就静默走默认（与 ds:last 的处理一致）。
+ */
+function initTheme() {
+  const qs = QS.get('theme');
+  if (qs && THEMES[qs]) {
+    applyTheme(qs, { save: false });
+    return state.theme;
+  }
+  let saved = null;
+  try { saved = localStorage.getItem(THEME_KEY); } catch (e) {}
+  applyTheme(saved && THEMES[saved] ? saved : 'night', { save: false });
+  return state.theme;
+}
+
+/** 摇一摇用的循环顺序 = THEMES 的书写顺序（上面注释里说了） */
+const THEME_ORDER = Object.keys(THEMES);
+
 /* ------------------------------- 状态 -------------------------------- */
 
 const DEFAULT_RATIOS = { L: 0.0364, T: 0.5934, R: 0.9636, B: 0.8491 };
 
 const state = {
   apiData: null,
+  theme: 'night',       // 当前主题 id（THEMES 的 key）；applyTheme() 维护，启动读 ?theme= / localStorage
   layout: null,         // 最近一次渲染的版面（点击命中用）
   regions: [],          // 可点区域表（画布坐标）
   annots: [],           // 版面标注表（画布坐标，仅 ?debug=1 登记）
@@ -1205,60 +1345,61 @@ function buildAnnots(ctx, L) {
   const tx = L.textX;
   const maxW = CW - 2 * tx;
   const T0 = L.textTop;
+  const C = PAL();           /* 标注表的颜色列必须如实反映当前主题（与手册「图文一致」的要求对应） */
 
   /* ---- 顶部文字块（标准版没有大标题与分隔线） ---- */
   if (L.title) {
     const t = L.title;
     ctx.font = T(t.size, 700, F_SERIF);
     push('title', '大标题关键词', tx, T0, Math.min(ctx.measureText(t.text).width, maxW), t.h,
-      { font: r1(t.size), color: '#ffffff', text: t.text });
+      { font: r1(t.size), color: C.colTitle, text: t.text });
   }
 
   if (L.date && L.date.on) {
     /* 字号读版面实际值，别写死 —— 否则标注图上的字号与实际不一致 */
     push('badge-date', '日期胶囊', L.date.x, L.date.y, L.date.w, L.date.h,
-      { font: r1(L.date.size == null ? 25 : L.date.size), color: 'rgba(255,255,255,0.94)', text: c.date });
+      { font: r1(L.date.size == null ? 25 : L.date.size), color: C.colDate, text: c.date });
   }
 
   if (L.rule.on) {
     push('rule', '标题分隔线', tx, T0 + L.rule.y, L.rule.w, L.rule.h,
-      { color: 'rgba(255,255,255,0.95)' });
+      { color: C.ruleA });
   }
 
   if (L.en.on) {
     push('en', '英文句', tx, T0 + L.en.y,
       blockW(L.en.lines, L.en.size, 400, L.en.family || F_SANS), L.en.lines.length * L.en.lh,
-      { font: r1(L.en.size), color: 'rgba(255,255,255,0.97)', text: L.en.lines.join(' ') });
+      { font: r1(L.en.size), color: C.colEn, text: L.en.lines.join(' ') });
   }
 
   if (L.cn.on) {
     push('cn', '中文句', tx, T0 + L.cn.y,
       blockW(L.cn.lines, L.cn.size, 400, F_SANS), L.cn.lines.length * L.cn.lh,
-      { font: r1(L.cn.size), color: 'rgba(255,255,255,0.88)', text: L.cn.lines.join('') });
+      { font: r1(L.cn.size), color: C.colCn, text: L.cn.lines.join('') });
   }
 
   if (L.source.on) {
     const st = '—— ' + L.source.text;
     ctx.font = T(L.source.size, 500, F_SANS);
     push('source', '出处', tx, T0 + L.source.y, ctx.measureText(st).width, L.source.size * 1.4,
-      { font: r1(L.source.size), color: 'rgba(255,255,255,0.62)', text: st });
+      { font: r1(L.source.size), color: C.colSource, text: st });
   }
 
   /* ---- 单词卡片 ---- */
   const P = L.panel;
   if (!P.hidden && P.h > 0) {
-    push('panel', '单词卡整体', P.x, P.y, P.w, P.h, { color: 'rgba(255,255,255,0.94)' });
+    push('panel', '单词卡整体', P.x, P.y, P.w, P.h, { color: C.cardBg });
 
     const barH = Math.min(P.h - P.padY * 2, P.row1H + 22);
     push('panel-bar', '左侧渐变竖条', P.x + 22, P.y + P.padY + 4, 5, barH - 8,
-      { color: '#4f8dfd → #22d3ee' });
+      { color: C.accentA + ' → ' + C.accentB });
 
     const x0 = P.x + P.padX;
     const row1Top = P.y + P.padY;
     ctx.font = T(P.wordSize, 600, F_SANS);
     const ww = ctx.measureText(c.word || '').width;
     push('panel-word', '卡内关键词', x0, row1Top, ww, P.row1H,
-      { font: r1(P.wordSize), color: '#0f172a', text: c.word });
+      { font: r1(P.wordSize), color: C.cardWord, text: c.word });
 
     const phs = phoneticList();
     if (phs.length) {
@@ -1268,18 +1409,18 @@ function buildAnnots(ctx, L) {
       for (const p of phs) phW += ctx.measureText(p.text).width + 22;
       const phBase = row1Top + P.wordSize * 0.85;
       push('panel-ph', '音标', x0 + ww + 18, phBase - ps * 0.8, Math.max(0, phW), ps * 1.25,
-        { font: r1(ps), color: '#7c8aa5', text: phs.map((p) => p.text).join(' ') });
+        { font: r1(ps), color: C.cardPh, text: phs.map((p) => p.text).join(' ') });
     }
 
     let y = row1Top + P.row1H + 16;
     P.defItems.forEach((it, i) => {
       const many = P.defItems.length > 1;
       push('def-' + i, '释义' + (many ? ' ' + (i + 1) : ''), x0, y, P.innerW, it.h,
-        { font: r1(P.defSize), color: '#334155', text: it.lines.join('') });
+        { font: r1(P.defSize), color: C.cardDef, text: it.lines.join('') });
       if (it.pos) {
         const chipH = P.chipSize * 1.72;
         push('chip-' + i, '词性胶囊', x0, y + (it.h - chipH) / 2, it.chipW, chipH,
-          { font: r1(P.chipSize), color: POS_COLOR[it.pos] || '#475569', text: it.pos });
+          { font: r1(P.chipSize), color: POS_COLOR[it.pos] || C.cardChip, text: it.pos });
       }
       y += it.h + 10;
     });
@@ -1288,7 +1429,7 @@ function buildAnnots(ctx, L) {
       y += 6;
       P.exItems.forEach((ex, i) => {
         push('ex-' + i, '例句' + (P.exItems.length > 1 ? ' ' + (i + 1) : ''), x0, y, P.innerW, ex.h,
-          { font: r1(ex.enSize), color: '#475569', text: ex.enLines.join(' ') });
+          { font: r1(ex.enSize), color: C.cardExEn, text: ex.enLines.join(' ') });
         y += ex.h + 16;
       });
     }
@@ -1301,7 +1442,7 @@ function buildAnnots(ctx, L) {
   }
 
   /* ---- 信息卡 / 背景 / 安全边距 ---- */
-  push('card', '个人信息卡', L.card.x, L.card.y, L.card.w, L.card.h, { color: '#ffffff' });
+  push('card', '个人信息卡', L.card.x, L.card.y, L.card.w, L.card.h, { color: C.profileBg });
 
   if (state.bgImage) {
     const natural = state.opts.bgStyle === 'natural';
@@ -1389,6 +1530,9 @@ function inspect() {
     items,
     gaps: buildGaps(L),
     opts: Object.assign({}, state.opts),
+    /* 当前主题（2026-09-24 摇一摇换配色）：id = THEMES 的 key，name = toast 里的中文名。
+       只增不改：标注通道与旧回归不认识它也无碍，新回归靠它自证「进了哪个主题」 */
+    theme: { id: state.theme, name: (THEMES[state.theme] || THEMES.night).name },
     ratios: Object.assign({}, state.ratios),
     /* 图片手动调整：正在调哪一块（null = 没在调）+ 两块各自的缩放/位移。
        window = 弹层里那个换图窗口的 rect（层内 CSS px）；radius = 它的圆角（CSS px）。
@@ -1589,7 +1733,7 @@ function currentFitDraw(target, L) {
 function drawBackground(ctx, L) {
   const im = state.bgImage;
   if (!im) {
-    darkBase(ctx);
+    drawBase(ctx);
     return;
   }
 
@@ -1597,7 +1741,7 @@ function drawBackground(ctx, L) {
      超出这个 648px 区域的部分**硬裁掉**（不裁的话竖图会一路糊到中部区域）。
      宽图（如 16:9 → 608 高）下方会露出一段底色。 */
   if (L.imgBlock) {
-    darkBase(ctx);
+    drawBase(ctx);
     const blockH = L.imgBlock.h;
     const base = fitBase('img', L);
     const d = fitDraw(base, state.fits.img);
@@ -1625,7 +1769,7 @@ function drawBackground(ctx, L) {
 
   /* 长版：原比例 = 宽度铺满、顶端与海报顶端对齐，图片完整不裁切 */
   if (state.opts.bgStyle === 'natural') {
-    darkBase(ctx);
+    drawBase(ctx);
     const ih = naturalImageH();
     ctx.drawImage(im, 0, 0, CW, ih);
     fadeImageBottom(ctx, ih);
@@ -1636,10 +1780,12 @@ function drawBackground(ctx, L) {
   drawCover(ctx, im, 0, 0, CW, CH);
 }
 
-function darkBase(ctx) {
+/** 海报底色：随主题走（2026-09-24 前是硬编码的墨蓝夜空，night 的数值就是原值） */
+function drawBase(ctx) {
+  const p = PAL();
   const g = ctx.createLinearGradient(0, 0, CW * 0.35, CH);
-  g.addColorStop(0, '#16233a');
-  g.addColorStop(1, '#070b13');
+  g.addColorStop(0, p.bgTop);
+  g.addColorStop(1, p.bgBottom);
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, CW, CH);
 }
@@ -1650,21 +1796,24 @@ function darkBase(ctx) {
  */
 function fadeImageBottom(ctx, ih) {
   const FADE = Math.min(200, Math.round(ih * 0.3));
+  const rgb = PAL().fade;    /* 渐隐进当前主题的底色，而不是写死的墨蓝 */
   const g = ctx.createLinearGradient(0, ih - FADE, 0, ih);
-  g.addColorStop(0, 'rgba(17,28,46,0)');
-  g.addColorStop(0.55, 'rgba(17,28,46,0.4)');
-  g.addColorStop(1, 'rgba(17,28,46,1)');
+  g.addColorStop(0, `rgba(${rgb},0)`);
+  g.addColorStop(0.55, `rgba(${rgb},0.4)`);
+  g.addColorStop(1, `rgba(${rgb},1)`);
   ctx.fillStyle = g;
   ctx.fillRect(0, ih - FADE, CW, FADE);
 }
 
 /** 顶部压暗 + 底部压暗 + 四角暗角 */
 function drawScrim(ctx, L) {
+  /* 压暗基色随主题（暗色系各用各的近黑；paper 用暖褐 —— 纯黑压在浅底上会发灰发脏） */
+  const s = PAL().scrim;
   /* 标准版：句子与卡片都落在底色上，不需要压暗图片；只做底部收边与暗角 */
   if (L.imgBlock) {
     const g = ctx.createLinearGradient(0, CH - 640, 0, CH);
-    g.addColorStop(0, 'rgba(6,11,22,0)');
-    g.addColorStop(1, 'rgba(6,11,22,0.5)');
+    g.addColorStop(0, `rgba(${s},0)`);
+    g.addColorStop(1, `rgba(${s},0.5)`);
     ctx.fillStyle = g;
     ctx.fillRect(0, CH - 640, CW, 640);
 
@@ -1679,11 +1828,11 @@ function drawScrim(ctx, L) {
   /* 长版 · 原比例：顶部图片保持干净，只在其下方轻压暗 + 底部收边 */
   if (state.opts.bgStyle === 'natural' && state.bgImage) {
     const ih = naturalImageH();
-    ctx.fillStyle = 'rgba(6,11,22,0.06)';
+    ctx.fillStyle = `rgba(${s},0.06)`;
     ctx.fillRect(0, ih, CW, CH - ih);
     const g = ctx.createLinearGradient(0, CH - 560, 0, CH);
-    g.addColorStop(0, 'rgba(6,11,22,0)');
-    g.addColorStop(1, 'rgba(6,11,22,0.4)');
+    g.addColorStop(0, `rgba(${s},0)`);
+    g.addColorStop(1, `rgba(${s},0.4)`);
     ctx.fillStyle = g;
     ctx.fillRect(0, ih, CW, CH - ih);
     return;
@@ -1692,17 +1841,17 @@ function drawScrim(ctx, L) {
   const topEnd = Math.max(620, L.textBottom + 140);
 
   const g = ctx.createLinearGradient(0, 0, 0, topEnd);
-  g.addColorStop(0, 'rgba(6,11,22,0.72)');
-  g.addColorStop(0.42, 'rgba(6,11,22,0.42)');
-  g.addColorStop(1, 'rgba(6,11,22,0)');
+  g.addColorStop(0, `rgba(${s},0.72)`);
+  g.addColorStop(0.42, `rgba(${s},0.42)`);
+  g.addColorStop(1, `rgba(${s},0)`);
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, CW, topEnd);
-  ctx.fillStyle = 'rgba(6,11,22,0.10)';
+  ctx.fillStyle = `rgba(${s},0.10)`;
   ctx.fillRect(0, 0, CW, CH);
 
   const gb = ctx.createLinearGradient(0, CH - 620, 0, CH);
-  gb.addColorStop(0, 'rgba(6,11,22,0)');
-  gb.addColorStop(1, 'rgba(6,11,22,0.55)');
+  gb.addColorStop(0, `rgba(${s},0)`);
+  gb.addColorStop(1, `rgba(${s},0.55)`);
   ctx.fillStyle = gb;
   ctx.fillRect(0, CH - 620, CW, 620);
 
@@ -1725,8 +1874,9 @@ function drawGrain(ctx) {
 /* --------------------------- 顶部文字 --------------------------- */
 
 function drawTopText(ctx, L) {
+  const P = PAL();           /* 本函数所有颜色都随主题（2026-09-24 前= night 的原值） */
   const shadow = () => {
-    ctx.shadowColor = 'rgba(3,8,18,0.55)';
+    ctx.shadowColor = P.textShadow;
     ctx.shadowBlur = 22;
     ctx.shadowOffsetY = 4;
   };
@@ -1742,9 +1892,9 @@ function drawTopText(ctx, L) {
     const ty = L.textTop + t.size * 0.86;
     ctx.save();
     ctx.font = T(t.size, 700, F_SERIF);
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = P.colTitle;
     shadow();
-    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+    ctx.strokeStyle = P.titleStroke;
     ctx.lineWidth = t.size * 0.055;
     ctx.lineJoin = 'round';
     ctx.strokeText(t.text, MX, ty);
@@ -1756,8 +1906,8 @@ function drawTopText(ctx, L) {
   if (L.rule.on) {
     ctx.save();
     const g = ctx.createLinearGradient(MX, 0, MX + L.rule.w, 0);
-    g.addColorStop(0, 'rgba(255,255,255,0.95)');
-    g.addColorStop(1, 'rgba(255,255,255,0.12)');
+    g.addColorStop(0, P.ruleA);
+    g.addColorStop(1, P.ruleB);
     ctx.fillStyle = g;
     roundRect(ctx, MX, L.textTop + L.rule.y, L.rule.w, L.rule.h, L.rule.h / 2);
     ctx.fill();
@@ -1767,7 +1917,7 @@ function drawTopText(ctx, L) {
   /* 英文 */
   ctx.save();
   ctx.font = T(L.en.size, 400, L.en.family || F_SANS);   /* 与量测同一个字族，见 buildTextBlockStandard */
-  ctx.fillStyle = 'rgba(255,255,255,0.97)';
+  ctx.fillStyle = P.colEn;
   shadow();
   L.en.lines.forEach((ln, i) => {
     ctx.fillText(ln, L.textX, L.textTop + L.en.y + i * L.en.lh + L.en.size * 0.86);
@@ -1777,7 +1927,7 @@ function drawTopText(ctx, L) {
   /* 中文 */
   ctx.save();
   ctx.font = T(L.cn.size, 400, F_SANS);
-  ctx.fillStyle = 'rgba(255,255,255,0.88)';
+  ctx.fillStyle = P.colCn;
   shadow();
   L.cn.lines.forEach((ln, i) => {
     ctx.fillText(ln, L.textX, L.textTop + L.cn.y + i * L.cn.lh + L.cn.size * 0.86);
@@ -1788,7 +1938,7 @@ function drawTopText(ctx, L) {
   if (L.source.on) {
     ctx.save();
     ctx.font = T(L.source.size, 500, F_SANS);
-    ctx.fillStyle = 'rgba(255,255,255,0.62)';
+    ctx.fillStyle = P.colSource;
     shadow();
     ctx.fillText('—— ' + L.source.text, L.textX, L.textTop + L.source.y + L.source.size * 0.86);
     ctx.restore();
@@ -1808,13 +1958,13 @@ function drawTopText(ctx, L) {
     const py = L.date.y;
     ctx.save();
     roundRect(ctx, px, py, pw, ph, ph / 2);
-    ctx.fillStyle = 'rgba(255,255,255,0.14)';
+    ctx.fillStyle = P.dateBg;
     ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.34)';
+    ctx.strokeStyle = P.dateBd;
     ctx.lineWidth = 1.5;
     ctx.stroke();
     ctx.restore();
-    ctx.fillStyle = 'rgba(255,255,255,0.94)';
+    ctx.fillStyle = P.colDate;
     ctx.textBaseline = 'middle';
     drawSpaced(ctx, label, px + 28 * dk, py + ph / 2 + 1, 2.5 * dk);
     ctx.textBaseline = 'alphabetic';
@@ -1833,7 +1983,7 @@ function drawProfileCard(ctx, L) {
   ctx.shadowColor = 'rgba(4,10,22,0.42)';
   ctx.shadowBlur = 46;
   ctx.shadowOffsetY = 20;
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = PAL().profileBg;
   ctx.fill();
   ctx.restore();
 
@@ -1966,6 +2116,7 @@ function drawEditPreview(L) {
 function drawWordCard(ctx, L) {
   const P = L.panel;
   if (P.hidden || P.h <= 0) return;
+  const C = PAL();           /* 卡面各色随主题（卡底四套都近白，词性色标共用不变） */
   const R = 30;
 
   /* 毛玻璃底 */
@@ -1977,7 +2128,7 @@ function drawWordCard(ctx, L) {
     ctx.drawImage(ctx.canvas, 0, 0, CW, CH, 0, 0, CW, CH);
     ctx.filter = 'none';
   }
-  ctx.fillStyle = 'rgba(255,255,255,0.94)';
+  ctx.fillStyle = C.cardBg;
   ctx.fillRect(P.x, P.y, P.w, P.h);
   ctx.restore();
 
@@ -1986,7 +2137,7 @@ function drawWordCard(ctx, L) {
   ctx.shadowColor = 'rgba(4,10,22,0.35)';
   ctx.shadowBlur = 40;
   ctx.shadowOffsetY = 16;
-  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.strokeStyle = C.cardBd;
   ctx.lineWidth = 1.5;
   ctx.stroke();
   ctx.restore();
@@ -1995,8 +2146,8 @@ function drawWordCard(ctx, L) {
   ctx.save();
   const barH = Math.min(P.h - P.padY * 2, P.row1H + 22);
   const g = ctx.createLinearGradient(0, P.y + P.padY, 0, P.y + P.padY + barH);
-  g.addColorStop(0, '#4f8dfd');
-  g.addColorStop(1, '#22d3ee');
+  g.addColorStop(0, C.accentA);
+  g.addColorStop(1, C.accentB);
   ctx.fillStyle = g;
   roundRect(ctx, P.x + 22, P.y + P.padY + 4, 5, barH - 8, 3);
   ctx.fill();
@@ -2010,7 +2161,7 @@ function drawWordCard(ctx, L) {
   ctx.textBaseline = 'alphabetic';
   ctx.font = T(P.wordSize, 600, F_SANS);
   const word = state.content.word || '';
-  ctx.fillStyle = '#0f172a';
+  ctx.fillStyle = C.cardWord;
   const baseline1 = y + P.wordSize * 0.94;
   ctx.fillText(word, x0, baseline1);
   const ww = ctx.measureText(word).width;
@@ -2018,7 +2169,7 @@ function drawWordCard(ctx, L) {
   const phs = phoneticList();
   if (phs.length) {
     ctx.font = T(P.phDrawSize || P.phSize, 400, F_MONO);
-    ctx.fillStyle = '#7c8aa5';
+    ctx.fillStyle = C.cardPh;
     const phY = baseline1 - P.wordSize * 0.09;
     let px = x0 + ww + 18;
     for (const p of phs) {
@@ -2033,7 +2184,7 @@ function drawWordCard(ctx, L) {
   for (const it of P.defItems) {
     let cx = x0;
     if (it.pos) {
-      const col = POS_COLOR[it.pos] || '#475569';
+      const col = POS_COLOR[it.pos] || C.cardChip;
       const chipH = P.chipSize * 1.72;
       const chipW = it.chipW;
       const chipY = y + (it.h - chipH) / 2;
@@ -2052,7 +2203,7 @@ function drawWordCard(ctx, L) {
     }
     ctx.save();
     ctx.font = T(P.defSize, 400, F_SANS);
-    ctx.fillStyle = '#334155';
+    ctx.fillStyle = C.cardDef;
     it.lines.forEach((ln, i) => {
       ctx.fillText(ln, cx, y + i * P.defLH + P.defSize * 0.86);
     });
@@ -2065,18 +2216,18 @@ function drawWordCard(ctx, L) {
     y += 6;
     for (const ex of P.exItems) {
       ctx.save();
-      ctx.fillStyle = 'rgba(15,23,42,0.06)';
+      ctx.fillStyle = C.cardExBar;
       roundRect(ctx, x0, y + 6, 4, ex.h - 14, 2);
       ctx.fill();
       ctx.restore();
 
       ctx.save();
       ctx.font = T(ex.enSize, 400, F_SANS);
-      ctx.fillStyle = '#475569';
+      ctx.fillStyle = C.cardExEn;
       ex.enLines.forEach((ln, i) => ctx.fillText(ln, x0 + 24, y + i * ex.enSize * 1.5 + ex.enSize * 0.86));
       let yy = y + ex.enLines.length * ex.enSize * 1.5;
       ctx.font = T(ex.cnSize, 400, F_SANS);
-      ctx.fillStyle = '#8b98ad';
+      ctx.fillStyle = C.cardExCn;
       ex.cnLines.forEach((ln, i) => ctx.fillText(ln, x0 + 24, yy + i * ex.cnSize * 1.55 + ex.cnSize * 0.86));
       ctx.restore();
       y += ex.h + 16;
@@ -2188,6 +2339,87 @@ async function resetToInitial(refetch) {
   } catch (e) { /* 模板加载失败就沿用默认比例 */ }
   await loadDaily(!!refetch);
   scheduleRender();
+}
+
+/* ===================== 摇一摇换配色（2026-09-24） =====================
+   四套主题循环切换的**唯一入口**（桌面没有加速度计摇不了，预览与回归走 ?theme=）。
+   iOS 规则：未授权时 devicemotion 事件一个都收不到，且 requestPermission 必须由
+   用户手势触发 —— 「首次摇 → 提示」在授权前根本探测不到，所以收敛为：
+   第一次按下海报时顺带请求权限（系统弹窗），拒绝就静默放弃，绝不反复打扰。
+   摇动判定：先对加速度做**低通估计重力向量**，取线性加速度（加速度 − 重力）的幅值，
+   > SHAKE_LIN_G 记一次「越峰」，SHAKE_PEAK_MS 内累计两次越峰才算一次摇（单次挥手/
+   走路的抖动不够）。用线性加速度而不是「含重力幅值的差」是刻意取舍：摇动主要是
+   **方向翻转**（+x 推 / −x 拉），含重力的总幅值对两者几乎一样大，判不出来；
+   而低通让缓慢的倾斜 / 走路被滤掉，只有真甩动才有大的线性加速度。
+   触发后 SHAKE_COOLDOWN_MS 冷却，防止一次长摇连切好几档。
+   只在空闲态生效：语音播放独占态 / 编辑调整态 / 导出页一律忽略 —— 不打断进行中的交互。 */
+
+const SHAKE_LIN_G = 12;        // 线性加速度幅值阈值（m/s²）：真甩动 15~30，走路 <3
+const SHAKE_PEAK_MS = 600;     // 两次越峰的最大间隔
+const SHAKE_COOLDOWN_MS = 900; // 触发一次后的冷却
+const SHAKE_G_ALPHA = 0.15;    // 重力低通系数：越小越「信历史」，甩动越容易被当作线性加速度
+
+let shakePermAsked = false;    // iOS 授权是否已请求过（无论结果，只问一次）
+let shakeG = { x: 0, y: 0, z: 0 };  // 重力估计（低通）
+let shakeGInit = false;        // 首个采样直接当重力（不做低通），避免开机误判
+let shakeLastPeakAt = 0;       // 上一次越峰时间
+let shakePeaks = 0;            // 窗口内累计越峰数
+let shakeLastFireAt = 0;       // 上一次真正切换主题的时间
+let shakeBound = false;
+
+/** 摇一摇只认空闲态：任何独占/调整流程都不被打断 */
+function shakeIdle() {
+  return !state.voice && !state.edit && !document.body.classList.contains('raw');
+}
+
+function onShake() {
+  if (!shakeIdle()) return;
+  const now = Date.now();
+  if (now - shakeLastFireAt < SHAKE_COOLDOWN_MS) return;
+  const i = THEME_ORDER.indexOf(state.theme);
+  const next = THEME_ORDER[(i + 1) % THEME_ORDER.length];
+  shakeLastFireAt = now;
+  applyTheme(next);            // save 默认 true：摇出来的选择写入 localStorage 记忆
+  toast('配色 · ' + THEMES[next].name);
+}
+
+function bindShake() {
+  if (shakeBound) return;
+  shakeBound = true;
+  /* iOS：requestPermission 必须发生在用户手势里。挂在 pointerdown 捕获段、只问一次；
+     桌面 Chrome 的 DeviceMotionEvent 没有 requestPermission，走不到这支 */
+  window.addEventListener('pointerdown', () => {
+    if (shakePermAsked) return;
+    const DME = window.DeviceMotionEvent;
+    if (DME && typeof DME.requestPermission === 'function') {
+      shakePermAsked = true;
+      DME.requestPermission().catch(() => {});   // 拒绝 → 静默放弃，本轮不再问
+    }
+  }, { capture: true });
+  window.addEventListener('devicemotion', (e) => {
+    const a = e.accelerationIncludingGravity;
+    if (!a || a.x == null) return;
+    if (!shakeGInit) {         // 首个采样直接当重力
+      shakeG = { x: a.x, y: a.y, z: a.z };
+      shakeGInit = true;
+      return;
+    }
+    const g = shakeG;
+    g.x = g.x * (1 - SHAKE_G_ALPHA) + a.x * SHAKE_G_ALPHA;
+    g.y = g.y * (1 - SHAKE_G_ALPHA) + a.y * SHAKE_G_ALPHA;
+    g.z = g.z * (1 - SHAKE_G_ALPHA) + a.z * SHAKE_G_ALPHA;
+    const lx = a.x - g.x, ly = a.y - g.y, lz = a.z - g.z;
+    const mag = Math.sqrt(lx * lx + ly * ly + lz * lz);
+    if (mag <= SHAKE_LIN_G) return;
+    const now = Date.now();
+    if (now - shakeLastPeakAt <= SHAKE_PEAK_MS) shakePeaks += 1;
+    else shakePeaks = 1;
+    shakeLastPeakAt = now;
+    if (shakePeaks >= 2) {
+      shakePeaks = 0;
+      onShake();
+    }
+  });
 }
 
 /** 两个相册选图入口（界面上没有按钮了，都靠单击海报上的图片 / 卡片触发） */
@@ -3249,6 +3481,9 @@ function setOverlay(show, text) {
   /* longPoster 先定，背景比例的默认值要按版本取（标准版铺满 / 长版原比例） */
   if (qs.get('long') === '1' || qs.get('ex') === '1') state.opts.longPoster = true;
   state.opts.bgStyle = initialBgStyle();
+  /* 主题先定（?theme= 当次生效 / localStorage 读回 / 默认夜空）—— 它只改颜色不改版面，
+     放在首帧渲染前是为了避免「先画 night 再换色」的闪变 */
+  initTheme();
   /* 先定设备位图与比例单位：后面所有版面尺寸都建立在它上面 */
   computeCanvasSize();
   /* 竖直居中补正：独立全屏下把布局框补回物理屏（浏览器里恒为 0）。
@@ -3256,6 +3491,7 @@ function setOverlay(show, text) {
   syncStageCenter();
   watchViewport();
   bindInputs();
+  bindShake();        /* 摇一摇换配色：监听与 iOS 授权的 pointerdown 都在这里挂 */
 
   /* 字体度量必须先就绪，否则折行与居中会算错 —— 用回退字体的度量算出来的版面，
      和字体到位后重排的结果不一样（刷新前后观感不一致）。
@@ -3292,6 +3528,10 @@ function setOverlay(show, text) {
          不必在几百像素高的测试视口里反复拖动去累积倍率 */
       setZoom: applyZoom,
       zoomMax: zoomMaxOf,  // 某区的放大上限（2 区 3 倍、其余 1.6），自证用
+      /* 摇一摇换配色：回归合成 devicemotion 事件走的就是 bindShake 里那条真监听；
+         applyTheme 直接暴露只为截图/自证（与手势同一条 applyTheme 路径，不是旁路） */
+      setTheme: applyTheme,
+      themeOrder: THEME_ORDER,
       scheduleRender,     // 换图调整层：回归合成纯色图后驱动一次重绘，做像素级判定
       /* 排版中间量：排查「自适应倍率算错」时可以直接在页面里量 */
       textTotalAt: (k) => buildTextBlockStandard(cvs.getContext('2d'), k).total,
