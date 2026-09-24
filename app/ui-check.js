@@ -170,6 +170,11 @@ function ok(label, cond, extra) {
     /* hasTouch：调整模式的「双指捏合」只能靠触摸事件模拟 */
     const p = await browser.newPage({ viewport, deviceScaleFactor: 2, hasTouch: true });
     await p.addInitScript(AUDIO_STUB);        /* 语音不能依赖真实播放，见 AUDIO_STUB 注释 */
+    /* 摇一摇授权桩：新版 Chromium 自己实现了 requestPermission，合成 pointerup（非真手势）
+       会被真 API 拒绝并弹「未获权限」toast，干扰切版/主题断言 —— **无条件覆盖**（条件式
+       会漏桩走到真 API，实测踩过两回） */
+    await p.addInitScript('if (window.DeviceMotionEvent)' +
+      ' window.DeviceMotionEvent.requestPermission = () => Promise.resolve("granted");');
     p.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
     p.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
     await p.goto(url, { waitUntil: 'load' });
@@ -1636,20 +1641,128 @@ function ok(label, cond, extra) {
     `设计高 ${Math.round(fd.canvas.h)}，U=${fd.canvas.u}`);
   await mobileCtx.close();
 
-  /* ---------------- 长版：本阶段必须没被动过 ---------------- */
-  console.log('长版（应保持旧版面）');
+  /* ---------------- 长版：标准版全部交互 + 单词卡（无例句）（2026-09-24 迁移） ---------------- */
+  console.log('长版（交互 + 配色全量迁移，去例句）');
   const lp = await open(BASE + '/?debug=1&long=1');
   await lp.waitForTimeout(800);
   const ld = await info(lp);
-  ok('长版仍有单词卡与关键词', ids(ld).includes('panel') && ids(ld).includes('title'), ids(ld).join(','));
-  ok('长版仍按内容长高（设计高 ≥ 设备画布高）', ld.canvas.h >= 1920, 'h=' + ld.canvas.h);
-  ok('长版：画布缓冲比设备位图更高（内容长高，不是被裁掉）',
-    ld.canvas.bitmapH > ld.canvas.physH,
-    `缓冲 ${ld.canvas.bitmapH} vs 设备 ${ld.canvas.physH}`);
+  ok('长版有单词卡与关键词、信息卡', ids(ld).includes('panel') && ids(ld).includes('title') && ids(ld).includes('card'), ids(ld).join(','));
+  ok('长版例句区（ex-0/ex-1）已整体移除，面板相应收紧',
+    !ids(ld).some((x) => x.startsWith('ex')), ids(ld).filter((x) => x.startsWith('panel') || x.startsWith('def') || x.startsWith('chip')).join(','));
+  ok('长版按内容取高（CH = max(1920, 内容高)）', ld.canvas.h >= 1920, 'h=' + ld.canvas.h);
   ok('长版仍是原比例模式（只有标准版走「宽度铺满 + 裁切」）',
     ld.opts.bgStyle === 'natural' && ld.text.band === null, JSON.stringify(ld.opts));
+
+  /* 单击 en 朗读（长版同语义） */
+  const lBefore = ld;
+  await tap(lp, 'en');
+  const lSpeak = await info(lp);
+  ok('长版单击英文句 = 朗读（lastSpeakAt 前进）',
+    lSpeak.lastSpeakAt > (lBefore.lastSpeakAt || 0) || lSpeak.voice,
+    `lastSpeakAt ${lBefore.lastSpeakAt || 0} → ${lSpeak.lastSpeakAt}`);
+  await lp.evaluate(() => window.__ds.stopVoice && window.__ds.stopVoice('tap'));
+
+  /* 单击日期 = 今日⇄昨日 */
+  const dateBefore = (await info(lp)).meta.date;
+  await tap(lp, 'badge-date');
+  const dateAfter = (await info(lp)).meta.date;
+  ok('长版单击日期胶囊 = 今日⇄昨日切换', dateAfter !== dateBefore, `${dateBefore} → ${dateAfter}`);
+  await tap(lp, 'badge-date');   /* 切回今天，免影响后续 */
+
+  /* 双击删除 en：被删元素从标注表消失，其余内容上移 */
+  const enBoxBefore = box(ld, 'en');
+  await tap(lp, 'en', 0, true);
+  const lHidden = await info(lp);
+  ok('长版双击英文句 = 删除（标注表不再产出 en 区）',
+    lHidden.meta.hidden.en === true && !ids(lHidden).includes('en'),
+    `hidden=${JSON.stringify(lHidden.meta.hidden)}`);
+  ok('长版删除后其余内容上移补齐（source 顶 ≥ 原位置）',
+    !box(lHidden, 'source') || box(lHidden, 'source')[1] >= enBoxBefore[1]);
+  await lp.reload({ waitUntil: 'load' });
+  await lp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await lp.waitForTimeout(600);
+
+  /* 上下拖动缩放：3/4/5 联动、标题/单词卡不动 */
+  const lZoom0 = await info(lp);
+  await dragY(lp, 'en', -110);
+  const lZoom1 = await info(lp);
+  ok('长版上滑 = 句子区联动放大（3/4/5 fx 同步前进、字号变大）',
+    lZoom1.text.fx.en > 1 && lZoom1.text.fx.en === lZoom1.text.fx.cn &&
+    lZoom1.text.fx.en === lZoom1.text.fx.source,
+    `fx=${JSON.stringify(lZoom1.text.fx)}`);
+  ok('长版缩放不牵动日期胶囊（2 区独立）',
+    lZoom1.text.fx['badge-date'] === 1);
+
+  /* 下拉更新：复位内容（含 hidden/fx），版式保留。
+     起点用左边距空白（x<48 不在任何区域上，命中表必为空 → 走下拉而非缩放） */
+  const lPullStart = await lp.evaluate(() => window.__ds.toClient(20, 900));
+  await lp.mouse.move(lPullStart.x, lPullStart.y); await lp.mouse.down();
+  for (let i = 1; i <= 12; i++) { await lp.mouse.move(lPullStart.x, lPullStart.y + i * 12); await lp.waitForTimeout(20); }
+  await lp.mouse.up();
+  await lp.waitForTimeout(2600);
+  const lReset = await info(lp);
+  ok('长版下拉更新：fx/hidden 复位、版式保留（opts.longPoster 不变）',
+    lReset.text.fx.en === 1 && lReset.meta.hidden.en === false && lReset.opts.longPoster === true,
+    `fx.en=${lReset.text.fx.en} long=${lReset.opts.longPoster}`);
   await shot(lp, 'l1-long');
   await lp.close();
+
+  /* ---------------- 双指扩/捏切版（2026-09-24） ---------------- */
+  console.log('双指扩/捏切版');
+  const mStart = await open(BASE + '/?debug=1');
+  await mStart.evaluate(() => localStorage.removeItem('ds:mode'));
+  await mStart.reload({ waitUntil: 'load' });
+  await mStart.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await mStart.waitForTimeout(600);
+  const twoFinger = (page, ratio) => page.evaluate(async (r) => {
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    const stage = document.getElementById('stage');
+    const fire = (type, id, x, y) => stage.dispatchEvent(new PointerEvent(type, {
+      pointerId: id, clientX: x, clientY: y, bubbles: true, pointerType: 'touch', isPrimary: id === 9,
+    }));
+    const cx = 195, cy = 400;
+    fire('pointerdown', 9, cx - 40, cy);
+    fire('pointerdown', 10, cx + 40, cy);
+    for (let i = 1; i <= 10; i++) {
+      const half = 40 * (1 + (r - 1) * i / 10);
+      fire('pointermove', 9, cx - half, cy);
+      fire('pointermove', 10, cx + half, cy);
+      await sleep(40);
+    }
+    fire('pointerup', 9, cx - 40 * r, cy);
+    fire('pointerup', 10, cx + 40 * r, cy);
+  }, ratio);
+  await twoFinger(mStart, 2.0);
+  await mStart.waitForTimeout(700);
+  let mm = await info(mStart);
+  ok('双指扩：标准版 → 长版（toast 报版式、写入记忆）',
+    mm.opts.longPoster === true &&
+    (await mStart.evaluate(() => document.getElementById('toast').textContent)) === '已切换到长版' &&
+    (await mStart.evaluate(() => localStorage.getItem('ds:mode'))) === 'long');
+  ok('切到长版后标注表出现 title/单词卡、无例句',
+    ids(mm).includes('title') && ids(mm).includes('panel') && !ids(mm).some((x) => x.startsWith('ex')));
+  await twoFinger(mStart, 0.4);
+  await mStart.waitForTimeout(700);
+  mm = await info(mStart);
+  ok('双指捏：长版 → 标准版（记忆同步）',
+    mm.opts.longPoster === false &&
+    (await mStart.evaluate(() => localStorage.getItem('ds:mode'))) === 'standard');
+  /* 冷却：切换后 900ms 内的另一组双指不再触发（扩→long 后立刻捏，应仍是 long） */
+  await twoFinger(mStart, 2.0);
+  await mStart.waitForTimeout(200);          /* < 900ms 冷却 */
+  await twoFinger(mStart, 2.0);
+  await mStart.waitForTimeout(300);
+  mm = await info(mStart);
+  ok('冷却内的连续双指只算一次', mm.opts.longPoster === true);
+  /* 记忆与 URL 优先级 */
+  await mStart.reload({ waitUntil: 'load' });
+  await mStart.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  ok('reload 后回到记忆的版式（long）', (await info(mStart)).opts.longPoster === true);
+  await mStart.goto(BASE + '/?debug=1', { waitUntil: 'load' });   /* 无参 → 记忆 */
+  await mStart.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  ok('无参进入 = 记忆的版式（URL 只在显式 ?long=1 时强制）',
+    (await info(mStart)).opts.longPoster === true);
+  await mStart.close();
 
   /* ---------------- raw ---------------- */
   const rp = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });

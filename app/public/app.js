@@ -356,6 +356,44 @@ function initTheme() {
   return state.theme;
 }
 
+/* ---------------- 版式（标准版 / 长版）与双指切换（2026-09-24） ---------------- */
+
+const MODE_KEY = 'ds:mode';
+
+/* 双指切版阈值：扩 ≥1.6 倍 = 标准版→长版；捏 ≤0.62 倍 = 长版→标准版。
+   冷却防一次手势连切；调整模式里的双指仍归图片缩放（modePtrs 只在常态记录） */
+const MODE_SWITCH_EXPAND = 1.6;
+const MODE_SWITCH_PINCH = 0.62;
+const MODE_SWITCH_COOLDOWN = 900;
+
+/**
+ * 切换版式并重绘。切换 = 用户主动手势（双指扩/捏），所以 fx 一并复位（版式换了，
+ * 各区的字号交互值没有延续意义）；版式选择写入 localStorage（按设备记忆）。
+ */
+function applyMode(id) {
+  const long = id === 'long';
+  if (state.opts.longPoster === long) return;
+  state.opts.longPoster = long;
+  state.fx = defaultFx();
+  try { localStorage.setItem(MODE_KEY, long ? 'long' : 'standard'); } catch (e) {}
+  toast(long ? '已切换到长版' : '已切换到标准版');
+  scheduleRender();
+}
+
+/**
+ * 启动时定版式：URL ?long=1（或旧参数 ?ex=1）**强制指定**（优先于记忆）；
+ * 否则读回上次的版式；都没有 = 标准版。静默设置，不 toast（这不是用户手势）。
+ */
+function initMode() {
+  if (QS.get('long') === '1' || QS.get('ex') === '1') {
+    state.opts.longPoster = true;
+    return;
+  }
+  let saved = null;
+  try { saved = localStorage.getItem(MODE_KEY); } catch (e) {}
+  state.opts.longPoster = saved === 'long';
+}
+
 /** 摇一摇用的循环顺序 = THEMES 的书写顺序（上面注释里说了） */
 const THEME_ORDER = Object.keys(THEMES);
 
@@ -409,7 +447,7 @@ const state = {
   edit: null,
   opts: {
     bgStyle: DEFAULT_BG,
-    longPoster: false,    // true = 长版海报（?long=1），本阶段保持旧版面不动
+    longPoster: false,    // true = 长版海报（?long=1 强制 / 双指扩切换 / 记忆读回），见 applyMode/initMode
   },
 };
 
@@ -984,7 +1022,11 @@ function textFit(ctx, bandH) {
 
 /** 长版：原有流式版面（单词卡 + 例句），按内容长高 */
 function computeLayoutLong(ctx) {
-  const M = measureAll(ctx, 1);
+  /* 交互倍率（2026-09-24 起长版与标准版同语义）：3/4/5 联动缩句子、2 区缩日期胶囊；
+     标题 / 分隔线 / 单词卡不随缩放。长版靠画布长高，没有标准版的「保底缩小」。 */
+  const g = regionFx('en').scale;
+  const dg = regionFx('badge-date').scale;
+  const M = measureAll(ctx, 1, { en: g, date: dg });
 
   CH = Math.max(CH_MIN, Math.ceil(M.total / 2) * 2);
 
@@ -994,10 +1036,9 @@ function computeLayoutLong(ctx) {
   if (bottomY > card.y) card.y = bottomY;
 
   return {
-    /* 长版版面本阶段不动：字号仍由它自己的流式倍率 M.K 决定（已落在 M.text.* 里）；
-       对外统一成新口径 —— fx 全 1、base 1，免得 inspect().text 出现两套形状 */
+    /* 长版版面：字号由它自己的流式倍率决定，用户缩放叠在其上（fx 透出真实值） */
     base: 1,
-    fx: { 'badge-date': 1, en: 1, cn: 1, source: 1 },
+    fx: { 'badge-date': dg, en: g, cn: g, source: g },
     textX: MX,                /* 长版继续用 84 的文字安全边距 */
     band: null,
     textTop: M.textTop,
@@ -1019,11 +1060,11 @@ function computeLayoutLong(ctx) {
   };
 }
 
-function measureAll(ctx, scale) {
+function measureAll(ctx, scale, fx) {
   const K = scale;
   const textTop = textTopY();
 
-  const text = buildTextBlock(ctx, K);
+  const text = buildTextBlock(ctx, K, fx);
   const textBottom = textTop + text.total;
 
   const panel = buildWordCard(ctx, K, textBottom + GAP_TEXT_PANEL);
@@ -1038,14 +1079,19 @@ function measureAll(ctx, scale) {
 }
 
 /** 长版文字块：关键词标题 + 分隔线 + 英文 + 中文 + 出处 */
-function buildTextBlock(ctx, K) {
+function buildTextBlock(ctx, K, fx) {
   const maxW = CW - 2 * MX;
+  const h = state.hidden;   /* 双击删除（2026-09-24 起长版同样支持）：被删元素不参与排版 */
+  /* 句子组（3/4/5 联动）与日期（2 区）的交互倍率：与标准版同语义 —— 只缩句子，
+     标题 / 分隔线 / 单词卡不跟着变。未传 fx 时为 1（标注/测量路径）。 */
+  const g = (fx && fx.en) || 1;
+  const dg = (fx && fx.date) || 1;
 
   /* 日期徽标占位 → 标题可用宽度 */
   let badgeW = 0;
-  if (state.content.date) {
-    ctx.font = T(25, 600, F_SANS);
-    badgeW = measureSpaced(ctx, state.content.date, 2.5) + 56;
+  if (state.content.date && !h.date) {
+    ctx.font = T(25 * dg, 600, F_SANS);
+    badgeW = measureSpaced(ctx, state.content.date, 2.5 * dg) + 56 * dg;
   }
 
   /* 标题（关键词）：自动缩到一行放得下 */
@@ -1064,24 +1110,26 @@ function buildTextBlock(ctx, K) {
   const afterTitle = titleH + (rule.on ? rule.gapTop + rule.h + rule.gapBottom : 26);
 
   /* 英文 */
-  const enSize = 42 * K;
+  const enSize = 42 * K * g;
   const enLH = enSize * 1.32;
   ctx.font = T(enSize, 400, F_SANS);
   const enLines = wrapText(ctx, state.content.en, maxW);
+  const enOn = !h.en && enLines.length;
   const enY = afterTitle;
 
   /* 中文 */
-  const cnSize = 42 * K;
+  const cnSize = 42 * K * g;
   const cnLH = cnSize * 1.46;
-  const cnGap = 34 * K;
+  const cnGap = 34 * K * g;
   ctx.font = T(cnSize, 400, F_SANS);
   const cnLines = wrapText(ctx, state.content.cn, maxW);
-  const cnY = enY + enLines.length * enLH + cnGap;
-  const cnBottom = cnY + cnLines.length * cnLH;
+  const cnOn = !h.cn && cnLines.length;
+  const cnY = enY + (enOn ? enLines.length * enLH + cnGap : 0);
+  const cnBottom = cnY + (cnOn ? cnLines.length * cnLH : 0);
 
   /* 出处：紧跟在句子下方，不再放进单词卡片 */
-  const sourceSize = 29 * K;
-  const sourceOn = !!state.content.source;
+  const sourceSize = 29 * K * g;
+  const sourceOn = !!state.content.source && !h.source;
   const sourceY = cnBottom + (sourceOn ? 30 * K : 0);
 
   return {
@@ -1089,10 +1137,10 @@ function buildTextBlock(ctx, K) {
     title: { size: ts, h: titleH, text: word, badgeW },
     rule: Object.assign({}, rule, { y: titleH + rule.gapTop }),
     /* 长版的日期胶囊：字号与胶囊尺寸**沿用旧值**（长版版面本阶段不动） */
-    date: { on: !!state.content.date, y: 4, h: 52, w: badgeW, size: 25, k: 1 },
+    date: { on: !!state.content.date && !h.date, y: 4, h: 52 * dg, w: badgeW, size: 25 * dg, k: dg },
     /* 长版的英文句仍用无衬线（本轮只改标准版 3 区）；family 写在这里，绘制侧就不需要判版本 */
-    en: { on: true, size: enSize, lh: enLH, lines: enLines, y: enY, family: F_SANS },
-    cn: { on: true, size: cnSize, lh: cnLH, lines: cnLines, y: cnY, family: F_SANS },
+    en: { on: enOn, size: enSize, lh: enLH, lines: enLines, y: enY, family: F_SANS },
+    cn: { on: cnOn, size: cnSize, lh: cnLH, lines: cnLines, y: cnY, family: F_SANS },
     source: { on: sourceOn, size: sourceSize, y: sourceY, text: state.content.source },
   };
 }
@@ -1271,22 +1319,10 @@ function buildWordCard(ctx, K, topY) {
     defItems.push({ pos: d.pos || '', chipW, lines, h: Math.max(defLH, lines.length * defLH) });
   }
 
-  /* 例句只在「长版海报」下出现 */
+  /* 例句区（ex-0/ex-1）已按用户要求整体移除（2026-09-24）：长版单词卡只保留
+     关键词 / 音标 / 释义 / 词性 chips，面板相应收紧、信息卡上移、画布总高变短。
+     exItems 保留为空数组 —— 下游绘制/标注/命中表按空列表自然跳过，形状不变 */
   const exItems = [];
-  if (state.opts.longPoster) {
-    for (const e of state.content.examples.slice(0, 3)) {
-      const enSize = 28 * K;
-      const cnSize = 26 * K;
-      ctx.font = T(enSize, 400, F_SANS);
-      const enLines = wrapText(ctx, e.en, innerW - 24);
-      ctx.font = T(cnSize, 400, F_SANS);
-      const cnLines = wrapText(ctx, e.cn, innerW - 24);
-      exItems.push({
-        enLines, cnLines, enSize, cnSize,
-        h: enLines.length * enSize * 1.5 + cnLines.length * cnSize * 1.55,
-      });
-    }
-  }
 
   let contentH = row1H + 16;
   for (const it of defItems) contentH += it.h + 10;
@@ -1920,24 +1956,28 @@ function drawTopText(ctx, L) {
   }
 
   /* 英文 */
-  ctx.save();
-  ctx.font = T(L.en.size, 400, L.en.family || F_SANS);   /* 与量测同一个字族，见 buildTextBlockStandard */
-  ctx.fillStyle = P.colEn;
-  shadow();
-  L.en.lines.forEach((ln, i) => {
-    ctx.fillText(ln, L.textX, L.textTop + L.en.y + i * L.en.lh + L.en.size * 0.86);
-  });
-  ctx.restore();
+  if (L.en.on !== false) {
+    ctx.save();
+    ctx.font = T(L.en.size, 400, L.en.family || F_SANS);   /* 与量测同一个字族，见 buildTextBlockStandard */
+    ctx.fillStyle = P.colEn;
+    shadow();
+    L.en.lines.forEach((ln, i) => {
+      ctx.fillText(ln, L.textX, L.textTop + L.en.y + i * L.en.lh + L.en.size * 0.86);
+    });
+    ctx.restore();
+  }
 
   /* 中文 */
-  ctx.save();
-  ctx.font = T(L.cn.size, 400, F_SANS);
-  ctx.fillStyle = P.colCn;
-  shadow();
-  L.cn.lines.forEach((ln, i) => {
-    ctx.fillText(ln, L.textX, L.textTop + L.cn.y + i * L.cn.lh + L.cn.size * 0.86);
-  });
-  ctx.restore();
+  if (L.cn.on !== false) {
+    ctx.save();
+    ctx.font = T(L.cn.size, 400, F_SANS);
+    ctx.fillStyle = P.colCn;
+    shadow();
+    L.cn.lines.forEach((ln, i) => {
+      ctx.fillText(ln, L.textX, L.textTop + L.cn.y + i * L.cn.lh + L.cn.size * 0.86);
+    });
+    ctx.restore();
+  }
 
   /* 出处：紧跟在句子下面 */
   if (L.source.on) {
@@ -1953,7 +1993,7 @@ function drawTopText(ctx, L) {
      标准版固定在中部区域顶部靠右，长版与标题同行（坐标为画布绝对值） */
   if (L.date && L.date.on) {
     const label = state.content.date;
-    /* 字号 / 字距 / 内边距都读版面给的（标准版会随 2 区的交互缩放变化，长版恒为旧值） */
+    /* 字号 / 字距 / 内边距都读版面给的（标准版与长版都会随 2 区的交互缩放变化） */
     const dk = L.date.k == null ? 1 : L.date.k;
     const dsz = L.date.size == null ? 25 : L.date.size;
     ctx.font = T(dsz, 600, F_SANS);
@@ -2027,7 +2067,6 @@ function drawProfileCard(ctx, L) {
  * 退出方式只有一个：点被调区域以外的地方。
  */
 function startEdit(target) {
-  if (state.opts.longPoster) return;      /* 长版本阶段不参与 */
   if (target === 'img' && !state.bgImage) return;
   if (target === 'card' && !state.template) return;
   state.edit = { target, moved: false };
@@ -2321,7 +2360,6 @@ function yesterdayISO() {
  * 所以这里用「apiData 是否换了引用」判断有没有切成功，再补一句人话。
  */
 async function toggleDay() {
-  if (state.opts.longPoster) return;
   state.lastToggleAt = Date.now();     /* 回归可断言「这次点击确实被识别成单击」 */
   const iso = yesterdayISO();
   if (state.viewDate) {                 /* 正在看往日 → 回今天 */
@@ -2414,8 +2452,9 @@ function bindShake() {
      开始）时 iOS 不认它是有效手势，Promise 直接 reject（NotAllowedError），系统弹窗
      一次都不会出现。桌面 Chrome 的 DeviceMotionEvent 没有 requestPermission，
      走不到这支；结果无论成败都落 shakeDiag（真机 ?diag=1 可读）。 */
-  window.addEventListener('pointerup', () => {
+  window.addEventListener('pointerup', (e) => {
     if (shakePermAsked) return;
+    if (e.pointerType && e.pointerType !== 'touch') return;   /* 桌面鼠标/触控板不触发授权 */
     const DME = window.DeviceMotionEvent;
     if (DME && typeof DME.requestPermission === 'function') {
       shakePermAsked = true;
@@ -2994,6 +3033,13 @@ function bindGestures() {
   let panLast = null;        /* 单指拖动的上一个位置 */
   let editStart = null;      /* 调整模式下这一下的起点 { x, y, moved } */
 
+  /* 双指扩/捏切版（常态手势）：与调整模式的 ptrs/pinch 完全独立 ——
+     调整模式里 pointerdown 提前 return，modePtrs 根本不会记录，互不干扰 */
+  const modePtrs = new Map();   /* pointerId → { x, y } */
+  let modePinch0 = 0;           /* 两指按下时的初始距离 */
+  let modeSwitchFired = false;  /* 这组两指是否已经触发过切换（一组只切一次） */
+  let modeSwitchAt = 0;         /* 上一次切换时间（冷却） */
+
   const clear = () => {
     clearTimeout(holdTimer);
     holdTimer = null;
@@ -3102,8 +3148,17 @@ function bindGestures() {
     longFired = false;
     zoomDrag = null;
     pullDrag = null;
-    /* 按起点元素分流：句子上是缩放，其余地方是下拉更新（长版不参与） */
-    if (!state.opts.longPoster) {
+    /* 双指扩/捏切版：只在空闲态记录（播放 / 导出页不响应；调整模式在上面已提前 return） */
+    if (!state.voice && !document.body.classList.contains('raw')) {
+      modePtrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (modePtrs.size === 2) {
+        const [a, b] = [...modePtrs.values()];
+        modePinch0 = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+        modeSwitchFired = false;
+      }
+    }
+    /* 按起点元素分流：句子上是缩放，其余地方是下拉更新（长版同语义，2026-09-24 迁移） */
+    {
       const hit = hitTestAt(e.clientX, e.clientY);
       if (hit && ZOOM_REGIONS.has(hit.id)) {
         /* 记下拖的是哪一区，以及该区（组）的当前倍率 —— 联动组里三个值本来就相同 */
@@ -3158,6 +3213,26 @@ function bindGestures() {
       }
       return;
     }
+    /* 双指扩/捏切版判定（常态手势，一组两指只触发一次，冷却防连切） */
+    if (modePtrs.has(e.pointerId)) {
+      const rec = modePtrs.get(e.pointerId);
+      rec.x = e.clientX;
+      rec.y = e.clientY;
+      if (modePtrs.size >= 2 && modePinch0 && !modeSwitchFired &&
+          Date.now() - modeSwitchAt >= MODE_SWITCH_COOLDOWN) {
+        const [a, b] = [...modePtrs.values()];
+        const ratio = Math.hypot(a.x - b.x, a.y - b.y) / modePinch0;
+        if (ratio >= MODE_SWITCH_EXPAND && !state.opts.longPoster) {
+          modeSwitchFired = true;
+          modeSwitchAt = Date.now();
+          applyMode('long');
+        } else if (ratio <= MODE_SWITCH_PINCH && state.opts.longPoster) {
+          modeSwitchFired = true;
+          modeSwitchAt = Date.now();
+          applyMode('standard');
+        }
+      }
+    }
     if (zoomDrag) {
       const dy = e.clientY - zoomDrag.startY;
       if (!zoomDrag.active && Math.abs(dy) > PRESS.moved) {
@@ -3188,6 +3263,8 @@ function bindGestures() {
   });
 
   stage.addEventListener('pointerup', (e) => {
+    /* 双指切版的指针收尾：两指都抬起后重置基准 */
+    if (modePtrs.delete(e.pointerId) && !modePtrs.size) modePinch0 = 0;
     /* 播放态独占：只有「按在波形区内、且没拖动」的那一下才停；
        按在别处、或按下后拖走了，都当作没发生（其余区域一律不可操作） */
     if (state.voice) {
@@ -3260,8 +3337,7 @@ function bindGestures() {
       return;
     }
 
-    /* 句子 / 日期：单击有动作、双击是删除 → 进槽等 300ms 确认 */
-    if (state.opts.longPoster) return;              /* 长版本轮交互不动 */
+    /* 句子 / 日期：单击有动作、双击是删除 → 进槽等 300ms 确认（长版同语义，2026-09-24 迁移） */
     if (!SINGLE_TAP_REGIONS.has(hit.id)) return;
     /* iOS 只认手势调用栈里的播放：先静音播一下解锁，300ms 后再正式播。
        只有 3 区（en）朗读 —— 中文句 / 出处的单击保留 300ms 判定只为双击删除，不发音。
@@ -3274,6 +3350,8 @@ function bindGestures() {
     pullDrag = null;
     dropPendingTap();
     resetAdjustPointers();
+    modePtrs.clear();
+    modePinch0 = 0;
     clear();
   });
   stage.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -3523,7 +3601,9 @@ function setOverlay(show, text) {
   const qs = QS;
   if (qs.get('raw') === '1') document.body.classList.add('raw');
   /* longPoster 先定，背景比例的默认值要按版本取（标准版铺满 / 长版原比例） */
-  if (qs.get('long') === '1' || qs.get('ex') === '1') state.opts.longPoster = true;
+  /* 版式先定（URL ?long=1 强制 > localStorage 记忆 > 标准版）—— 同样要在首帧渲染前，
+     否则标准版先渲染一帧再切长版会闪一次 */
+  initMode();
   state.opts.bgStyle = initialBgStyle();
   /* 主题先定（?theme= 当次生效 / localStorage 读回 / 默认夜空）—— 它只改颜色不改版面，
      放在首帧渲染前是为了避免「先画 night 再换色」的闪变 */
@@ -3576,6 +3656,8 @@ function setOverlay(show, text) {
          applyTheme 直接暴露只为截图/自证（与手势同一条 applyTheme 路径，不是旁路） */
       setTheme: applyTheme,
       themeOrder: THEME_ORDER,
+      /* 版式切换：回归可直接驱动（与双指手势同一条 applyMode 路径） */
+      setMode: applyMode,
       scheduleRender,     // 换图调整层：回归合成纯色图后驱动一次重绘，做像素级判定
       /* 排版中间量：排查「自适应倍率算错」时可以直接在页面里量 */
       textTotalAt: (k) => buildTextBlockStandard(cvs.getContext('2d'), k).total,
