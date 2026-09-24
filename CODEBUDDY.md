@@ -212,7 +212,9 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   改高度**只改 `computeLayoutStandard` 里那个 `h`**，不要在绘制里另做补偿。
 - 将来要给文字区加「交互式移动」：在 `state.fx[id]` 里补 `dx/dy`，只改手势与绘制两处。
 - **配色唯一来源是 `THEMES` 调色板（2026-09-24 摇一摇换配色）**：四主题
-  `night 墨蓝夜空`（默认）/ `paper 暖纸墨字`（唯一浅色，反色）/ `pine 松烟墨绿` / `dusk 紫霞暮色`。
+  `night 墨蓝夜空`（默认，冷暗）/ `paper 暖纸墨字`（暖浅，反色）/ `ember 绛红夜`（暖暗）/
+  `celadon 青瓷浅冷`（冷浅）—— 四套 = 暗蓝/暖浅/暗红/冷浅，小图预览也一眼可辨
+  （2026-09-24 用户定稿：pine/dusk 与 night 太相似，已删）。
   背景渐变、压暗层、四段文字色、强调色、卡片底与字色**全部从 `PAL()` 读**，
   画布与 `buildAnnots` 的标注表都不许再写死颜色 —— **新增主题 = 在 THEMES 加一条**，
   循环顺序 = 书写顺序。`POS_COLOR`（词性色标）四主题共用（卡面都近白）。

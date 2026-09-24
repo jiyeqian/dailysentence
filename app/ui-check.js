@@ -1027,19 +1027,20 @@ function ok(label, cond, extra) {
     await tp.close();
   }
   {
-    const { tp, d2, cs } = await themeEnter('pine');
-    ok('?theme=pine：松烟墨绿生效、底色仍是暗色',
-      d2.theme.id === 'pine' && (await sampleLum(tp)) < 60);
-    ok('pine 的波形强调色换成琥珀金（与 night/paper 都不同）',
-      cs.wave.startsWith('rgba(245,158,11'), cs.wave);
+    const { tp, d2, cs } = await themeEnter('ember');
+    ok('?theme=ember：绛红夜生效、底色仍是暗色',
+      d2.theme.id === 'ember' && (await sampleLum(tp)) < 60);
+    ok('ember 的波形强调色换成玫瑰金（与 night/paper 都不同）',
+      cs.wave.startsWith('rgba(232,160,168'), cs.wave);
     await tp.close();
   }
   {
-    const { tp, d2, cs } = await themeEnter('dusk');
-    ok('?theme=dusk：紫霞暮色生效、底色仍是暗色',
-      d2.theme.id === 'dusk' && (await sampleLum(tp)) < 60);
-    ok('dusk 的波形强调色换成玫瑰金（与 pine 不同）',
-      cs.wave.startsWith('rgba(232,160,168'), cs.wave);
+    const { tp, d2, cs } = await themeEnter('celadon');
+    const lum = await sampleLum(tp);
+    ok('?theme=celadon：青瓷浅冷生效、底色反转为浅色（与 paper 一暖一冷）',
+      d2.theme.id === 'celadon' && lum > 150, 'lum=' + Math.round(lum));
+    ok('celadon 的波形强调色换成青瓷绿（与 night/paper/ember 都不同）',
+      cs.wave.startsWith('rgba(42,157,141'), cs.wave);
     await tp.close();
   }
   {
@@ -1077,33 +1078,54 @@ function ok(label, cond, extra) {
   await sp.waitForTimeout(1000);
   await shakeInPage();
   d = await info(sp);
-  ok('出冷却后摇③ 切到 pine（循环顺序 night→paper→pine→dusk→night）',
-    d.theme.id === 'pine');
+  ok('出冷却后摇③ 切到 ember（循环顺序 night→paper→ember→celadon→night）',
+    d.theme.id === 'ember' &&
+    (await sp.evaluate(() => document.getElementById('toast').textContent)) === '配色 · 绛红夜');
   /* 播放独占态：摇动被忽略，不打断朗读 */
   await sp.evaluate(() => window.__ds.playVoice());
   await sp.waitForTimeout(400);
   await shakeInPage();
   d = await info(sp);
   ok('播放独占态摇动不切主题（也不停播）',
-    d.theme.id === 'pine' && !!d.voice);
+    d.theme.id === 'ember' && !!d.voice);
   await sp.evaluate(() => window.__ds.stopVoice('tap'));
   /* reload 记忆：无参进入应停在摇出来的主题上 */
   await sp.reload({ waitUntil: 'load' });
   await sp.waitForFunction(() => window.__ds && window.__ds.state.layout);
   d = await info(sp);
-  ok('reload 后主题保留（localStorage 读回）', d.theme.id === 'pine');
+  ok('reload 后主题保留（localStorage 读回）', d.theme.id === 'ember');
   /* URL 不污染记忆：?theme= 只当次生效 */
-  await sp.goto(BASE + '/?debug=1&theme=dusk', { waitUntil: 'load' });
+  await sp.goto(BASE + '/?debug=1&theme=celadon', { waitUntil: 'load' });
   await sp.waitForFunction(() => window.__ds && window.__ds.state.layout);
   const urlVisit = await sp.evaluate(() => ({
     theme: window.__ds.state.theme, saved: localStorage.getItem('ds:theme') }));
-  ok('?theme=dusk 只当次生效，不写入记忆', urlVisit.theme === 'dusk' && urlVisit.saved === 'pine',
+  ok('?theme=celadon 只当次生效，不写入记忆', urlVisit.theme === 'celadon' && urlVisit.saved === 'ember',
     JSON.stringify(urlVisit));
   await sp.goto(BASE + '/?debug=1', { waitUntil: 'load' });
   await sp.waitForFunction(() => window.__ds && window.__ds.state.layout);
   d = await info(sp);
-  ok('退出 URL 预览后回到记忆的主题', d.theme.id === 'pine');
+  ok('退出 URL 预览后回到记忆的主题', d.theme.id === 'ember');
   await sp.close();
+
+  /* 6 区黑边回归（2026-09-24 真机反馈）：卡片图内缩裁切后，卡片顶（y=1376）之下
+     不允许出现暗像素带 —— 图源最外圈的杂边必须永远裁在圆角之外。
+     浅色主题下才看得清，所以用 paper 验证；深色主题靠同一绘制路径保证。 */
+  {
+    const { tp } = await themeEnter('paper');
+    await tp.waitForTimeout(1300);           /* 等首帧画完（卡片图异步加载），否则采样到空画布 */
+    const dark = await tp.evaluate(() => {
+      const c = document.getElementById('poster');
+      const ctx = c.getContext('2d');
+      const lum = (x, y) => { const d = ctx.getImageData(x, y, 1, 1).data; return 0.3 * d[0] + 0.59 * d[1] + 0.11 * d[2]; };
+      let n = 0;
+      for (let y = 1378; y <= 1386; y += 2) {
+        for (let x = 60; x <= 1020; x += 60) if (lum(x, y) < 100) n++;
+      }
+      return n;
+    });
+    ok('6 区卡片上缘无暗像素带（图源外圈杂边被内缩裁切裁掉）', dark === 0, 'dark=' + dark);
+    await tp.close();
+  }
 
   /* iOS 授权链路（2026-09-24 真机踩坑后补）：授权必须由**收尾手势**（pointerup）触发 ——
      旧实现挂在 pointerdown 上，iOS 不认它是有效手势，requestPermission 直接 reject
@@ -1524,8 +1546,9 @@ function ok(label, cond, extra) {
   ok('下拉后各文字区缩放归位',
     ['badge-date', 'en', 'cn', 'source'].every((k) => back.text.fx[k] === 1),
     JSON.stringify(back.text.fx));
-  ok('下拉后相册图被换回上游默认（不再裁切）', back.bg && back.bg.clipped === false,
-    JSON.stringify(back.bg));
+  ok('下拉后相册图被换回上游默认（手动缩放/位移全部复位）',
+    back.bg && back.fits.img.scale === 1 && back.fits.img.ox === 0 && back.fits.img.oy === 0,
+    JSON.stringify(back.bg));   /* clipped 与否取决于当天上游图片的宽高比，不作断言 */
   ok('下拉后手动调整也一并归位',
     back.fits.img.scale === 1 && back.fits.img.ox === 0 && back.fits.img.oy === 0 && back.edit === null,
     JSON.stringify(back.fits.img));

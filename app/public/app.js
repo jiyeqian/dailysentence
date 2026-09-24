@@ -246,7 +246,7 @@ const THEMES = {
     accentA: '#4f8dfd', accentB: '#22d3ee',
     waveA: 'rgba(34,211,238,0.62)', waveB: 'rgba(79,141,253,0.40)',
   },
-  /* 暖纸墨字：米白纸质底 + 深墨文字（唯一浅色，反色）。白天户外可读性最好。
+  /* 暖纸墨字：米白纸质底 + 深墨文字（暖调浅色，反色）。白天户外可读性最好。
      卡面仍接近白纸（词性色标照常工作）；文字阴影换成极淡暖灰 —— 深影在浅底上会显脏 */
   paper: {
     name: '暖纸墨字',
@@ -267,45 +267,47 @@ const THEMES = {
     accentA: '#c2762a', accentB: '#8f5b1e',
     waveA: 'rgba(194,118,42,0.62)', waveB: 'rgba(143,91,30,0.42)',
   },
-  /* 松烟墨绿：深绿黑底 + 暖白文字 + 琥珀点缀。与墨蓝最接近，改动适中 */
-  pine: {
-    name: '松烟墨绿',
-    pageBg: '#05100c', pageBg2: '#0a1a13',
-    bgTop: '#0e1a14', bgBottom: '#05100c',
-    fade: '14,26,20', scrim: '4,12,9',
-    colTitle: '#f3efe6',
-    titleStroke: 'rgba(243,239,230,0.16)',
-    colDate: 'rgba(243,239,230,0.94)', colEn: 'rgba(243,239,230,0.97)',
-    colCn: 'rgba(243,239,230,0.88)', colSource: 'rgba(243,239,230,0.62)',
-    ruleA: 'rgba(243,239,230,0.95)', ruleB: 'rgba(243,239,230,0.12)',
-    dateBg: 'rgba(243,239,230,0.14)', dateBd: 'rgba(243,239,230,0.34)',
-    textShadow: 'rgba(2,8,6,0.55)',
-    cardBg: 'rgba(255,255,255,0.94)', cardBd: 'rgba(243,239,230,0.6)',
-    cardWord: '#0f172a', cardPh: '#7c8aa5', cardDef: '#334155',
-    cardExBar: 'rgba(15,23,42,0.06)', cardExEn: '#475569', cardExCn: '#8b98ad',
-    cardChip: '#475569', profileBg: '#ffffff',
-    accentA: '#d97706', accentB: '#f59e0b',
-    waveA: 'rgba(245,158,11,0.60)', waveB: 'rgba(217,119,6,0.40)',
+  /* 绛红夜：深绛红底 + 暖米白文字 + 玫瑰金强调（2026-09-24 用户定稿，替换 pine/dusk ——
+     那两个与墨蓝在小图预览里分不开）。沉稳的暖色，与 night 的冷蓝对比鲜明，夜间不刺眼 */
+  ember: {
+    name: '绛红夜',
+    pageBg: '#1f0a10', pageBg2: '#14060b',
+    bgTop: '#2a0e14', bgBottom: '#14060a',
+    fade: '42,14,20', scrim: '18,6,10',
+    colTitle: '#fff4ee',
+    titleStroke: 'rgba(255,244,238,0.16)',
+    colDate: 'rgba(255,244,238,0.94)', colEn: 'rgba(255,247,240,0.97)',
+    colCn: 'rgba(255,240,232,0.88)', colSource: 'rgba(255,235,225,0.62)',
+    ruleA: 'rgba(255,240,232,0.95)', ruleB: 'rgba(255,240,232,0.12)',
+    dateBg: 'rgba(255,255,255,0.14)', dateBd: 'rgba(255,255,255,0.34)',
+    textShadow: 'rgba(12,3,6,0.55)',
+    cardBg: 'rgba(255,255,255,0.94)', cardBd: 'rgba(255,244,238,0.6)',
+    cardWord: '#2b1218', cardPh: '#9a8590', cardDef: '#463339',
+    cardExBar: 'rgba(43,18,24,0.06)', cardExEn: '#57424a', cardExCn: '#8a7680',
+    cardChip: '#5c4650', profileBg: '#ffffff',
+    accentA: '#e8a0a8', accentB: '#c76a7c',
+    waveA: 'rgba(232,160,168,0.62)', waveB: 'rgba(199,106,124,0.42)',
   },
-  /* 紫霞暮色：深紫底 + 暖白文字 + 玫瑰金点缀 */
-  dusk: {
-    name: '紫霞暮色',
-    pageBg: '#0a0616', pageBg2: '#140d24',
-    bgTop: '#1a1230', bgBottom: '#0a0616',
-    fade: '26,18,48', scrim: '10,6,22',
-    colTitle: '#f7f0eb',
-    titleStroke: 'rgba(247,240,235,0.16)',
-    colDate: 'rgba(247,240,235,0.94)', colEn: 'rgba(247,240,235,0.97)',
-    colCn: 'rgba(247,240,235,0.88)', colSource: 'rgba(247,240,235,0.62)',
-    ruleA: 'rgba(247,240,235,0.95)', ruleB: 'rgba(247,240,235,0.12)',
-    dateBg: 'rgba(247,240,235,0.14)', dateBd: 'rgba(247,240,235,0.34)',
-    textShadow: 'rgba(6,2,14,0.55)',
-    cardBg: 'rgba(255,255,255,0.94)', cardBd: 'rgba(247,240,235,0.6)',
-    cardWord: '#0f172a', cardPh: '#7c8aa5', cardDef: '#334155',
-    cardExBar: 'rgba(15,23,42,0.06)', cardExEn: '#475569', cardExCn: '#8b98ad',
-    cardChip: '#475569', profileBg: '#ffffff',
-    accentA: '#e8a0a8', accentB: '#c98a8f',
-    waveA: 'rgba(232,160,168,0.62)', waveB: 'rgba(201,138,143,0.42)',
+  /* 青瓷浅冷：淡青瓷底 + 墨青文字（第二个浅色，冷调）。与 paper（暖浅）、night（冷暗）
+     拉开最大色差 —— 四主题 = 暗蓝/暖浅/暗红/冷浅，一眼可辨（2026-09-24 用户定稿） */
+  celadon: {
+    name: '青瓷浅冷',
+    pageBg: '#e8eeea', pageBg2: '#dde5df',
+    bgTop: '#f0f4f0', bgBottom: '#e2eae3',
+    fade: '232,238,234', scrim: '52,74,64',
+    colTitle: '#16302a',
+    titleStroke: 'rgba(22,48,42,0.16)',
+    colDate: 'rgba(22,48,42,0.90)', colEn: 'rgba(22,48,42,0.95)',
+    colCn: 'rgba(22,48,42,0.85)', colSource: 'rgba(22,48,42,0.60)',
+    ruleA: 'rgba(22,48,42,0.80)', ruleB: 'rgba(22,48,42,0.10)',
+    dateBg: 'rgba(22,48,42,0.08)', dateBd: 'rgba(22,48,42,0.35)',
+    textShadow: 'rgba(52,74,64,0.15)',
+    cardBg: 'rgba(255,255,255,0.94)', cardBd: 'rgba(22,48,42,0.22)',
+    cardWord: '#1a231f', cardPh: '#7f8a80', cardDef: '#33403a',
+    cardExBar: 'rgba(22,48,42,0.08)', cardExEn: '#44514a', cardExCn: '#78857c',
+    cardChip: '#4b5a50', profileBg: '#fdfefd',
+    accentA: '#2a9d8f', accentB: '#177063',
+    waveA: 'rgba(42,157,141,0.62)', waveB: 'rgba(23,112,99,0.42)',
   },
 };
 
@@ -1978,6 +1980,10 @@ function drawTopText(ctx, L) {
 
 /* --------------------------- 个人信息卡片 --------------------------- */
 
+/* 卡片图内缩系数：绘制时按中心放大 2.5%，把图源最外圈的杂边（顶边深色/彩色像素）
+   裁出圆角之外。只影响绘制，不动 fit 状态；换的图内容多样，这个内缩对谁都够用 */
+const CARD_IMG_INSET = 1.025;
+
 function drawProfileCard(ctx, L) {
   const c = L.card;
 
@@ -1990,14 +1996,24 @@ function drawProfileCard(ctx, L) {
   ctx.fill();
   ctx.restore();
 
-  /* 卡内图片走 fit 模型（等比，可被手动调整），不再把识别矩形拉伸填满 */
+  /* 卡内图片走 fit 模型（等比，可被手动调整），不再把识别矩形拉伸填满。
+     ⚠ 绘制时按**窗口中心**放大 CARD_IMG_INSET 做微小内缩：fit 的「面积相当」缩放
+     会让窗口比识别矩形各边多露出 2~4 图源像素，模板截图白卡上沿的深色杂边
+     （2026-09-24 用户真机在浅色主题看到卡片上缘一条黑边）就是这么漏进来的。
+     锚点必须是**窗口中心** —— 图比窗口高得多且偏上，按图中心放大反而会让可见
+     切片上移、露出更多杂边（实测踩过：2px 杂边变 5px）。窗口中心取样范围向
+     中心对称收缩，四边杂边同时被裁掉；只影响海报绘制，不动 fit 状态。 */
   const q = currentFitDraw('card', L);
   if (q) {
     ctx.save();
     roundRect(ctx, c.x, c.y, c.w, c.h, 18);
     ctx.clip();
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(q.base.im, q.x, q.y, q.w, q.h);
+    const k2 = q.k * CARD_IMG_INSET;
+    const cx = c.x + c.w / 2, cy = c.y + c.h / 2;
+    const srcCx = (cx - q.x) / q.k, srcCy = (cy - q.y) / q.k;
+    ctx.drawImage(q.base.im, cx - srcCx * k2, cy - srcCy * k2,
+      q.base.im.width * k2, q.base.im.height * k2);
     ctx.restore();
   }
 }
