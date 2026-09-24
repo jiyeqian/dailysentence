@@ -348,11 +348,72 @@ function initTheme() {
   const qs = QS.get('theme');
   if (qs && THEMES[qs]) {
     applyTheme(qs, { save: false });
+    themePinned = true;   /* URL 显式指定 = 当次强制预览，随后图匹配跳过（否则预览会被覆盖） */
     return state.theme;
   }
   let saved = null;
   try { saved = localStorage.getItem(THEME_KEY); } catch (e) {}
   applyTheme(saved && THEMES[saved] ? saved : 'night', { save: false });
+  return state.theme;
+}
+
+/* ---------------- 主题随图自动匹配（2026-09-25） ----------------
+   从四套固定主题里挑一套与当前顶图色调最合的（**不派生新颜色**）：初始化、
+   下拉更新、换顶部图片三个时点自动执行，永远生效（会覆盖上次手摇的选择 ——
+   用户已拍板）；匹配结果**不写入主题记忆**（记忆只存用户手动的摇一摇），
+   与当前主题一致则静默、换了则 toast「配色 · X（随图匹配）」。
+   匹配规则（确定性，阈值只在这一处调）：
+     亮（lum ≥ THEME_MATCH_LIGHT）→ 暖（warmth > 12）paper ／ 冷（< −12）celadon ／ 中性 paper
+     暗 → 暖（warmth > 12）ember ／ 冷或中性 night
+   warmth = 平均 R − 平均 B（正暖负冷）；lum 为感知亮度（0~255）。 */
+
+const THEME_MATCH_LIGHT = 165;   // 亮度阈值：以上算「亮图」，以下算「暗图」
+const THEME_MATCH_WARMTH = 12;   // 冷暖阈值：|warmth| 超过才算有明确冷暖倾向
+let themePinned = false;         // URL ?theme= 显式指定时为 true：当次强制预览，随图匹配跳过
+
+/** 采样顶图色调：离屏 48px 小画布（同源代理/blob，getImageData 无跨域问题） */
+function analyzeImageTone(im) {
+  const S = 48;
+  const c = document.createElement('canvas');
+  c.width = S;
+  c.height = S;
+  const x = c.getContext('2d', { willReadFrequently: true });
+  x.drawImage(im, 0, 0, S, S);
+  let data;
+  try {
+    data = x.getImageData(0, 0, S, S).data;
+  } catch (e) {
+    return null;               /* 万一被跨域污染：放弃匹配，保持当前主题 */
+  }
+  let lum = 0, warm = 0, n = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    lum += 0.3 * data[i] + 0.59 * data[i + 1] + 0.11 * data[i + 2];
+    warm += data[i] - data[i + 2];              /* R − B：正暖负冷 */
+    n++;
+  }
+  return { lum: lum / n, warmth: warm / n };
+}
+
+/** 由色调得出应匹配的主题 id（纯函数，回归可直接断言） */
+function matchThemeForImage(tone) {
+  if (!tone) return state.theme;
+  if (tone.lum >= THEME_MATCH_LIGHT) {
+    if (tone.warmth > THEME_MATCH_WARMTH) return 'paper';
+    if (tone.warmth < -THEME_MATCH_WARMTH) return 'celadon';
+    return 'paper';
+  }
+  return tone.warmth > THEME_MATCH_WARMTH ? 'ember' : 'night';
+}
+
+/** 三个时点调这个：匹配到不同主题就切换 + toast，不写记忆（save: false） */
+function autoMatchTheme() {
+  if (!state.bgImage || themePinned) return state.theme;
+  const tone = analyzeImageTone(state.bgImage);
+  const id = matchThemeForImage(tone);
+  if (id !== state.theme) {
+    applyTheme(id, { save: false });
+    toast('配色 · ' + THEMES[id].name + '（随图匹配）');
+  }
   return state.theme;
 }
 
@@ -776,6 +837,8 @@ async function loadBackground(url) {
     }
     setOverlay(false);
   }
+  /* 初始化 / 下拉更新都在这里收口：图定 → 主题随图匹配（2026-09-25） */
+  autoMatchTheme();
 }
 
 function loadImage(src) {
@@ -2517,6 +2580,7 @@ function bindInputs() {
     if (!im) return;
     state.bgImage = im;
     state.fits.img = { scale: 1, ox: 0, oy: 0 };
+    autoMatchTheme();   /* 换图后主题随图匹配（配好色再进调整层） */
     scheduleRender();
     startEdit('img');
   });
@@ -3669,6 +3733,8 @@ function setOverlay(show, text) {
       setMode: applyMode,
       /* 授权重试冷却归零（仅测试用）：60s 冷却对回归太长，请求路径本身不走旁路 */
       permRetryNow: () => { shakePermLastTry = 0; },
+      /* 主题随图匹配：回归用合成特征图驱动真函数（与 loadBackground/change 同一条路径） */
+      autoMatchTheme,
       scheduleRender,     // 换图调整层：回归合成纯色图后驱动一次重绘，做像素级判定
       /* 排版中间量：排查「自适应倍率算错」时可以直接在页面里量 */
       textTotalAt: (k) => buildTextBlockStandard(cvs.getContext('2d'), k).total,

@@ -193,6 +193,14 @@ PORT=3000 node server.js  # 自定义端口
   （实现时实测踩过）。幅值 > 12 记越峰，600ms 内两次越峰算一次摇，900ms 冷却；
   **只在空闲态生效**（`state.voice` / `state.edit` / `body.raw` 一律忽略）。
   切换时 toast `配色 · <主题名>` 并写入 localStorage（按设备记忆）。
+- **主题随图匹配（2026-09-25，四选一，不派生）**：`analyzeImageTone`（离屏 48px 采样）
+  算顶图的 **lum / warmth（avg R − avg B）**，按阈值 `THEME_MATCH_LIGHT(165) / WARMTH(12)`
+  从四套里挑最合的：亮暖→paper、亮冷→celadon、亮中性→paper、暗暖→ember、暗冷/中性→night。
+  接入点：`loadBackground` 尾部（初始化与下拉更新同收口）+ 顶部图片 change 处理器
+  （配好色再进调整层）。应用走 `applyTheme(id, { save: false })` —— **不写主题记忆**
+  （`ds:theme` 只存手动的摇一摇）；换了主题 toast「配色 · X（随图匹配）」，一致则静默；
+  自动匹配永远生效（覆盖上次手摇的选择，用户拍板）；URL `?theme=` 显式指定时
+  `themePinned` 跳过匹配（当次强制预览，回归靠它钉起点）。
 - **iOS 授权**：未授权时 `devicemotion` 事件一个都收不到，`requestPermission` 又必须由
   用户手势触发 —— 「首次摇→提示」探测不到，所以实现为**第一次 pointerup 顺带请求**
   （捕获段、只问一次）。

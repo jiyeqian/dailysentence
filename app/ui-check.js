@@ -968,7 +968,7 @@ function ok(label, cond, extra) {
   /* 导出页（?raw=1）里永远没有波形层 */
   const rawP = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
   await rawP.addInitScript(AUDIO_STUB);
-  await rawP.goto(BASE + '/?raw=1&debug=1', { waitUntil: 'load' });
+  await rawP.goto(BASE + '/?raw=1&debug=1&theme=night', { waitUntil: 'load' });   /* 钉住，避免随图匹配改变起点 */
   await rawP.waitForFunction(() => window.__ds && window.__ds.state.layout, null, { timeout: 15000 });
   const rawWave = await rawP.evaluate(() => {
     window.__ds.playVoice();
@@ -1012,10 +1012,19 @@ function ok(label, cond, extra) {
   };
 
   {
+    /* 无参进入：主题随图匹配（2026-09-25）—— 结果是四套之一、data-theme 同步、记忆不被写 */
     const { tp, d2, cs } = await themeEnter('');
-    ok('默认进入 = 墨蓝夜空（inspect().theme 只增字段 + data-theme 同步）',
-      d2.theme.id === 'night' && d2.theme.name === '墨蓝夜空' && cs.ds === 'night',
-      JSON.stringify(d2.theme));
+    const FOUR = ['night', 'paper', 'ember', 'celadon'];
+    ok('无参进入 = 主题随图匹配（结果 ∈ 四套，data-theme 同步）',
+      FOUR.includes(d2.theme.id) && cs.ds === d2.theme.id, JSON.stringify(d2.theme));
+    ok('随图匹配不写主题记忆（ds:theme 应为空）',
+      (await tp.evaluate(() => localStorage.getItem('ds:theme'))) === null);
+    await tp.close();
+  }
+  {
+    const { tp, d2, cs } = await themeEnter('night');
+    ok('?theme=night（显式钉住）：墨蓝夜空生效',
+      d2.theme.id === 'night' && cs.ds === 'night', JSON.stringify(d2.theme));
     ok('night 画布底色是暗色（取色抽验：显示 = 成品）', (await sampleLum(tp)) < 60,
       'lum=' + Math.round(await sampleLum(tp)));
     ok('night 的页面底色 --bg 与波形强调色是默认值',
@@ -1049,14 +1058,16 @@ function ok(label, cond, extra) {
     await tp.close();
   }
   {
-    /* 无效参数必须回落默认，不能半白屏 */
+    /* 无效参数：initTheme 回落 night，但不钉住 → 随图匹配照常生效（结果是四套之一） */
     const { tp, d2 } = await themeEnter('nope');
-    ok('?theme=nope（无效参数）回落默认 night', d2.theme.id === 'night');
+    ok('?theme=nope（无效参数）回落默认后再随图匹配（∈ 四套）',
+      ['night', 'paper', 'ember', 'celadon'].includes(d2.theme.id), d2.theme.id);
     await tp.close();
   }
 
-  /* 摇一摇：真监听 + 空闲态守卫 + 冷却 + 记忆 */
-  const sp = await open(BASE + '/?debug=1');
+  /* 摇一摇：真监听 + 空闲态守卫 + 冷却 + 记忆。
+     ?theme=night 钉住起点 —— 无参进入会被「主题随图匹配」按当天图片配色，起点不确定 */
+  const sp = await open(BASE + '/?debug=1&theme=night');
   await sp.evaluate(() => localStorage.removeItem('ds:theme'));   /* 干净起点 */
   await sp.reload({ waitUntil: 'load' });
   await sp.waitForFunction(() => window.__ds && window.__ds.state.layout);
@@ -1094,11 +1105,13 @@ function ok(label, cond, extra) {
   ok('播放独占态摇动不切主题（也不停播）',
     d.theme.id === 'ember' && !!d.voice);
   await sp.evaluate(() => window.__ds.stopVoice('tap'));
-  /* reload 记忆：无参进入应停在摇出来的主题上 */
+  /* reload 记忆：手动摇出来的选择写在 ds:theme（页面钉在 ?theme=night，显示值随钉住走） */
   await sp.reload({ waitUntil: 'load' });
   await sp.waitForFunction(() => window.__ds && window.__ds.state.layout);
   d = await info(sp);
-  ok('reload 后主题保留（localStorage 读回）', d.theme.id === 'ember');
+  ok('reload 后手动主题记忆保留（ds:theme = ember）',
+    (await sp.evaluate(() => localStorage.getItem('ds:theme'))) === 'ember' &&
+    ['night', 'paper', 'ember', 'celadon'].includes(d.theme.id));
   /* URL 不污染记忆：?theme= 只当次生效 */
   await sp.goto(BASE + '/?debug=1&theme=celadon', { waitUntil: 'load' });
   await sp.waitForFunction(() => window.__ds && window.__ds.state.layout);
@@ -1109,7 +1122,9 @@ function ok(label, cond, extra) {
   await sp.goto(BASE + '/?debug=1', { waitUntil: 'load' });
   await sp.waitForFunction(() => window.__ds && window.__ds.state.layout);
   d = await info(sp);
-  ok('退出 URL 预览后回到记忆的主题', d.theme.id === 'ember');
+  ok('退出 URL 预览后：主题随图重新匹配（∈ 四套），手动记忆不被覆盖',
+    ['night', 'paper', 'ember', 'celadon'].includes(d.theme.id) &&
+    (await sp.evaluate(() => localStorage.getItem('ds:theme'))) === 'ember');
   await sp.close();
 
   /* 6 区黑边回归（2026-09-24 真机反馈）：卡片图内缩裁切后，卡片顶（y=1376）之下
@@ -1130,6 +1145,64 @@ function ok(label, cond, extra) {
     });
     ok('6 区卡片上缘无暗像素带（图源外圈杂边被内缩裁切裁掉）', dark === 0, 'dark=' + dark);
     await tp.close();
+  }
+
+  /* ---------------- 主题随图匹配（2026-09-25）：四选一，不派生 ----------------
+     用 data-URL 合成特征明确的测试图（亮暖/亮冷/暗暖/暗冷）驱动真匹配函数，
+     断言四套主题各归其位；记忆语义 = 自动匹配不写 ds:theme（只存手动的摇一摇）。 */
+  console.log('标准版 · 主题随图匹配');
+  {
+    const mp = await open(BASE + '/?debug=1');   /* 不带 ?theme：不钉住，随图匹配生效 */
+    const cases = [
+      ['亮暖 #fff2cf', '#fff2cf', 'paper'],
+      ['亮冷 #dfe9f5', '#dfe9f5', 'celadon'],
+      ['暗暖 #3a1410', '#3a1410', 'ember'],
+      ['暗冷 #101828', '#101828', 'night'],
+    ];
+    let firstToast = '';
+    for (const [label, color, expect] of cases) {
+      const got = await mp.evaluate(async (col) => {
+        /* 离屏画布生成纯色图 → 作为顶图 → 调真匹配函数 */
+        const im2 = await new Promise((res, rej) => {
+          const i = new Image();
+          i.onload = () => res(i);
+          i.onerror = rej;
+          const cv = document.createElement('canvas');
+          cv.width = 64; cv.height = 64;
+          const cx = cv.getContext('2d');
+          cx.fillStyle = col;
+          cx.fillRect(0, 0, 64, 64);
+          i.src = cv.toDataURL('image/png');
+        });
+        window.__ds.state.bgImage = im2;
+        return window.__ds.autoMatchTheme();
+      }, color);
+      const toastNow = await mp.evaluate(() => document.getElementById('toast').textContent);
+      if (!firstToast) firstToast = toastNow;
+      ok(`随图匹配：${label} → ${expect}`,
+        got === expect,
+        `got=${got}｜toast「${toastNow}」`);
+    }
+    ok('匹配换主题时 toast 带「随图匹配」标记', firstToast.includes('随图匹配'), firstToast);
+    /* 记忆语义：自动匹配不写 ds:theme（上面四次匹配后应仍是进入时的手动记忆值） */
+    await mp.evaluate(() => { try { localStorage.setItem('ds:theme', 'night'); } catch (e) {} });
+    await mp.evaluate(async () => {
+      const cv = document.createElement('canvas');
+      cv.width = 64; cv.height = 64;
+      const cx = cv.getContext('2d');
+      cx.fillStyle = '#fff2cf';
+      cx.fillRect(0, 0, 64, 64);
+      const i = new Image();
+      i.src = cv.toDataURL('image/png');
+      await i.decode();
+      window.__ds.state.bgImage = i;
+      window.__ds.autoMatchTheme();       /* 会切成 paper，但不许写记忆 */
+    });
+    await mp.waitForTimeout(300);
+    ok('自动匹配不写主题记忆（ds:theme 保留手动值 night）',
+      (await mp.evaluate(() => localStorage.getItem('ds:theme'))) === 'night' &&
+      (await info(mp)).theme.id === 'paper');
+    await mp.close();
   }
 
   /* iOS 授权链路（2026-09-24 真机踩坑后补）：授权必须由**收尾手势**（pointerup）触发 ——

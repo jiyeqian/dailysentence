@@ -235,6 +235,14 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   再次点击重试（iOS 对已明确拒绝的站点再调 API 是静默返回，不会反复弹窗打扰）。
   桌面 Chromium 新版也实现了 requestPermission —— 回归打桩必须**无条件覆盖**
   该静态方法，否则会漏桩走到真 API；`__ds.permRetryNow` 仅供回归归零冷却。
+- **主题随图匹配（2026-09-25，四选一，不派生）**：初始化（`loadBackground` 尾部）、
+  下拉更新（同收口）、换顶部图片后，自动从四套固定主题里挑一套与顶图色调最合的：
+  `analyzeImageTone`（离屏 48px 采样）算 **lum / warmth（avg R − avg B）**，
+  亮（≥165）→ 暖 paper ／ 冷 celadon ／ 中性 paper；暗 → 暖 ember ／ 冷或中性 night。
+  阈值常量 `THEME_MATCH_LIGHT/WARMTH` 只在这一处调。应用走 `applyTheme(id, {save:false})`
+  —— **不写主题记忆**（`ds:theme` 只存手动的摇一摇）；换了主题 toast
+  「配色 · X（随图匹配）」，一致则静默。自动匹配**永远生效**（会覆盖上次手摇的选择，
+  用户拍板）；URL `?theme=` 显式指定则 `themePinned = true` 跳过匹配（当次强制预览）。
   切换时 toast 报主题名。**桌面没有加速度计**：预览与回归走 `?theme=<id>`（**只当次生效、
   不写存储**，防止污染用户记忆）；选择写入 `localStorage['ds:theme']`（按设备记忆 ——
   无账号体系，跨设备同步做不到，这是有意为之的粒度）。
