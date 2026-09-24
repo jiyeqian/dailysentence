@@ -1164,6 +1164,12 @@ function ok(label, cond, extra) {
     ok('授权（granted 桩）：pointerup 触发请求、shakeDiag.state = granted',
       after.shakeDiag.asked === true && after.shakeDiag.state === 'granted',
       JSON.stringify(after.shakeDiag));
+    /* 拿到 granted 后不再请求（再次 pointerup，diag.at 不变） */
+    await ap.waitForTimeout(80);
+    await ap.evaluate(() => window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })));
+    await ap.waitForTimeout(300);
+    const after2 = await info(ap);
+    ok('granted 后不再重复请求（shakeDiag.at 不变）', after2.shakeDiag.at === after.shakeDiag.at);
     await ap.close();
   }
   {
@@ -1172,6 +1178,20 @@ function ok(label, cond, extra) {
       after.shakeDiag.state === 'denied' &&
       (await ap.evaluate(() => document.getElementById('toast').textContent)) === '摇一摇未获权限，将无法换配色',
       JSON.stringify(after.shakeDiag));
+    /* 冷却内立刻再点 → 不重复请求（diag.at 不变）；permRetryNow 归零冷却 → 重试成功 */
+    await ap.waitForTimeout(80);
+    await ap.evaluate(() => window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })));
+    await ap.waitForTimeout(300);
+    const cooled = await info(ap);
+    ok('denied 后 60s 冷却内的点击不会重复请求（diag.at 不变）',
+      cooled.shakeDiag.at === after.shakeDiag.at);
+    await ap.evaluate(() => window.__ds.permRetryNow());
+    await ap.evaluate(() => window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })));
+    await ap.waitForTimeout(300);
+    const retried = await info(ap);
+    ok('冷却归零后的点击会重新请求（「弹窗未选而消失」场景的自愈路径）',
+      retried.shakeDiag.at > after.shakeDiag.at && retried.shakeDiag.state === 'denied',
+      JSON.stringify(retried.shakeDiag));
     /* 被拒后页面必须依然健壮：合成摇动不抛错、主题/记忆状态自洽
       （真机被拒后传感器事件根本不到，这里验证的是「就算到了也不崩」） */
     const t = await ap.evaluate(async () => {
@@ -1650,8 +1670,28 @@ function ok(label, cond, extra) {
   ok('长版例句区（ex-0/ex-1）已整体移除，面板相应收紧',
     !ids(ld).some((x) => x.startsWith('ex')), ids(ld).filter((x) => x.startsWith('panel') || x.startsWith('def') || x.startsWith('chip')).join(','));
   ok('长版按内容取高（CH = max(1920, 内容高)）', ld.canvas.h >= 1920, 'h=' + ld.canvas.h);
-  ok('长版仍是原比例模式（只有标准版走「宽度铺满 + 裁切」）',
+  ok('长版 band 为 null（无活动区概念）、bgStyle 参数保持 natural（历史值，绘制已统一走图片块）',
     ld.opts.bgStyle === 'natural' && ld.text.band === null, JSON.stringify(ld.opts));
+
+  /* 顶部图片块与标准版完全对齐（2026-09-24）：648 裁切窗口 + 点击换图 + 调整层 */
+  ok('长版顶部图片块 = 648 裁切窗口，与标准版同一条绘制/fit 数学',
+    !!ld.bg && ld.bg.blockH === 648, JSON.stringify(ld.bg));
+  {
+    const reg = await lp.evaluate(() => window.__ds.state.regions.some((x) => x.id === 'img'));
+    ok('长版命中表产出 img 区域（此前顶部背景点不到）', reg === true);
+    let clicks = 0;
+    await lp.evaluate(() => {
+      HTMLInputElement.prototype.click = function () { window.__clicks = (window.__clicks || 0) + 1; };
+    });
+    const ip = await pointOf(lp, 'img');
+    await lp.mouse.click(ip.x, Math.min(ip.y, 300));
+    await lp.waitForTimeout(300);
+    clicks = await lp.evaluate(() => window.__clicks || 0);
+    ok('长版单击顶部图 = 唤起相册（fBgImage.click 触发一次）', clicks === 1, 'clicks=' + clicks);
+    await lp.reload({ waitUntil: 'load' });
+    await lp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+    await lp.waitForTimeout(600);
+  }
 
   /* 单击 en 朗读（长版同语义） */
   const lBefore = ld;

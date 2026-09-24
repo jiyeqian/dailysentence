@@ -877,9 +877,9 @@ function naturalImageH() {
   return Math.round((CW * im.height) / im.width);
 }
 
-/** 长版文字块起始 y：原比例模式让位给顶部图片 */
+/** 长版文字块起始 y：让位给顶部图片块（2026-09-24 起长版与标准版同款 648 裁切窗口） */
 function textTopY() {
-  if (state.opts.bgStyle === 'natural' && state.bgImage) return naturalImageH() + 64;
+  if (state.bgImage) return IMG_BLOCK_H + 64;
   return TOP_PAD;
 }
 
@@ -1056,7 +1056,10 @@ function computeLayoutLong(ctx) {
     panel: M.panel,
     card,
     ch: CH,
-    imgBlock: null,
+    /* 顶部图片块（2026-09-24 起长版与标准版完全对齐）：固定 648 裁切窗口，
+       走同一条「宽度铺满 + 硬裁切 + 下缘渐隐」绘制与 fit/调整层数学 ——
+       此前长版是原比例完整背景（文字起点随图高走），无裁切也不可换图 */
+    imgBlock: { x: 0, y: 0, w: CW, h: IMG_BLOCK_H },
   };
 }
 
@@ -1514,8 +1517,9 @@ function buildGaps(L) {
   const P = L.panel;
   const textBottom = L.textBottom;
 
-  if (L.imgBlock) {
-    /* 标准版：顶部图片区固定，句子在中部活动区里自适应并居中 */
+  if (L.band) {
+    /* 标准版（有活动区 band）：顶部图片区固定，句子在中部活动区里自适应并居中。
+       ⚠ 别用 imgBlock 判版本 —— 2026-09-24 起长版也有 imgBlock（顶部图片块对齐标准版） */
     add('img-h', '顶部图片区高度', L.imgBlock.h);
     add('band-top', '图片区 → 中部活动区顶', L.band.top - (L.imgBlock.y + L.imgBlock.h));
     add('band-h', '中部活动区高度', L.band.h);
@@ -2415,8 +2419,10 @@ const SHAKE_LIN_G = 12;        // 线性加速度幅值阈值（m/s²）：真�
 const SHAKE_PEAK_MS = 600;     // 两次越峰的最大间隔
 const SHAKE_COOLDOWN_MS = 900; // 触发一次后的冷却
 const SHAKE_G_ALPHA = 0.15;    // 重力低通系数：越小越「信历史」，甩动越容易被当作线性加速度
+const SHAKE_PERM_RETRY_MS = 60000; // 授权未拿到 granted 时的重试冷却（iOS 对已拒站点静默返回，不刷弹窗）
 
-let shakePermAsked = false;    // iOS 授权是否已请求过（无论结果，只问一次）
+let shakePermAsked = false;    // iOS 授权是否已经**拿到 granted**（拿到就不再问）
+let shakePermLastTry = 0;      // 上一次请求尝试的时间戳：非 granted 时 60s 冷却后再试
 /* 授权自证（2026-09-24 真机踩坑后加）：真机「弹窗不出现」不用再猜 ——
    state 记录请求结果（granted / denied / error / 空串 = 还没问过），
    errName 是被拒/出错时的异常名。inspect().shakeDiag 与 ?diag=1 都透出。 */
@@ -2454,16 +2460,19 @@ function bindShake() {
      走不到这支；结果无论成败都落 shakeDiag（真机 ?diag=1 可读）。 */
   window.addEventListener('pointerup', (e) => {
     if (shakePermAsked) return;
+    if (Date.now() - shakePermLastTry < SHAKE_PERM_RETRY_MS) return;   // 未授权时的重试冷却
     if (e.pointerType && e.pointerType !== 'touch') return;   /* 桌面鼠标/触控板不触发授权 */
     const DME = window.DeviceMotionEvent;
     if (DME && typeof DME.requestPermission === 'function') {
-      shakePermAsked = true;
+      shakePermLastTry = Date.now();
       DME.requestPermission().then((res) => {
         shakeDiag.asked = true;
         shakeDiag.state = res === 'granted' ? 'granted' : 'denied';
         shakeDiag.at = Date.now();
-        if (shakeDiag.state !== 'granted') {
-          toast('摇一摇未获权限，将无法换配色');   // 拒绝也不再无声（一次性，只问一次所以不会刷屏）
+        if (res === 'granted') {
+          shakePermAsked = true;   // 只有拿到授权才停止请求；「弹窗未选而消失」可在下次点击自愈
+        } else {
+          toast('摇一摇未获权限，将无法换配色');   // 拒绝也不再无声；60s 后的点按仍可再试（iOS 静默返回，不会反复弹）
         }
       }).catch((err) => {
         shakeDiag.asked = true;
@@ -3658,6 +3667,8 @@ function setOverlay(show, text) {
       themeOrder: THEME_ORDER,
       /* 版式切换：回归可直接驱动（与双指手势同一条 applyMode 路径） */
       setMode: applyMode,
+      /* 授权重试冷却归零（仅测试用）：60s 冷却对回归太长，请求路径本身不走旁路 */
+      permRetryNow: () => { shakePermLastTry = 0; },
       scheduleRender,     // 换图调整层：回归合成纯色图后驱动一次重绘，做像素级判定
       /* 排版中间量：排查「自适应倍率算错」时可以直接在页面里量 */
       textTotalAt: (k) => buildTextBlockStandard(cvs.getContext('2d'), k).total,

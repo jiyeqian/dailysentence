@@ -229,8 +229,12 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   Promise 直接 reject 且被静默吞掉 → 系统弹窗一次都不出现（真机踩坑，2026-09-24 修复）。
   结果无论成败都落 `shakeDiag = { asked, state: granted|denied|error|'', errName, at }`
   （`inspect().shakeDiag` 只增字段，`?diag=1` 诊断页也透出）；被拒/出错时 toast 一条提示，
-  不再无声。桌面 Chromium 新版也实现了 requestPermission —— 回归打桩必须**无条件覆盖**
-  该静态方法，否则会漏桩走到真 API。
+  不再无声。**重试规则（2026-09-24 用户反馈后改）**：系统弹窗由 iOS 控制（文字/按钮/
+  能否被点掉都定制不了），若弹窗未选而消失，用户无法再触发 —— 所以 `shakePermAsked`
+  **只在拿到 granted 时置位**；denied/error 落 `SHAKE_PERM_RETRY_MS`（60s）冷却后允许
+  再次点击重试（iOS 对已明确拒绝的站点再调 API 是静默返回，不会反复弹窗打扰）。
+  桌面 Chromium 新版也实现了 requestPermission —— 回归打桩必须**无条件覆盖**
+  该静态方法，否则会漏桩走到真 API；`__ds.permRetryNow` 仅供回归归零冷却。
   切换时 toast 报主题名。**桌面没有加速度计**：预览与回归走 `?theme=<id>`（**只当次生效、
   不写存储**，防止污染用户记忆）；选择写入 `localStorage['ds:theme']`（按设备记忆 ——
   无账号体系，跨设备同步做不到，这是有意为之的粒度）。
@@ -240,7 +244,11 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   标准版）；用户缩放通过 `measureAll(ctx, 1, fx)` 传入 `buildTextBlock`，**只缩句子组**
   （标题 / 分隔线 / 单词卡不跟动）；**例句区 ex-\* 已整体移除**（用户定稿：长版 = 标准版
   内容 + 单词相关区域），`buildWordCard` 的 exItems 恒为空数组（下游按空列表自然跳过，
-  形状不破坏）。顶部图片换图是标准版专属（长版无 `imgBlock`，顶图是原比例背景）。
+  形状不破坏）。**长版顶部图片与标准版完全对齐（2026-09-24）**：`computeLayoutLong`
+  也产出 `imgBlock`（648 裁切窗口）→ 走同一条「宽度铺满 + 硬裁切 + 渐隐」绘制与 fit/调整层
+  数学，点击顶部图 = 相册、选图后进调整层；`textTopY` 相应改为 `IMG_BLOCK_H + 64`
+  （不再用 naturalImageH 随图高走，竖图不再把整版推长）。`buildGaps` 以 **band 有无**区分
+  版式（imgBlock 两版都有，别用它判版本）。
 - **版式（standard/long）双指扩/捏切换**：扩 ≥1.6 倍 标准→长版，捏 ≤0.62 倍 长版→标准；
   常态空闲态手势（播放 / 调整模式 / 导出页忽略），`modePtrs` 与调整模式的 `ptrs` 完全
   独立（调整模式 pointerdown 提前 return，互不干扰）；900ms 冷却；`applyMode()` 复位 fx、
