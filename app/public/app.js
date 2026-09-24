@@ -195,17 +195,17 @@ const GAP_TEXT_CARD = 48;     // 文字活动区距信息卡顶（同时是底�
 
 /* ---- 设计基准字号（2026-09-22 第二次重定，**只用于标准版**）----
    四个区各给一个**定值**（不再由「当天实际显示大小」按比例推）：
-     en / cn（3/4 区）= 44、source（5 区）= 36、日期（2 区）= 28
+     en（3 区）= 50、cn（4 区）= 44、source（5 区）= 36、日期（2 区）= 28
    从此**进入应用就是这个字号**（不再自适应放大），用户靠上/下滑调整；
    只有「整块装不下活动区」时才整块等比缩小保底（见 computeLayout）。
    长版（?long=1）沿用旧的 42 / 29 / 25，不受影响。 */
-const SZ_EN = 44;             // 3 区（英文句）设计基准
+const SZ_EN = 50;             // 3 区（英文句）设计基准（2026-09-24：换 EB Garamond 后 x-height 偏小，用户逐个数值试过定 50）
 const SZ_CN = 44;             // 4 区（中文句）设计基准
 const SZ_SOURCE = 36;         // 5 区（出处）设计基准
 const SZ_DATE = 28;           // 2 区（日期胶囊）设计基准
-/* 3 区（英文句）行高倍数。**字号仍是设计基准 44，只调行距**：EB Garamond 的 x-height 比原来
-   的无衬线小，同字号观感偏紧，所以行距略放松；取值以 1:1 成品图为准（2026-09-24 换字体） */
-const EN_LH = 1.4;
+/* 3 区（英文句）行高倍数（只调行距，字号由设计基准 SZ_EN 决定）：EB Garamond 的 x-height 比原来
+   的无衬线小，同字号观感偏紧，所以行距略放松；字号已由 44 提到 50，行距收回 1.3（用户实测） */
+const EN_LH = 1.3;
 const ZOOM_MIN = 0.6;         // 交互缩放范围（相对设计基准）：全体共用下限
 const ZOOM_MAX = 1.6;         // 3/4/5 区的放大上限；2 区另有更高的上限，见 ZOOM_MAX_BY
 const ZOOM_PER_PX = 0.001;    // 每像素缩放量：上滑 200px ≈ +20%
@@ -3265,7 +3265,7 @@ function setOverlay(show, text) {
       document.fonts.load(`700 120px AppSerif`),
       document.fonts.load(`400 40px AppSans`),
       document.fonts.load(`600 40px AppSans`),
-      document.fonts.load(`400 44px AppGaramond`),   /* 3 区（英文句） */
+      document.fonts.load(`400 50px AppGaramond`),   /* 3 区（英文句） */
     ]);
     if (document.fonts.ready) await document.fonts.ready;
   } catch (e) {}

@@ -26,7 +26,7 @@
         （窗口内清晰、窗外是这张图压暗 62% 的其余部分、窗口是圆角矩形）；
         没有任何描边 / 虚线（源码里不再有 drawEditFrame）；点窗口 = 换同一张、点窗外 = 完成；
         退出后弹层收起、海报没有位移
-    12) 文字字号：进入即按固定设计基准显示（短句 base=1、字号正好 44/44/36/28，不再自适应放大）；
+    12) 文字字号：进入即按固定设计基准显示（短句 base=1、字号正好 50/44/36/28，不再自适应放大）；
         2/3/4/5 各区一份交互变换，滑句子区 3/4/5 联动、滑日期只改日期；超长句整块等比缩小保底；
         3 区（英文句）用 EB Garamond（自托管 woff2，OFL），字族放在 layout.en.family 上，
         量测 / 绘制 / 标注三处共用它（长版仍是无衬线）
@@ -465,7 +465,7 @@ function ok(label, cond, extra) {
      ⚠ 量测折行 / 绘制 / 标注三处必须共用 layout 上的 en.family —— 用不同字族会出现
      「折行按 A 算、画面按 B 画」的错位，这是换字体最该防的回归；长版不受影响。 */
   const enFont = await p.evaluate(() => ({
-    loaded: document.fonts.check('400 44px AppGaramond'),
+    loaded: document.fonts.check('400 50px AppGaramond'),
     enFamily: window.__ds.state.layout.en.family || '',
     cnFamily: window.__ds.state.layout.cn.family || '',
   }));
@@ -543,7 +543,7 @@ function ok(label, cond, extra) {
   const fontAfter = d.items.find((it) => it.id === 'en').font;
   ok('删掉出处后不再「自动放大填满」：base 为 1 时字号不动，否则只可能回升（绝不变小）',
     fontAfter >= fontBefore - 0.01 && (baseBefore < 1 || Math.abs(fontAfter - fontBefore) < 0.01) &&
-    fontAfter <= 44 + 0.6,
+    fontAfter <= 50 + 0.6,
     `${fontBefore} → ${fontAfter}｜base ${baseBefore} → ${d.text.base}`);
 
   for (const id of ['en', 'cn']) {
@@ -566,10 +566,10 @@ function ok(label, cond, extra) {
   const fontOf = (x) => fontAt(x, 'en');
   const f0 = fontOf(d);
 
-  /* 设计基准字号（2026-09-22 第二次由用户定值）：en/cn 44、source 36、日期 28；
+  /* 设计基准字号（2026-09-24 第三次由用户定值）：en 50、cn 44、source 36、日期 28；
      实际字号 = 设计基准 × 保底 base × 该区交互值 —— 今天的长句会被保底缩小，比例仍精确 */
   ok('字号 = 设计基准 × 保底 base（四个区逐一核对）',
-    Math.abs(fontAt(d, 'en') - 44 * d.text.base) < 0.6 &&
+    Math.abs(fontAt(d, 'en') - 50 * d.text.base) < 0.6 &&
     Math.abs(fontAt(d, 'cn') - 44 * d.text.base) < 0.6 &&
     Math.abs(fontAt(d, 'source') - 36 * d.text.base) < 0.6 &&
     Math.abs(fontAt(d, 'badge-date') - 28 * d.text.fx['badge-date']) < 0.6,
@@ -580,8 +580,8 @@ function ok(label, cond, extra) {
 
   /* 短句：base 回到 1，字号正好等于设计基准（与线上当天的句子无关，确定可测） */
   const shortD = await withContent(p, { en: 'Hi.', cn: '你好。', source: '—— 测试' });
-  ok('短句时不再自动放大（base = 1、字号就是设计基准 44 / 44 / 36 / 28）',
-    shortD.text.base === 1 && Math.abs(fontAt(shortD, 'en') - 44) < 0.6 &&
+  ok('短句时不再自动放大（base = 1、字号就是设计基准 50 / 44 / 36 / 28）',
+    shortD.text.base === 1 && Math.abs(fontAt(shortD, 'en') - 50) < 0.6 &&
     Math.abs(fontAt(shortD, 'cn') - 44) < 0.6 &&
     Math.abs(fontAt(shortD, 'source') - 36) < 0.6 && Math.abs(fontAt(shortD, 'badge-date') - 28) < 0.6,
     `base=${shortD.text.base}｜en ${fontAt(shortD, 'en')}｜cn ${fontAt(shortD, 'cn')}｜source ${fontAt(shortD, 'source')}｜日期 ${fontAt(shortD, 'badge-date')}`);
