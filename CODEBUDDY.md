@@ -245,6 +245,12 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   写纯黑会露色带；「把图片底边拉伸模糊向下渗透」试过会起雾带、压低文字对比度，已弃用。
 - 无头截图校对：页面高度是动态的，先读 `#poster` 的真实 `height` 再按 `height+40` 开窗口，
   否则会被截断（本项目的正解是 `app/inspect.js --full` 整页截图）。
+- **字体**：自托管在 `app/public/fonts/` 并进仓（出图不能依赖外网），`@font-face` 写在 styles.css 顶部。
+  换 / 加字体时必须同时做两件事，否则会出「首帧版面错」或「折行与画面对不上」：
+  ① 把新字体加进启动处的 `document.fonts.load(...)` 列表（度量先就绪，见 boot）；
+  ② 把字族写到 layout 上（如 3 区的 `en.family`），让「量测折行 / 绘制 / 标注」共用同一个字族，
+  **不许一处用新字体、另一处用旧字体**。现状（2026-09-24）：3 区（英文句）= EB Garamond
+  （`F_EN`，OFL，latin 分块 44KB，行高 `EN_LH = 1.4` 按衬线观感放宽），长版与其余区仍是无衬线。
 
 ## 存档与部署
 

@@ -193,7 +193,7 @@ app/
     ├── app.js                 # Canvas 排版与合成
     ├── manifest.webmanifest   # PWA，可添加到主屏幕
     ├── icons/
-    ├── fonts/                 # Inter（正文） + Playfair Display（标题），均为 OFL 授权
+    ├── fonts/                 # Inter（正文） + EB Garamond（3 区英文句） + Playfair Display（长版标题），均为 OFL 授权
     └── assets/template.jpg    # 默认模板（你的乐词打卡图）
 ```
 
@@ -504,4 +504,12 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
 ## 说明
 
 内容版权归欧路词典 / 每日英语听力所有，本工具仅将公开页面内容排版成个人打卡海报，
-请勿用于商业用途。字体 Inter、Playfair Display 均为 SIL Open Font License。
+请勿用于商业用途。字体 Inter、EB Garamond、Playfair Display 均为 SIL Open Font License
+（EB Garamond 取自 Google Fonts 官方 woff2 的 latin 分块，授权原文见 `app/public/fonts/EBGaramond-OFL.txt`）。
+
+**换 / 加字体的两条规矩**（2026-09-24 起）：
+
+1. 字体文件自托管在 `app/public/fonts/` 并进仓 —— 出图时不能依赖外网。
+2. **新字体必须同步加进 `app.js` 启动处的 `document.fonts.load(...)` 列表**，并且把字族写到
+   layout 上（如 `en.family`），让「量测折行 / 绘制 / 标注」三处共用 ——
+   只在 CSS 里声明、或量测与绘制用了不同字族，都会出现「首帧版面错」或「折行与画面对不上」。

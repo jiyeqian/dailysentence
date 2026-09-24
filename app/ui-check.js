@@ -27,7 +27,9 @@
         没有任何描边 / 虚线（源码里不再有 drawEditFrame）；点窗口 = 换同一张、点窗外 = 完成；
         退出后弹层收起、海报没有位移
     12) 文字字号：进入即按固定设计基准显示（短句 base=1、字号正好 44/44/36/28，不再自适应放大）；
-        2/3/4/5 各区一份交互变换，滑句子区 3/4/5 联动、滑日期只改日期；超长句整块等比缩小保底
+        2/3/4/5 各区一份交互变换，滑句子区 3/4/5 联动、滑日期只改日期；超长句整块等比缩小保底；
+        3 区（英文句）用 EB Garamond（自托管 woff2，OFL），字族放在 layout.en.family 上，
+        量测 / 绘制 / 标注三处共用它（长版仍是无衬线）
     13) 缩放上限按区不同：2 区（日期）3 倍、3/4/5 区 1.6 倍；胶囊（含高度）随字号等比变大、
         活动区随之下移（短句字号不受影响）；到上限提示「已放到最大」
     14) 真机诊断页（?diag=1）：面板出现且放开文本选择、含形态/屏幕/安全区/舞台/海报/版面/音频自证；
@@ -458,6 +460,23 @@ function ok(label, cond, extra) {
     JSON.stringify(ids(d)) === JSON.stringify(['bg', 'badge-date', 'en', 'cn', 'source', 'card']),
     ids(d).join(','));
   ok('顶部图片区固定 648', box(d, 'bg')[3] === 648, 'h=' + box(d, 'bg')[3]);
+
+  /* 3 区（英文句）字体：EB Garamond（2026-09-24 用户指定，OFL 免费字体、自托管 woff2）。
+     ⚠ 量测折行 / 绘制 / 标注三处必须共用 layout 上的 en.family —— 用不同字族会出现
+     「折行按 A 算、画面按 B 画」的错位，这是换字体最该防的回归；长版不受影响。 */
+  const enFont = await p.evaluate(() => ({
+    loaded: document.fonts.check('400 44px AppGaramond'),
+    enFamily: window.__ds.state.layout.en.family || '',
+    cnFamily: window.__ds.state.layout.cn.family || '',
+  }));
+  ok('3 区字体 EB Garamond 已加载（自托管 woff2，启动时 fonts.load 等过它）',
+    enFont.loaded === true,
+    enFont.loaded ? 'document.fonts.check ✓' : '失败：检查 @font-face 与启动的 fonts.load 列表');
+  ok('3 区字族 = AppGaramond（量测 / 绘制 / 标注三处共用 layout.en.family）',
+    enFont.enFamily.includes('AppGaramond'), enFont.enFamily.slice(0, 44) + '…');
+  ok('中文句仍是原来的无衬线（换字体没误伤 4 区）',
+    enFont.cnFamily.includes('AppSans') && !enFont.cnFamily.includes('AppGaramond'),
+    enFont.cnFamily.slice(0, 44) + '…');
 
   const cb = box(d, 'card');
   const mLeft = cb[0];

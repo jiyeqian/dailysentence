@@ -18,6 +18,10 @@ const F_SANS =
   '"AppSans","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",-apple-system,sans-serif';
 const F_SERIF = '"AppSerif","Songti SC",STSong,Georgia,"Times New Roman",serif';
 const F_MONO = 'ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace';
+/* 3 区（英文句）专用：EB Garamond（2026-09-24 用户指定）。
+   ⚠ 它是**纯西文字体**（只有 latin 字形），所以回退栈里除了 Georgia / Times 这类衬线，
+   还必须带上中文字体 —— 英文句里万一夹中文或全角标点时会按字形回退，不至于出现豆腐块。 */
+const F_EN = '"AppGaramond",Georgia,"Times New Roman","PingFang SC","Hiragino Sans GB","Microsoft YaHei",serif';
 
 const MX = 84;            // 文字左右安全边距
 const TOP_PAD = 96;       // 文字块距海报顶端
@@ -199,6 +203,9 @@ const SZ_EN = 44;             // 3 区（英文句）设计基准
 const SZ_CN = 44;             // 4 区（中文句）设计基准
 const SZ_SOURCE = 36;         // 5 区（出处）设计基准
 const SZ_DATE = 28;           // 2 区（日期胶囊）设计基准
+/* 3 区（英文句）行高倍数。**字号仍是设计基准 44，只调行距**：EB Garamond 的 x-height 比原来
+   的无衬线小，同字号观感偏紧，所以行距略放松；取值以 1:1 成品图为准（2026-09-24 换字体） */
+const EN_LH = 1.4;
 const ZOOM_MIN = 0.6;         // 交互缩放范围（相对设计基准）：全体共用下限
 const ZOOM_MAX = 1.6;         // 3/4/5 区的放大上限；2 区另有更高的上限，见 ZOOM_MAX_BY
 const ZOOM_PER_PX = 0.001;    // 每像素缩放量：上滑 200px ≈ +20%
@@ -941,8 +948,9 @@ function buildTextBlock(ctx, K) {
     rule: Object.assign({}, rule, { y: titleH + rule.gapTop }),
     /* 长版的日期胶囊：字号与胶囊尺寸**沿用旧值**（长版版面本阶段不动） */
     date: { on: !!state.content.date, y: 4, h: 52, w: badgeW, size: 25, k: 1 },
-    en: { on: true, size: enSize, lh: enLH, lines: enLines, y: enY },
-    cn: { on: true, size: cnSize, lh: cnLH, lines: cnLines, y: cnY },
+    /* 长版的英文句仍用无衬线（本轮只改标准版 3 区）；family 写在这里，绘制侧就不需要判版本 */
+    en: { on: true, size: enSize, lh: enLH, lines: enLines, y: enY, family: F_SANS },
+    cn: { on: true, size: cnSize, lh: cnLH, lines: cnLines, y: cnY, family: F_SANS },
     source: { on: sourceOn, size: sourceSize, y: sourceY, text: state.content.source },
   };
 }
@@ -966,11 +974,12 @@ function buildTextBlockStandard(ctx, K, fxAll) {
   /* 日期胶囊不在这条流里（它固定在中部区域顶部靠右），所以从 0 开始量 */
   let y = 0;
 
-  /* 英文（3 区） */
+  /* 英文（3 区）：2026-09-24 起改用 EB Garamond（F_EN）；字族同时写进 en.family，
+     让绘制 / 标注 / 命中框都读它 —— 量测与绘制必须用同一个字族，否则折行与画面对不上 */
   const enSize = SZ_EN * sx('en');
-  const enLH = enSize * 1.32;
+  const enLH = enSize * EN_LH;
   const enOn = !h.en && !!state.content.en;
-  ctx.font = T(enSize, 400, F_SANS);
+  ctx.font = T(enSize, 400, F_EN);
   const enLines = enOn ? wrapText(ctx, state.content.en, maxW) : [];
   const enY = y;
   if (enOn) y = enY + enLines.length * enLH;
@@ -992,8 +1001,8 @@ function buildTextBlockStandard(ctx, K, fxAll) {
 
   return {
     total: y,
-    en: { on: enOn, size: enSize, lh: enLH, lines: enLines, y: enY },
-    cn: { on: cnOn, size: cnSize, lh: cnLH, lines: cnLines, y: cnY },
+    en: { on: enOn, size: enSize, lh: enLH, lines: enLines, y: enY, family: F_EN },
+    cn: { on: cnOn, size: cnSize, lh: cnLH, lines: cnLines, y: cnY, family: F_SANS },
     source: { on: sourceOn, size: sourceSize, y: sourceY, text: state.content.source },
   };
 }
@@ -1218,7 +1227,7 @@ function buildAnnots(ctx, L) {
 
   if (L.en.on) {
     push('en', '英文句', tx, T0 + L.en.y,
-      blockW(L.en.lines, L.en.size, 400, F_SANS), L.en.lines.length * L.en.lh,
+      blockW(L.en.lines, L.en.size, 400, L.en.family || F_SANS), L.en.lines.length * L.en.lh,
       { font: r1(L.en.size), color: 'rgba(255,255,255,0.97)', text: L.en.lines.join(' ') });
   }
 
@@ -1757,7 +1766,7 @@ function drawTopText(ctx, L) {
 
   /* 英文 */
   ctx.save();
-  ctx.font = T(L.en.size, 400, F_SANS);
+  ctx.font = T(L.en.size, 400, L.en.family || F_SANS);   /* 与量测同一个字族，见 buildTextBlockStandard */
   ctx.fillStyle = 'rgba(255,255,255,0.97)';
   shadow();
   L.en.lines.forEach((ln, i) => {
@@ -3248,12 +3257,15 @@ function setOverlay(show, text) {
   watchViewport();
   bindInputs();
 
-  /* 字体度量必须先就绪，否则折行与居中会算错 */
+  /* 字体度量必须先就绪，否则折行与居中会算错 —— 用回退字体的度量算出来的版面，
+     和字体到位后重排的结果不一样（刷新前后观感不一致）。
+     ⚠ 新增字体时必须同步加到这个列表里（2026-09-24 加的 AppGaramond 就是 3 区那个）。 */
   try {
     await Promise.all([
       document.fonts.load(`700 120px AppSerif`),
       document.fonts.load(`400 40px AppSans`),
       document.fonts.load(`600 40px AppSans`),
+      document.fonts.load(`400 44px AppGaramond`),   /* 3 区（英文句） */
     ]);
     if (document.fonts.ready) await document.fonts.ready;
   } catch (e) {}

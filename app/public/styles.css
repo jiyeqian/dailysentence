@@ -12,6 +12,16 @@
   font-style: normal;
   font-display: swap;
 }
+/* 3 区（英文句）专用衬线体：EB Garamond，SIL OFL 1.1（授权原文见 fonts/EBGaramond-OFL.txt），
+   取自 Google Fonts 官方 woff2 的 latin 分块（44KB，可变字重 400–800，实际只用 400）。
+   自托管而不是外链 —— 出图时不能依赖外网；也别换成只存在于 CSS 的写法（显示 = 成品）。 */
+@font-face {
+  font-family: 'AppGaramond';
+  src: url('fonts/EBGaramond.woff2') format('woff2');
+  font-weight: 400 800;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
   --bg: #0b0f17;
