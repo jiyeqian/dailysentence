@@ -1925,7 +1925,9 @@ function inspect() {
     theme: { id: state.theme, name: (THEMES[state.theme] || THEMES.night).name },
     /* 摇一摇授权自证（只增字段）：state = granted / denied / error / ''（还没问过）。
        真机「授权弹窗不出现」时读它分辨：被拒 / pointerdown 不被当手势（历史坑） / 没有 API */
-    shakeDiag: Object.assign({}, shakeDiag),
+    /* busy = 运动授权弹窗窗口内（在飞 / 刚落定未过尾窗）—— 这期间点 1/6 不会开相册
+       （只给提示），真机排查「点了没反应」直接读它，2026-09-29 只增字段 */
+    shakeDiag: Object.assign({}, shakeDiag, { busy: shakePermBusy() }),
     ratios: Object.assign({}, state.ratios),
     /* 图片手动调整：正在调哪一块（null = 没在调）+ 两块各自的缩放/位移。
        window = 弹层里那个换图窗口的 rect（层内 CSS px）；radius = 它的圆角（CSS px）。
@@ -2818,6 +2820,25 @@ const SHAKE_PERM_RETRY_MS = 60000; // 授权未拿到 granted 时的重试冷却
 
 let shakePermAsked = false;    // iOS 授权是否已经**拿到 granted**（拿到就不再问）
 let shakePermLastTry = 0;      // 上一次请求尝试的时间戳：非 granted 时 60s 冷却后再试
+/* 授权请求在飞（系统弹窗可能正开着）—— 这段窗口内**不唤相册**：
+   授权请求挂在 window 的 capture 阶段 pointerup，而「点 1/6 区开相册」是同一个
+   pointerup 的舞台处理 —— 两者挤在同一次手势里，iOS 会把文件输入的唤起吞掉，
+   表现为「首次点 1/6 弹出授权框、之后点 1/6 再也开不出相册」（2026-09-29 用户报）。
+   落定后再留一小段尾窗（等系统弹窗彻底收干净），尾窗过后照常可点。 */
+const SHAKE_PERM_TAIL_MS = 300;
+const SHAKE_PERM_MAX_MS = 20000;   // 兜底：promise 万一不 settle，20s 后不再拦相册
+let shakePermPending = false;
+let shakePermAt = 0;
+let shakePermBusyUntil = 0;
+
+/**
+ * 此刻是否正处在「运动授权弹窗」窗口（在飞，或刚落定不足尾窗）。
+ * 供手势层判「这一下先别开相册」——见上面的踩坑说明。
+ */
+function shakePermBusy() {
+  if (shakePermPending && Date.now() - shakePermAt < SHAKE_PERM_MAX_MS) return true;
+  return Date.now() < shakePermBusyUntil;
+}
 /* 授权自证（2026-09-24 真机踩坑后加）：真机「弹窗不出现」不用再猜 ——
    state 记录请求结果（granted / denied / error / 空串 = 还没问过），
    errName 是被拒/出错时的异常名。inspect().shakeDiag 与 ?diag=1 都透出。 */
@@ -2860,7 +2881,14 @@ function bindShake() {
     const DME = window.DeviceMotionEvent;
     if (DME && typeof DME.requestPermission === 'function') {
       shakePermLastTry = Date.now();
+      shakePermAt = Date.now();
+      shakePermPending = true;     // 弹窗期间拦住开相册（见 shakePermBusy 的说明）
+      const settle = () => {
+        shakePermPending = false;
+        shakePermBusyUntil = Date.now() + SHAKE_PERM_TAIL_MS;
+      };
       DME.requestPermission().then((res) => {
+        settle();
         shakeDiag.asked = true;
         shakeDiag.state = res === 'granted' ? 'granted' : 'denied';
         shakeDiag.at = Date.now();
@@ -2870,6 +2898,7 @@ function bindShake() {
           toast('摇一摇未获权限，将无法换配色');   // 拒绝也不再无声；60s 后的点按仍可再试（iOS 静默返回，不会反复弹）
         }
       }).catch((err) => {
+        settle();
         shakeDiag.asked = true;
         shakeDiag.state = 'error';
         shakeDiag.errName = (err && err.name) || String(err);
@@ -3774,6 +3803,13 @@ function bindGestures() {
     /* 图片 / 信息卡：单击即开相册（不定义双击，所以立即响应，只防抖一次） */
     if (hit.id === 'img' || hit.id === 'card') {
       if (Date.now() - pickerAt < 400) return;
+      /* 运动授权弹窗正开着 / 刚落定：这一下**先不开相册** —— 它与授权请求同属一次手势，
+         iOS 下会把文件输入的唤起吞掉，表现为「首次点 1/6 弹授权框、之后再点 1/6 开不出相册」
+         （2026-09-29 用户报）。给一句提示让用户再点一次，别让点击哑火。 */
+      if (shakePermBusy()) {
+        toast('先允许「运动与方向」权限，再点一次换图');
+        return;
+      }
       pickerAt = Date.now();
       openPicker(hit.id);
       return;

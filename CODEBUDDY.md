@@ -235,6 +235,15 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   再次点击重试（iOS 对已明确拒绝的站点再调 API 是静默返回，不会反复弹窗打扰）。
   桌面 Chromium 新版也实现了 requestPermission —— 回归打桩必须**无条件覆盖**
   该静态方法，否则会漏桩走到真 API；`__ds.permRetryNow` 仅供回归归零冷却。
+  **授权窗口内不唤相册（2026-09-29 用户报的 bug）**：授权请求挂在 window 的 **capture
+  阶段 pointerup**，而「点 1/6 区开相册」是**同一个 pointerup** 的舞台处理 —— 两者挤在
+  一次手势里，iOS 会把文件输入的唤起吞掉，表现是「首次点 1/6 弹出授权框、之后点 1/6
+  再也开不出换图框」。修法：请求发出置 `shakePermPending`，promise 落定后留
+  `SHAKE_PERM_TAIL_MS(300)` 尾窗（`shakePermBusy()` 判据；`SHAKE_PERM_MAX_MS(20s)` 兜底，
+  防 promise 不 settle 时永久拦住相册）；在这窗口内点 1/6 **不开相册**、改 toast
+  「先允许「运动与方向」权限，再点一次换图」—— 用户再点一次即正常。授权窗口状态随
+  `inspect().shakeDiag.busy` 透出（只增字段）。回归：`requestPermission` 桩返回**由测试
+  控制**的 promise，断言「在飞时不开相册 + busy=true」与「落定后再点正常开相册」。
 - **横屏照片自适应配色（2026-09-28，整栏一刀切）**：横屏把配图 cover 铺满整幅、文字直接压在
   照片上，固定的「深幕布 + 主题文字色」在亮照片上会糊字 —— 改为按**右栏覆盖区域**的平均亮度
   二选一：**暗照片 → 深幕布 + 亮字；亮照片 → 浅幕布 + 深墨字**。

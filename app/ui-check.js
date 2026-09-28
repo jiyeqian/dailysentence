@@ -1280,6 +1280,51 @@ function ok(label, cond, extra) {
     await ap.close();
   }
   {
+    /* 授权弹窗与「开相册」同属一次手势会互相打架（2026-09-29 用户报的 bug：
+       首次点 1/6 区弹授权框，之后点 1/6 再也开不出相册）。
+       桩用一个**由测试控制**的 promise 模拟「弹窗正开着」：先断言这一下不开相册且给提示，
+       落定后再点则正常开相册 */
+    const pp2 = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true });
+    await pp2.addInitScript(AUDIO_STUB);
+    await pp2.addInitScript('window.__permDone = null;' +
+      'if (window.DeviceMotionEvent) {' +
+      '  window.DeviceMotionEvent.requestPermission = () => new Promise((res) => { window.__permDone = res; });' +
+      '}');
+    await pp2.goto(BASE + '/?debug=1', { waitUntil: 'load' });
+    await pp2.waitForFunction(() => window.__ds && window.__ds.state.layout);
+    await pp2.waitForTimeout(500);
+    let choosers = 0;
+    pp2.on('filechooser', () => { choosers++; });
+    const imgPt = await pointOf(pp2, 'img');
+    /* 合成真触摸指针（pointerType touch，授权请求只认真触摸） */
+    const touchTap = (x, y) => pp2.evaluate(({ x, y }) => {
+      const stage = document.getElementById('stage');
+      const opt = {
+        bubbles: true, cancelable: true, pointerId: 41, pointerType: 'touch',
+        isPrimary: true, clientX: x, clientY: y,
+      };
+      stage.dispatchEvent(new PointerEvent('pointerdown', opt));
+      stage.dispatchEvent(new PointerEvent('pointerup', opt));
+    }, { x, y });
+    await touchTap(imgPt.x, imgPt.y);
+    await pp2.waitForTimeout(500);
+    const firstToast = await pp2.evaluate(() => document.getElementById('toast').textContent);
+    const busyNow = (await info(pp2)).shakeDiag;
+    ok('授权弹窗在飞时点 1 区：不开相册、改为提示再点一次（busy 自证）',
+      choosers === 0 && /先允许/.test(firstToast) && busyNow.busy === true,
+      `chooser=${choosers}｜busy=${busyNow.busy}｜toast=${firstToast}`);
+    await pp2.evaluate(() => window.__permDone && window.__permDone('granted'));
+    await pp2.waitForTimeout(600);            /* 等尾窗过去 */
+    const afterBusy = (await info(pp2)).shakeDiag;
+    const fc3 = pp2.waitForEvent('filechooser', { timeout: 4000 });
+    await touchTap(imgPt.x, imgPt.y);
+    await fc3;
+    ok('授权落定后再点 1 区 = 正常弹出换图（相册）',
+      choosers === 1 && afterBusy.busy === false,
+      `chooser=${choosers}｜busy=${afterBusy.busy}`);
+    await pp2.close();
+  }
+  {
     /* requestPermission 抛错（NotAllowedError 形态）也要落 shakeDiag，不能静默 */
     const ap = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true });
     await ap.addInitScript(AUDIO_STUB);
