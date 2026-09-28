@@ -1743,6 +1743,18 @@ function ok(label, cond, extra) {
   ok('横屏文字块装得下（文字底 ≤ 信息卡顶，不溢出压卡）',
     wGeo.textBottom <= wGeo.cardTop + 1,
     `文字底 ${Math.round(wGeo.textBottom)} / 卡顶 ${Math.round(wGeo.cardTop)}（活动区顶 ${Math.round(wGeo.textTop)}）`);
+  const wBg = await mp.evaluate(() => {
+    const I = window.__ds.inspect();
+    const card = (window.__ds.state.regions || []).find((r) => r.id === 'card');
+    return { bg: I.bg, card: card && { x: card.x, y: card.y, w: card.w, h: card.h } };
+  });
+  ok('横屏背景以 cover 铺满整幅海报（imgW=1080 / blockH=608，两维都不小于画布）',
+    wBg.bg && wBg.bg.imgW === 1080 && wBg.bg.blockH === 608 &&
+    wBg.bg.w >= 1080 && wBg.bg.h >= 608,
+    JSON.stringify(wBg.bg));
+  ok('横屏信息卡 = 标准版 984:496 等比映射（比例差 ≤ 0.02，模板内容不变形）',
+    wBg.card && Math.abs(wBg.card.w / wBg.card.h - 984 / 496) < 0.02,
+    `卡 ${wBg.card.w}×${wBg.card.h}｜比例 ${(wBg.card.w / wBg.card.h).toFixed(3)}（标准版 1.984）`);
   /* 真实拖动缩放（命中 → zoomDrag → applyZoom 全链路，与标准版同一条钳制路径） */
   await dragY(mp, 'en', -120);
   const wZoom = await info(mp);
@@ -1750,6 +1762,26 @@ function ok(label, cond, extra) {
   await dragY(mp, 'en', 240);
   const wZoomBack = await info(mp);
   ok('横屏下滑 = 缩回', wZoomBack.text.fx.en < wZoom.text.fx.en, `fx.en=${wZoomBack.text.fx.en}`);
+  /* 真触摸指针（CDP touchStart/Move/End）复现真机缩放路径：上一轮 mouse 已通过，
+     真机反馈「缩放失效」必须用 touch 指针实证，别让 mouse 结论替真机背书 */
+  await mp.evaluate(() => window.__ds.setZoom('en', 1));
+  await mp.waitForTimeout(300);
+  {
+    const pt = await pointOf(mp, 'en');
+    const tcdp = await mp.context().newCDPSession(mp);
+    await tcdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: pt.x, y: pt.y }] });
+    for (let i = 1; i <= 10; i++) {
+      await tcdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: pt.x, y: pt.y - i * 12 }] });
+      await mp.waitForTimeout(30);
+    }
+    await tcdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await mp.waitForTimeout(400);
+    const wTouch = await info(mp);
+    ok('横屏真触摸（CDP touch）上滑 = 字号缩放生效', wTouch.text.fx.en > 1.05,
+      `fx.en=${wTouch.text.fx.en}`);
+    await mp.evaluate(() => window.__ds.setZoom('en', 1));
+    await mp.waitForTimeout(250);
+  }
   /* 波形层贴合右栏 3 区：不越左图、竖向盖 3 区（voiceBox 列几何从版面读） */
   await mp.evaluate(() => window.__ds.playVoice());
   await mp.waitForTimeout(250);

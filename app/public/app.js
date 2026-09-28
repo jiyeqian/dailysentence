@@ -1162,9 +1162,7 @@ function computeLayoutLong(ctx) {
    **下拉更新让路**（横屏下拉与系统通知中心冲突 —— 回标准版再下拉）。 */
 
 const WIDE_H = 608;            // 横屏设计画布高（× U=16/9 → 位图 1080）
-const WIDE_IMG_W = 486;        // 左侧图片区宽（约 45%）
 const WIDE_TEXT_X = 546;       // 右栏文字左缘
-const WIDE_CARD_H = 176;       // 横屏信息卡高
 
 /* 横屏字号基准（2026-09-28 用户反馈「字体太大、乱套」后重定）：
    设计画布只有 608 高（标准版 1920 的 1/3.16），直接沿用标准版字号会把右栏撑爆、
@@ -1217,7 +1215,10 @@ function computeLayoutWide(ctx) {
      （与标准版「胶囊永不压句子」同一取舍，极端时句子被保底略缩） */
   const colX = WIDE_TEXT_X;
   const colW = CW - WIDE_TEXT_X - 48;     /* 486：右缘留 48 设计边距 */
-  const cardY = WIDE_H - 48 - WIDE_CARD_H;
+  /* 信息卡按标准版卡片（984×496 = 宽 CW-2×CARD_PAD、高 CARD_H）**等比**映射到列宽
+     （2026-09-28 用户：「按标准版计算的结果按比例映射」—— 比例一致，模板内容不变形） */
+  const cardH = Math.round(colW * CARD_H / (CW - 2 * CARD_PAD));
+  const cardY = WIDE_H - 48 - cardH;
   const dateTop = 24;
   const dateH = WIDE_DATE_H * dg;
   const textTop = dateTop + dateH + 14;
@@ -1268,11 +1269,11 @@ function computeLayoutWide(ctx) {
     cn: { on: M.cnLines.length > 0 && !h.cn, size: M.cnSize, lh: M.cnLH, lines: M.cnLines, y: cnY, family: F_SANS },
     source: { on: M.sourceOn, size: M.srcSize, y: srcY, text: c.source },
     panel: null,                          /* 单词卡不进横屏 */
-    card: { x: colX, y: cardY, w: colW, h: WIDE_CARD_H },
+    card: { x: colX, y: cardY, w: colW, h: cardH },
     ch: CH,
-    /* 左侧图片区：覆盖裁切 + 右缘渐隐（drawBackground 的 wide 分支），
-       imgBlock 保留几何含义（fitBase/调整层/命中表复用），w = 486 区分于标准版全宽 */
-    imgBlock: { x: 0, y: 0, w: WIDE_IMG_W, h: WIDE_H, wide: true },
+    /* 背景图 cover 铺满整幅海报（见 drawBackground 横屏分支）；imgBlock 保留几何含义
+       （fitBase/调整层/命中表复用），wide 标记横屏路径 */
+    imgBlock: { x: 0, y: 0, w: CW, h: WIDE_H, wide: true },
   };
 }
 
@@ -2001,25 +2002,19 @@ function drawBackground(ctx, L) {
     return;
   }
 
-  /* 横屏版：左栏图片覆盖裁切（cover-fit 居中）+ 右缘渐隐 —— 与标准版裁切同思路，
-     但窗口是左栏竖条（L.imgBlock.wide = true），fit 的「面积相当」不适用于 cover */
+  /* 横屏版（2026-09-28 第二轮改版）：配图以 cover **铺满整幅**海报做背景，
+     右栏文字垫半透明面板透出背景（面板见 drawScrim 横屏专支）。
+     cover 恰好盖满两维、海报圆角 clip 已在 render() 生效，所以这里不再自己 clip */
   if (L.imgBlock && L.imgBlock.wide) {
     drawBase(ctx);
-    const bw = L.imgBlock.w, bh = L.imgBlock.h;
-    const k = Math.max(bw / im.width, bh / im.height);
+    const k = Math.max(CW / im.width, WIDE_H / im.height);
     const dw = im.width * k, dh = im.height * k;
-    const dx = (bw - dw) / 2, dy = (bh - dh) / 2;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, bw, bh);
-    ctx.clip();
+    const dx = (CW - dw) / 2, dy = (WIDE_H - dh) / 2;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(im, dx, dy, dw, dh);
-    fadeImageRight(ctx, bw, bh);
-    ctx.restore();
     state.bgDraw = {
-      w: Math.round(dw), h: Math.round(dh), blockH: bh, imgW: bw,
-      clipped: dw > bw || dh > bh, blankBottom: 0,
+      w: Math.round(dw), h: Math.round(dh), blockH: WIDE_H, imgW: CW,
+      clipped: dw > CW || dh > WIDE_H, blankBottom: 0,
       scale: Math.round(k * 1000) / 1000, x: Math.round(dx), y: Math.round(dy),
     };
     return;
@@ -2081,16 +2076,6 @@ function drawBase(ctx) {
   ctx.fillRect(0, 0, CW, CH);
 }
 
-/** 图片右缘渐隐（横屏左图右文用）：与 fadeImageBottom 同手法，方向朝右 */
-function fadeImageRight(ctx, iw, ih) {
-  const w = Math.min(200, iw * 0.3);
-  const g = ctx.createLinearGradient(iw - w, 0, iw, 0);
-  g.addColorStop(0, `rgba(${PAL().fade},0)`);
-  g.addColorStop(1, `rgba(${PAL().fade},1)`);
-  ctx.fillStyle = g;
-  ctx.fillRect(iw - w, 0, w, ih);
-}
-
 /**
  * 原比例模式下，让背景图下缘渐隐进海报底色。
  * 只作用于图片最下方一小段，主体依然清晰可辨，衔接也不生硬。
@@ -2110,6 +2095,25 @@ function fadeImageBottom(ctx, ih) {
 function drawScrim(ctx, L) {
   /* 压暗基色随主题（暗色系各用各的近黑；paper 用暖褐 —— 纯黑压在浅底上会发灰发脏） */
   const s = PAL().scrim;
+  /* 横屏版（2026-09-28 第二轮改版）：背景图铺满整幅，右栏文字垫**半透明面板**透出背景
+     （文字压在面板上、面板下就是背景图）；左图区不加遮罩保持干净，只留极淡暗角 */
+  if (L.imgBlock && L.imgBlock.wide) {
+    const px = WIDE_TEXT_X - 24;
+    const g = ctx.createLinearGradient(px, 0, px + 80, 0);
+    g.addColorStop(0, `rgba(${s},0)`);
+    g.addColorStop(1, `rgba(${s},0.55)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(px, 0, 80, CH);
+    ctx.fillStyle = `rgba(${s},0.55)`;
+    ctx.fillRect(px + 80, 0, CW - px - 80, CH);
+    const v = ctx.createRadialGradient(CW / 2, CH * 0.44, CW * 0.26, CW / 2, CH * 0.5, CH * 0.78);
+    v.addColorStop(0, 'rgba(0,0,0,0)');
+    v.addColorStop(1, 'rgba(0,0,0,0.22)');
+    ctx.fillStyle = v;
+    ctx.fillRect(0, 0, CW, CH);
+    return;
+  }
+
   /* 标准版：句子与卡片都落在底色上，不需要压暗图片；只做底部收边与暗角 */
   if (L.imgBlock) {
     const g = ctx.createLinearGradient(0, CH - 640, 0, CH);
