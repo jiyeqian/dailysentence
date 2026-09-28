@@ -2077,6 +2077,112 @@ function ok(label, cond, extra) {
   await mp.waitForTimeout(900);
   ok('再竖回 = 回进横屏前的竖版（上一轮捏合已把竖版切成标准版，modeBeforeWide 跟着走）',
     (await info(mp)).mode === 'standard');
+
+  /* ---------------- 调试开关：?wide=1（强制 + 锁定）与 ?cardAlpha=（覆盖）（2026-09-29） ---------------- */
+  console.log('调试开关（?wide=1 强制锁定 + ?cardAlpha= 覆盖）');
+  /* 竖屏视口 + ?wide=1：真机竖持 / 桌面都能稳定看到横屏版 */
+  await mp.goto(BASE + '/?debug=1&wide=1', { waitUntil: 'load' });
+  await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await mp.waitForTimeout(700);
+  const dbg0 = await info(mp);
+  const dbg0Rest = await mp.evaluate(() => window.__ds.state.modeBeforeWide);
+  ok('?wide=1 竖屏视口下强制进横屏版（位图 1920×1080、wideForced 自证）',
+    dbg0.mode === 'wide' && dbg0.canvas.physW === 1920 && dbg0.canvas.physH === 1080 &&
+    dbg0.opts.wide === true && dbg0.wideForced === true,
+    `mode=${dbg0.mode} ${dbg0.canvas.physW}x${dbg0.canvas.physH} wideForced=${dbg0.wideForced}`);
+  ok('?wide=1 仍记下 modeBeforeWide = 本来会选的竖版（standard）',
+    dbg0Rest === 'standard', `modeBeforeWide=${dbg0Rest}`);
+  /* 锁定：横过再竖回 —— 没锁定的话竖回会被 onChange 切回 standard */
+  await mp.setViewportSize({ width: 844, height: 390 });
+  await mp.waitForTimeout(700);
+  ok('?wide=1 横屏放置仍是 wide', (await info(mp)).mode === 'wide');
+  await mp.setViewportSize({ width: 390, height: 844 });
+  await mp.waitForTimeout(700);
+  ok('?wide=1 锁定生效：竖回后仍停在 wide（本页没挂方向感应）',
+    (await info(mp)).mode === 'wide');
+  /* wide 无手势出口 → 强制横屏里捏合也不该被切走 */
+  await mp.evaluate(async () => {
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    const stage = document.getElementById('stage');
+    const fire = (type, id, x, y) => stage.dispatchEvent(new PointerEvent(type, {
+      pointerId: id, clientX: x, clientY: y, bubbles: true, pointerType: 'touch', isPrimary: id === 9,
+    }));
+    const cx = 195, cy = 400;
+    fire('pointerdown', 9, cx - 60, cy);
+    fire('pointerdown', 10, cx + 60, cy);
+    for (let i = 1; i <= 10; i++) {
+      const half = 60 * (1 - i * 0.07);
+      fire('pointermove', 9, cx - half, cy);
+      fire('pointermove', 10, cx + half, cy);
+      await sleep(40);
+    }
+    fire('pointerup', 9, cx - 18, cy);
+    fire('pointerup', 10, cx + 18, cy);
+  });
+  await mp.waitForTimeout(700);
+  ok('?wide=1 下双指捏合无动作（wide 无手势出口）', (await info(mp)).mode === 'wide');
+  await shot(mp, 'debug-wide-forced');
+  /* 桌面上下文（非移动、无方向感应）：不带参数恒为竖版，?wide=1 是唯一入口 —— 该开关的核心价值 */
+  const deskP = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1 });
+  await deskP.addInitScript(AUDIO_STUB);
+  await deskP.goto(BASE + '/?debug=1', { waitUntil: 'load' });
+  await deskP.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await deskP.waitForTimeout(700);
+  const deskNo = await info(deskP);
+  ok('桌面（1280×900、非移动）不带参数 = 竖版（桌面本就没有方向感应）',
+    deskNo.mode === 'standard' && deskNo.canvas.physW === 1080,
+    `mode=${deskNo.mode} ${deskNo.canvas.physW}x${deskNo.canvas.physH}`);
+  await deskP.goto(BASE + '/?debug=1&wide=1', { waitUntil: 'load' });
+  await deskP.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await deskP.waitForTimeout(700);
+  const deskW = await info(deskP);
+  ok('桌面 + ?wide=1 = 进横屏版（核心价值：桌面没有方向感应也能看横屏版）',
+    deskW.mode === 'wide' && deskW.canvas.physW === 1920 && deskW.canvas.physH === 1080,
+    `mode=${deskW.mode} ${deskW.canvas.physW}x${deskW.canvas.physH}`);
+  await shot(deskP, 'debug-wide-desktop');
+  await deskP.close();
+  /* 优先级：wide > long；modeBeforeWide 跟着 ?long=1 记 long */
+  await mp.goto(BASE + '/?debug=1&long=1&wide=1', { waitUntil: 'load' });
+  await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await mp.waitForTimeout(700);
+  const dbgL = await info(mp);
+  const dbgLRest = await mp.evaluate(() => window.__ds.state.modeBeforeWide);
+  ok('?wide=1&long=1 → wide 优先，modeBeforeWide = long',
+    dbgL.mode === 'wide' && dbgLRest === 'long',
+    `mode=${dbgL.mode} modeBeforeWide=${dbgLRest}`);
+  /* ?cardAlpha= 覆盖：纯黑底定量（卡内白区 ≈ 255×α） */
+  await mp.goto(BASE + '/?debug=1&wide=1&cardAlpha=0.6', { waitUntil: 'load' });
+  await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await mp.waitForTimeout(700);
+  await toneWith(mp, '#000000');
+  const px06 = await cardProbe(mp);
+  const dbg06 = await info(mp);
+  ok('?cardAlpha=0.6 覆盖生效（自证 0.6｜纯黑底卡内白区 ≈153）',
+    dbg06.cardAlpha === 0.6 && !!px06 && px06.max <= 180 && px06.max >= 120,
+    `cardAlpha=${dbg06.cardAlpha}｜卡内最大 ${px06 && px06.max}（期望 ≈153）`);
+  await shot(mp, 'debug-cardalpha-060');
+  await mp.goto(BASE + '/?debug=1&wide=1&cardAlpha=1', { waitUntil: 'load' });
+  await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await mp.waitForTimeout(700);
+  await toneWith(mp, '#000000');
+  const px1 = await cardProbe(mp);
+  const dbg1 = await info(mp);
+  ok('?cardAlpha=1 = 改造前的不透明白卡（卡内 ≥245，可同屏 A/B）',
+    dbg1.cardAlpha === 1 && !!px1 && px1.max >= 245,
+    `cardAlpha=${dbg1.cardAlpha}｜卡内最大 ${px1 && px1.max}（期望 ~255）`);
+  await mp.goto(BASE + '/?debug=1&wide=1&cardAlpha=abc', { waitUntil: 'load' });
+  await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await mp.waitForTimeout(700);
+  const dbgBad = await info(mp);
+  ok('?cardAlpha=abc 非法值回落缺省 0.82', dbgBad.cardAlpha === 0.82,
+    `cardAlpha=${dbgBad.cardAlpha}`);
+  await mp.goto(BASE + '/?debug=1&wide=1&cardAlpha=1.5', { waitUntil: 'load' });
+  await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await mp.waitForTimeout(700);
+  const dbgClamp = await info(mp);
+  ok('?cardAlpha=1.5 超范围钳到 1', dbgClamp.cardAlpha === 1,
+    `cardAlpha=${dbgClamp.cardAlpha}`);
+
   /* 恢复标准版，别让后面的「改视口尺寸」断言拿到长版的高画布 */
   await mp.evaluate(() => localStorage.setItem('ds:mode', 'standard'));
   await mp.goto(BASE + '/?debug=1', { waitUntil: 'load' });

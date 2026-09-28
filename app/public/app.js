@@ -466,16 +466,26 @@ function applyMode(id) {
 /**
  * 启动时定版式：URL ?long=1（或旧参数 ?ex=1）**强制指定**（优先于记忆）；
  * 否则读回上次的版式；都没有 = 标准版。**wide 不从记忆来** —— 它只由
- * 设备方向 / 双指手势进入。静默设置，不 toast（这不是用户手势）。
+ * 设备方向 / 双指手势进入（调试例外：`?wide=1` 强制并锁定，见 WIDE_FORCED）。
+ * 静默设置，不 toast（这不是用户手势）。
  */
 function initMode() {
-  if (QS.get('long') === '1' || QS.get('ex') === '1') {
-    state.mode = 'long';
-  } else {
-    let saved = null;
-    try { saved = localStorage.getItem(MODE_KEY); } catch (e) {}
-    state.mode = saved === 'long' ? 'long' : 'standard';
+  /* 「本来会选的竖版」：URL 强制 > 记忆 > 标准版。**先算它**是为了让 ?wide=1
+     记下 modeBeforeWide（解锁 / 竖回时的落点）—— 优先级 wide > long */
+  const rest = (QS.get('long') === '1' || QS.get('ex') === '1') ? 'long'
+    : (() => {
+      let saved = null;
+      try { saved = localStorage.getItem(MODE_KEY); } catch (e) {}
+      return saved === 'long' ? 'long' : 'standard';
+    })();
+  if (WIDE_FORCED) {           /* 调试 `?wide=1`：强制横屏版，不写版式记忆 */
+    state.mode = 'wide';
+    state.modeBeforeWide = rest;
+    state.opts.longPoster = false;
+    state.opts.wide = true;
+    return;
   }
+  state.mode = rest;
   state.opts.longPoster = state.mode === 'long';
   state.opts.wide = false;
 }
@@ -622,6 +632,20 @@ const DEBUG = QS.get('debug') === '1';
 const FIT_DEVICE = QS.get('fit') === 'device';
 /* 真机诊断页：`?diag=1` 时叠一段可长按复制的纯文本（见 startDiag）。平时完全不存在 */
 const DIAG = QS.get('diag') === '1';
+/* 调试开关（2026-09-29，**仅调试**，都不写版式记忆、刷新即恢复）：
+   - `?wide=1` 强制并**锁定**横屏版：桌面 / 容器没有方向感应（bindOrientation 仅移动设备启用），
+     这是这些环境里唯一能稳定观察横屏版的入口；锁定 = 本页不挂方向感应，横竖都不切。 */
+const WIDE_FORCED = QS.get('wide') === '1';
+/* - `?cardAlpha=0.6` 覆盖横屏信息卡不透明度（0–1 钳制；传 1 = 改造前的不透明白卡，便于同屏 A/B）。
+     仅横屏生效；缺省 / 非法值 → null（回落 WIDE_CARD_ALPHA） */
+const CARD_ALPHA_QS = (() => {
+  const raw = QS.get('cardAlpha');
+  if (raw == null || raw === '') return null;
+  const v = Number(raw);
+  return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null;
+})();
+/** 横屏信息卡当前生效的不透明度：调试覆盖 > WIDE_CARD_ALPHA（绘制 / 自证 / 诊断三处同源） */
+const cardAlphaWide = () => (CARD_ALPHA_QS == null ? WIDE_CARD_ALPHA : CARD_ALPHA_QS);
 
 const FROST_OK = (() => {
   try {
@@ -2021,12 +2045,14 @@ function inspect() {
     mode: state.mode,
     lastToggleAt: state.lastToggleAt || 0,
     viewDate: state.viewDate,
+    /* 调试 `?wide=1` 强制并锁定横屏（2026-09-29，只增字段）：true = 本页被 URL 锁在横屏版，不写记忆 */
+    wideForced: WIDE_FORCED,
     /* 横屏照片自适应配色自证（2026-09-28，只增字段）：null = 没照片 / 取样失败（回退主题配色）。
        { lum, mode: light|dark, palId, veil, veilA } —— 真机/回归都读它判断选了哪个基调 */
     wideTone: L.wideTone || null,
     /* 信息卡不透明度（2026-09-29，只增字段）：0.82 = 横屏半透明磨砂卡；1 = 不透明（标准 / 长版）。
        真机判断「卡片透没透」直接读它，不必截图 */
-    cardAlpha: (L.imgBlock && L.imgBlock.wide) ? WIDE_CARD_ALPHA : 1,
+    cardAlpha: (L.imgBlock && L.imgBlock.wide) ? cardAlphaWide() : 1,
     /* 当前主题（2026-09-24 摇一摇换配色）：id = THEMES 的 key，name = toast 里的中文名。
        只增不改：标注通道与旧回归不认识它也无碍，新回归靠它自证「进了哪个主题」 */
     theme: { id: state.theme, name: (THEMES[state.theme] || THEMES.night).name },
@@ -2531,11 +2557,12 @@ function drawProfileCard(ctx, L) {
      ⚠ 透明度只能落在**一层**上：模板图自带白底，若在它下面再铺一层半透明白底，两层会叠加成
      `0.82 + 0.82×0.18 ≈ 0.97`，卡内像素实测 247/255 —— 几乎不透（本次踩过，回归的像素探针
      当场抓到，随即改成下面这个结构）。
-     所以宽态：**卡面只画模板图那一层**（α = WIDE_CARD_ALPHA），白底只负责投影 ——
+     所以宽态：**卡面只画模板图那一层**（α = cardAlphaWide()，缺省 WIDE_CARD_ALPHA；
+     调试 `?cardAlpha=` 可覆盖，见文件顶部开关区），白底只负责投影 ——
      用 evenodd 把卡片内圈挖空，阴影照旧落在卡外（不挖掉就被一起裁掉）。
      标准版 / 长版仍是「不透明白底 + 不透模板图」，逐像素不变。 */
   const wide = !!(L.imgBlock && L.imgBlock.wide);
-  const a = wide ? WIDE_CARD_ALPHA : 1;
+  const a = wide ? cardAlphaWide() : 1;
 
   /* 卡片底 / 投影 */
   ctx.save();
@@ -3068,6 +3095,9 @@ function bindShake() {
 /** 方向感应（2026-09-28）：横屏放置 → 自动进横屏版；竖屏放置 → 回进 wide 前的版式。
    只在空闲态切（播放 / 调整中不打断）；wide 不写版式记忆（设备状态不持久化） */
 function bindOrientation() {
+  /* 调试锁（`?wide=1`，2026-09-29）：本页不挂方向感应 —— 横竖都不切版式，
+     桌面 / 容器 / 真机竖持下都能稳定观察横屏版（仅调试，不写版式记忆） */
+  if (WIDE_FORCED) return;
   /* 仅移动设备启用：桌面拖拽窗口改横竖比例不该切版式（回归的旋转视口也不受影响） */
   if (!isMobileDevice(window.devicePixelRatio || 1)) return;
   const mq = window.matchMedia('(orientation: landscape)');
@@ -4052,6 +4082,8 @@ function diagText() {
       '   dpr ' + r1(window.devicePixelRatio || 1) +
       (window.visualViewport ? '   vv ' + r1(window.visualViewport.height) : ''),
     '安全区    top ' + r1(safe.top) + '   bottom ' + r1(safe.bottom),
+    /* 当前版式（2026-09-29 加）：真机 / 桌面一眼看到落在哪个版式，以及是否被调试参数锁定 */
+    '版式      ' + state.mode + (WIDE_FORCED ? '（?wide=1 强制锁定）' : ''),
     /* 横屏照片自适应配色（2026-09-28）：真机读这一行就知道选了哪个基调、为什么 */
     '照片基调  ' + (L.wideTone
       ? L.wideTone.mode + '（对比度 ' + L.wideTone.contrast + '）   文字主题 ' + L.wideTone.palId +
@@ -4059,7 +4091,7 @@ function diagText() {
         '   sd ' + L.wideTone.sd +
         '   阴影 blur ' + L.wideTone.shadow.blur + ' α ' + L.wideTone.shadow.alpha +
         '   暗角 @' + L.wideTone.vignetteA + '（右栏无底板）' +
-        '   卡片 α ' + WIDE_CARD_ALPHA
+        '   卡片 α ' + cardAlphaWide() + (CARD_ALPHA_QS == null ? '' : '（调试覆盖）')
       : '（非横屏 / 无照片 / 取样失败 → 回退主题配色）'),
     '舞台      standalone=' + (STAGE_INFO.standalone ? 'Y' : 'N') + '   padTop=' + STAGE_INFO.padTop +
       '   screenH=' + STAGE_INFO.screenH + '   frameH=' + STAGE_INFO.frameH,
