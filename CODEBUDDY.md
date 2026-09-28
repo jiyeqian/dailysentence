@@ -235,6 +235,21 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   再次点击重试（iOS 对已明确拒绝的站点再调 API 是静默返回，不会反复弹窗打扰）。
   桌面 Chromium 新版也实现了 requestPermission —— 回归打桩必须**无条件覆盖**
   该静态方法，否则会漏桩走到真 API；`__ds.permRetryNow` 仅供回归归零冷却。
+- **横屏照片自适应配色（2026-09-28，整栏一刀切）**：横屏把配图 cover 铺满整幅、文字直接压在
+  照片上，固定的「深幕布 + 主题文字色」在亮照片上会糊字 —— 改为按**右栏覆盖区域**的平均亮度
+  二选一：**暗照片 → 深幕布 + 亮字；亮照片 → 浅幕布 + 深墨字**。
+  取样只采设计 x ∈ [522, 1080] 全高那一块（`analyzePhotoTone`；`wideCover(im)` 与绘制共用同一份
+  cover 变换，不两处各算），阈值 `WIDE_TONE_LUM(150)` 一处可调，采样结果按**图片身份**缓存在
+  `state.photoLum`（手势期间零开销，换图后 key 不等自然重采）。
+  **色值仍全部取自 THEMES（零写死颜色）**：按当前主题的冷暖组取「同暖冷的另一明度主题」——
+  暖组 `paper ↔ ember`、冷组 `celadon ↔ night`（配对表 `WIDE_TONE_PAIR`）；浅幕布基色是浅色主题
+  新加的 `photoVeil`（缺失回退该主题 `fade`），深幕布用配色主题的 `scrim`。
+  **手摇主题只决定冷暖基调与卡片/波形强调色，明暗由照片决定 —— 两个维度正交**。
+  绘制侧只有两处：`drawScrim` 横屏专支（幕布基色 / 透明度 / 暗角；浅幕布的暗角用极淡同色，
+  纯黑压在浅幕布上会发灰发脏）与 `drawTopText` 的取色 `PAL_WIDE(L)`（一处覆盖英文 / 中文 /
+  出处 / 日期胶囊 / 文字阴影）。无图 / 取样失败（跨域污染）→ `wideTone = null`，回退主题配色，
+  非宽态逐值不变。自证：`inspect().wideTone = { lum, mode, palId, veil, veilA, colEn, colSource }`，
+  `?diag=1` 有「照片基调」一行。备查表同 `docs/标注通道-使用手册.md`。
 - **主题随图匹配（2026-09-25，四选一，不派生）**：三个时点自动执行 —— 初始化
   （`loadBackground` 尾部，下拉更新同收口）、换顶部图片后。输入量（离屏 48px 采样）：
   `lum`（感知亮度 0~255，0.3R+0.59G+0.11B）/ `warmth`（**平均 R − 平均 B**，正暖负冷）。

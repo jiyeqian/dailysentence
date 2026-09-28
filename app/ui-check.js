@@ -1764,6 +1764,52 @@ function ok(label, cond, extra) {
   ok('横屏信息卡 = 标准版 984:496 等比映射（比例差 ≤ 0.02，模板内容不变形）',
     wBg.card && Math.abs(wBg.card.w / wBg.card.h - 984 / 496) < 0.02,
     `卡 ${wBg.card.w}×${wBg.card.h}｜比例 ${(wBg.card.w / wBg.card.h).toFixed(3)}（标准版 1.984）`);
+  /* 照片自适应配色（2026-09-28）：注入合成纯白 / 纯黑背景图 → 底色明暗决定文字与幕布基调。
+     注入手法照 whiteProbe 的先例：直接换 state.bgImage 再驱动一次重绘。
+     注意顺序：这两条注入发生在后文的「横屏冷启动 reload」之前，reload 会把真实配图换回来，
+     所以最后的 wide-landscape 截图仍是真实版式 */
+  const toneWith = (page, fill) => page.evaluate((c) => new Promise((res) => {
+    const cv = document.createElement('canvas');
+    cv.width = 640;
+    cv.height = 360;
+    const x = cv.getContext('2d');
+    x.fillStyle = c;
+    x.fillRect(0, 0, cv.width, cv.height);
+    const im = new Image();
+    im.onload = () => {
+      window.__ds.state.bgImage = im;
+      window.__ds.scheduleRender();
+      setTimeout(() => res(window.__ds.inspect().wideTone), 300);
+    };
+    im.src = cv.toDataURL();
+  }), fill);
+  /* 色值（rgba(...) 或 #rrggbb）→ 感知亮度：用来校核「字比底亮还是暗」 */
+  const lumOf = (col) => {
+    const m = /rgba?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(col || '');
+    if (m) return 0.3 * +m[1] + 0.59 * +m[2] + 0.11 * +m[3];
+    const h = /^#([0-9a-f]{6})$/i.exec(col || '');
+    if (h) {
+      const n = parseInt(h[1], 16);
+      return 0.3 * ((n >> 16) & 255) + 0.59 * ((n >> 8) & 255) + 0.11 * (n & 255);
+    }
+    return NaN;
+  };
+  const toneLight = await toneWith(mp, '#ffffff');
+  ok('亮照片（纯白底）→ 浅幕布 + 深墨字',
+    !!toneLight && toneLight.mode === 'light' && toneLight.lum > 200 &&
+    lumOf('rgb(' + toneLight.veil + ')') > 180 && lumOf(toneLight.colEn) < 120,
+    JSON.stringify(toneLight));
+  await shot(mp, 'wide-tone-light');      /* 亮基调留档：浅幕布 + 深墨字 */
+  const toneDark = await toneWith(mp, '#000000');
+  ok('暗照片（纯黑底）→ 深幕布 + 亮字',
+    !!toneDark && toneDark.mode === 'dark' && toneDark.lum < 60 &&
+    lumOf('rgb(' + toneDark.veil + ')') < 90 && lumOf(toneDark.colEn) > 180,
+    JSON.stringify(toneDark));
+  await shot(mp, 'wide-tone-dark');       /* 暗基调留档：深幕布 + 亮字 */
+  ok('照片基调自证齐全（mode / lum / palId / 幕布 / 正文色）且两基调取自不同主题',
+    !!toneLight && !!toneDark && !!toneLight.palId && !!toneDark.palId &&
+    toneLight.palId !== toneDark.palId,
+    `亮 ${toneLight && toneLight.palId} / 暗 ${toneDark && toneDark.palId}`);
   /* 真实拖动缩放（命中 → zoomDrag → applyZoom 全链路，与标准版同一条钳制路径） */
   await dragY(mp, 'en', -120);
   const wZoom = await info(mp);
@@ -1878,6 +1924,8 @@ function ok(label, cond, extra) {
   ok('竖屏放回 = 回长版（modeBeforeWide 正确往返）',
     wBack.mode === 'long' && wBack.canvas.physW === 1080,
     `mode=${wBack.mode}`);
+  ok('非横屏不看照片基调（标准 / 长版配色与改造前一致：wideTone 为 null）',
+    wBack.wideTone === null, JSON.stringify(wBack.wideTone));
   await mp.evaluate(async () => {
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
     const stage = document.getElementById('stage');
