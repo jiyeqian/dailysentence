@@ -1881,7 +1881,8 @@ function ok(label, cond, extra) {
     toneDark.contrast >= 7,
     JSON.stringify(toneDark));
   await shot(mp, 'wide-tone-dark');       /* 暗基调留档：无底板 + 亮字 */
-  /* 横屏信息卡整块半透明（2026-09-29）：此刻背景仍是纯黑，卡内白区应约为 255×0.82 ≈ 209；
+  /* 横屏信息卡整块半透明（2026-09-29；α 当日按实机观感由 0.82 调到 0.56）：此刻背景仍是纯黑，
+     卡内白区应约为 255×0.56 ≈ 143；
      旧实现（不透明）会是 ~255。取卡片内 5 个采样点的**最大值** —— 白区一定在其中 */
   const cardProbe = (page) => page.evaluate(() => {
     const I = window.__ds.inspect();
@@ -1902,12 +1903,12 @@ function ok(label, cond, extra) {
     return { max: Math.max.apply(null, ps), min: Math.min.apply(null, ps) };
   });
   const cardWidePx = await cardProbe(mp);
-  ok('横屏信息卡半透明（纯黑底上卡内白区 ≈ 209，背景透上来）',
-    !!cardWidePx && cardWidePx.max <= 245 && cardWidePx.max >= 150,
+  ok('横屏信息卡半透明（纯黑底上卡内白区 ≈ 143，背景透上来）',
+    !!cardWidePx && cardWidePx.max <= 190 && cardWidePx.max >= 110,
     `卡内采样 最大 ${cardWidePx && cardWidePx.max} / 最小 ${cardWidePx && cardWidePx.min}｜` +
-    `期望 ≈209（255×0.82），旧实现 ~255`);
-  ok('横屏 cardAlpha 自证 = 0.82（标准 / 长版应为 1）',
-    (await info(mp)).cardAlpha === 0.82, `cardAlpha=${(await info(mp)).cardAlpha}`);
+    `期望 ≈143（255×0.56）；不透明 ~255 与旧的 0.82 ≈209 都落在窗口外`);
+  ok('横屏 cardAlpha 自证 = 0.56（标准 / 长版应为 1）',
+    (await info(mp)).cardAlpha === 0.56, `cardAlpha=${(await info(mp)).cardAlpha}`);
   const toneMix = await toneWith(mp, 'stripes');
   ok('明暗混杂不再被均值骗：均值偏暗但最亮处是纯白 → 选深墨字（旧均值规则会选反）',
     !!toneMix && toneMix.mode === 'light' && toneMix.lum < 150 && toneMix.p90 > 200,
@@ -2174,7 +2175,7 @@ function ok(label, cond, extra) {
   await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
   await mp.waitForTimeout(700);
   const dbgBad = await info(mp);
-  ok('?cardAlpha=abc 非法值回落缺省 0.82', dbgBad.cardAlpha === 0.82,
+  ok('?cardAlpha=abc 非法值回落缺省 0.56', dbgBad.cardAlpha === 0.56,
     `cardAlpha=${dbgBad.cardAlpha}`);
   await mp.goto(BASE + '/?debug=1&wide=1&cardAlpha=1.5', { waitUntil: 'load' });
   await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
