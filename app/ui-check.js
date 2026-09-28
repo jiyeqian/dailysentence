@@ -1700,23 +1700,25 @@ function ok(label, cond, extra) {
   /* 尺寸变化（旋转 / 工具栏收起展开 / 改窗口）都不许改画布与版面 ——
      真机上「截屏与另存版面不一致」的根因就在这里，回归必须守住 */
   const beforePhys = md.canvas.physW + 'x' + md.canvas.physH;
+  /* 旋转（2026-09-28 新规格）：手机横屏放置 → 自动进横屏版；竖屏放置 → 回原版式。
+     旧契约「旋转不改画布」仍由桌面段（fine pointer，无方向感应）守住 */
   await mp.setViewportSize({ width: 659, height: 393 });
-  await mp.waitForTimeout(800);
+  await mp.waitForTimeout(900);
   const rd = await info(mp);
-  ok('旋转后画布尺寸不变',
-    rd.canvas.physW === md.canvas.physW && rd.canvas.physH === md.canvas.physH,
-    `${beforePhys} → ${rd.canvas.physW}x${rd.canvas.physH}`);
-  ok('旋转后版面完全不变（设计高 / 活动区 / 字号都一致）',
-    Math.round(rd.canvas.h) === Math.round(md.canvas.h) &&
-    Math.round(rd.text.band.h) === Math.round(md.text.band.h) &&
-    JSON.stringify(rd.text.fx) === JSON.stringify(md.text.fx) &&
-    rd.text.base === md.text.base,
-    `设计高 ${Math.round(md.canvas.h)} → ${Math.round(rd.canvas.h)}，base ${md.text.base} → ${rd.text.base}`);
+  ok('手机横屏放置 = 自动进横屏版（位图 1920×1080）',
+    rd.opts.wide === true && rd.canvas.physW === 1920 && rd.canvas.physH === 1080,
+    `${beforePhys} → ${rd.canvas.physW}x${rd.canvas.physH}｜mode=${rd.mode || '(opts)'}`);
+  await mp.setViewportSize({ width: 390, height: 844 });
+  await mp.waitForTimeout(900);
+  const rback = await info(mp);
+  ok('竖屏放置 = 回到进 wide 前的版式（标准版、位图 1080×1920）',
+    rback.opts.wide === false && rback.canvas.physW === 1080 && rback.canvas.physH === 1920,
+    `${rd.canvas.physW}x${rd.canvas.physH} → ${rback.canvas.physW}x${rback.canvas.physH}`);
 
   await mp.setViewportSize({ width: 500, height: 1000 });
   await mp.waitForTimeout(800);
   const vd = await info(mp);
-  ok('改视口尺寸后画布仍不变（固定画布与窗口无关）',
+  ok('改视口尺寸后画布仍不变（竖屏固定画布与窗口无关）',
     vd.canvas.physW === 1080 && vd.canvas.physH === 1920 && Math.round(vd.canvas.h) === 1920,
     `${vd.canvas.physW}x${vd.canvas.physH}`);
 
@@ -1775,11 +1777,17 @@ function ok(label, cond, extra) {
     `lastSpeakAt ${lBefore.lastSpeakAt || 0} → ${lSpeak.lastSpeakAt}`);
   await lp.evaluate(() => window.__ds.stopVoice && window.__ds.stopVoice('tap'));
 
-  /* 单击日期 = 今日⇄昨日 */
-  const dateBefore = (await info(lp)).meta.date;
+  /* 单击日期 = 今日⇄昨日（昨日无存档时应用回退今天 —— 动作语义用 lastToggleAt 钉，
+     viewDate 变化仅在昨日存档存在时断言，避免日依赖） */
   await tap(lp, 'badge-date');
-  const dateAfter = (await info(lp)).meta.date;
-  ok('长版单击日期胶囊 = 今日⇄昨日切换', dateAfter !== dateBefore, `${dateBefore} → ${dateAfter}`);
+  const lToggle = await info(lp);
+  const yISO = new Date(Date.now() + 8 * 3600e3 - 86400e3).toISOString().slice(0, 10);
+  const hasYesterday = fs.existsSync(path.join(__dirname, 'data/daily', yISO + '.json'));
+  ok('长版单击日期胶囊 = 触发今日⇄昨日（lastToggleAt 前进）',
+    lToggle.lastToggleAt > 0, `viewDate=${lToggle.viewDate || '(今日)'}`);
+  if (hasYesterday) {
+    ok('长版日期切换：昨日有存档时 viewDate 变化', lToggle.viewDate !== '', lToggle.viewDate);
+  }
   await tap(lp, 'badge-date');   /* 切回今天，免影响后续 */
 
   /* 双击删除 en：被删元素从标注表消失，其余内容上移 */

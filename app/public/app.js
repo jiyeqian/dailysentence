@@ -142,10 +142,16 @@ function computeCanvasSize() {
   const dpr = window.devicePixelRatio || 1;
 
   /* 默认关：固定 1080×1920；只有显式开开关且确实是移动设备才走自适应分支 */
-  ADAPTIVE = FIT_DEVICE && isMobileDevice(dpr);
+  ADAPTIVE = FIT_DEVICE && isMobileDevice(dpr) && state.mode !== 'wide';
   let w = CW;
   let h = CH_MIN;
-  if (ADAPTIVE) {
+  if (state.mode === 'wide') {
+    /* 横屏版：设计坐标仍 1080 宽（CH 由 computeLayoutWide 定为 608），
+       位图直接出 1920×1080（U = 16/9），字体与部件物理尺寸等比放大 ——
+       与 ?fit=device 的既有机制同路，版面代码零侵入 */
+    w = 1920;
+    h = 1080;
+  } else if (ADAPTIVE) {
     const short = Math.max(240, Math.min(vw, vh));
     const long = Math.max(short, Math.max(vw, vh));
     /* 位图宽取「设备物理宽」，但**不低于设计基准 1080**：2x 屏幕的手机物理宽只有 750
@@ -158,7 +164,11 @@ function computeCanvasSize() {
   const changed = w !== PHYS.w || h !== PHYS.h;
   PHYS = { w, h };
   U = w / CW;
-  CH_MIN = h / U;                     /* 设计坐标下的画布高（手机上比 1920 更高） */
+  /* 设计坐标下的画布高（手机上比 1920 更高）。**只有自适应分支改它**：
+     wide 的位图高（1080）≠ 设计高（608），若也走这句会把 CH_MIN 污染成
+     1080 ÷ 16/9 = 607.5，退出横屏回标准版时 h = CH_MIN 就拿到脏值；
+     固定画布分支 w = CW → U = 1，本来就是 no-op。 */
+  if (ADAPTIVE) CH_MIN = h / U;
   const safe = ADAPTIVE ? readSafeArea() : { top: 0, bottom: 0 };
   SAFE = { top: (safe.top * dpr) / U, bottom: (safe.bottom * dpr) / U };
   document.body.classList.toggle('adaptive', ADAPTIVE);
@@ -428,32 +438,47 @@ const MODE_SWITCH_PINCH = 0.62;
 const MODE_SWITCH_COOLDOWN = 900;
 
 /**
- * 切换版式并重绘。切换 = 用户主动手势（双指扩/捏），所以 fx 一并复位（版式换了，
- * 各区的字号交互值没有延续意义）；版式选择写入 localStorage（按设备记忆）。
+ * 切换版式并重绘。切换 = 用户主动手势（双指扩/捏/方向变化），所以 fx 一并复位
+ * （版式换了，各区的字号交互值没有延续意义）；standard/long 写入 localStorage 记忆，
+ * **wide 不持久化**（它是设备状态 —— 竖屏打开回记忆版式）。
  */
 function applyMode(id) {
-  const long = id === 'long';
-  if (state.opts.longPoster === long) return;
-  state.opts.longPoster = long;
+  if (id === state.mode) return;
+  const prev = state.mode;
+  state.mode = id;
+  state.opts.longPoster = id === 'long';
+  state.opts.wide = id === 'wide';
   state.fx = defaultFx();
-  try { localStorage.setItem(MODE_KEY, long ? 'long' : 'standard'); } catch (e) {}
-  toast(long ? '已切换到长版' : '已切换到标准版');
+  if (id === 'wide') state.modeBeforeWide = prev === 'wide' ? 'standard' : prev;
+  if (id !== 'wide') {
+    try { localStorage.setItem(MODE_KEY, id); } catch (e) {}
+  }
+  const NAMES = { standard: '标准版', long: '长版', wide: '横屏版' };
+  toast('已切换到' + NAMES[id]);
+  computeCanvasSize();   /* wide 位图 1920×1080（U=16/9），必须先于重绘重算 */
   scheduleRender();
+  if (id === 'wide' || prev === 'wide') syncStageCenter();   /* 画布比例变了，居中补正重算 */
 }
 
 /**
  * 启动时定版式：URL ?long=1（或旧参数 ?ex=1）**强制指定**（优先于记忆）；
- * 否则读回上次的版式；都没有 = 标准版。静默设置，不 toast（这不是用户手势）。
+ * 否则读回上次的版式；都没有 = 标准版。**wide 不从记忆来** —— 它只由
+ * 设备方向 / 双指手势进入。静默设置，不 toast（这不是用户手势）。
  */
 function initMode() {
   if (QS.get('long') === '1' || QS.get('ex') === '1') {
-    state.opts.longPoster = true;
-    return;
+    state.mode = 'long';
+  } else {
+    let saved = null;
+    try { saved = localStorage.getItem(MODE_KEY); } catch (e) {}
+    state.mode = saved === 'long' ? 'long' : 'standard';
   }
-  let saved = null;
-  try { saved = localStorage.getItem(MODE_KEY); } catch (e) {}
-  state.opts.longPoster = saved === 'long';
+  state.opts.longPoster = state.mode === 'long';
+  state.opts.wide = false;
 }
+
+const isLong = () => state.mode === 'long';
+const isWide = () => state.mode === 'wide';
 
 /** 摇一摇用的循环顺序 = THEMES 的书写顺序（上面注释里说了） */
 const THEME_ORDER = Object.keys(THEMES);
@@ -506,9 +531,12 @@ const state = {
   fits: { img: { scale: 1, ox: 0, oy: 0 }, card: { scale: 1, ox: 0, oy: 0 } },
   /* 非 null = 正在手动调整某一块：{ target: 'img'|'card', moved } */
   edit: null,
+  mode: 'standard',     // 版式三态：'standard' | 'long' | 'wide'（横屏）；applyMode/initMode 维护
+  modeBeforeWide: 'standard',  // 进横屏前的竖屏版式 —— 竖屏放置时回到它
   opts: {
     bgStyle: DEFAULT_BG,
-    longPoster: false,    // true = 长版海报（?long=1 强制 / 双指扩切换 / 记忆读回），见 applyMode/initMode
+    longPoster: false,  // 兼容字段 = (mode === 'long')，见 applyMode/initMode
+    wide: false,        // 兼容字段 = (mode === 'wide')
   },
 };
 
@@ -954,7 +982,8 @@ function textTopY() {
  * - 长版（`?long=1`）：沿用原来的流式版面（含单词卡与例句），按内容需要长高。
  */
 function computeLayout(ctx) {
-  return state.opts.longPoster ? computeLayoutLong(ctx) : computeLayoutStandard(ctx);
+  if (state.mode === 'wide') return computeLayoutWide(ctx);
+  return state.mode === 'long' ? computeLayoutLong(ctx) : computeLayoutStandard(ctx);
 }
 
 /** 标准版：固定 1080×1920，三段式；中部区域里的句子自动放大/缩小并纵向居中 */
@@ -1040,7 +1069,7 @@ function computeLayoutStandard(ctx) {
     panel: { hidden: true, x: card.x, y: card.y, w: card.w, h: 0, padX: 0, padY: 0, row1H: 0, wordW: 0, defItems: [], exItems: [], badge: null },
     card,
     ch: CH,
-    imgBlock: { y: 0, h: imgH },
+    imgBlock: { x: 0, y: 0, w: CW, h: imgH },   /* x/w 补全（2026-09-28）：命中表改为读 imgBlock 几何 */
   };
 }
 
@@ -1123,6 +1152,84 @@ function computeLayoutLong(ctx) {
        走同一条「宽度铺满 + 硬裁切 + 下缘渐隐」绘制与 fit/调整层数学 ——
        此前长版是原比例完整背景（文字起点随图高走），无裁切也不可换图 */
     imgBlock: { x: 0, y: 0, w: CW, h: IMG_BLOCK_H },
+  };
+}
+
+/* ============================ 横屏版（wide，2026-09-28） ============================
+   设计坐标仍 1080 宽 × 608 高（与成品 1920×1080 同为 16:9，位图经 U=16/9 放大），
+   版面代码零侵入。版式 = 左图右文：左 486 全高图片（右缘渐隐），右栏句子 + 信息卡。
+   单词卡 / 大标题不进横屏；交互（朗读/日期/删除/缩放/换图/保存/主题）与标准版同权，
+   **下拉更新让路**（横屏下拉与系统通知中心冲突 —— 回标准版再下拉）。 */
+
+const WIDE_H = 608;            // 横屏设计画布高（× U=16/9 → 位图 1080）
+const WIDE_IMG_W = 486;        // 左侧图片区宽（约 45%）
+const WIDE_TEXT_X = 546;       // 右栏文字左缘
+const WIDE_CARD_H = 176;       // 横屏信息卡高
+
+function computeLayoutWide(ctx) {
+  CH = WIDE_H;
+
+  const g = regionFx('en').scale;         /* 句子组联动缩放（与标准/长版同语义） */
+  const dg = regionFx('badge-date').scale;
+  const h = state.hidden;
+  const c = state.content;
+
+  /* 右栏几何 */
+  const colX = WIDE_TEXT_X;
+  const colW = CW - WIDE_TEXT_X - 48;     /* 486：右缘留 48 设计边距 */
+  const cardY = WIDE_H - 48 - WIDE_CARD_H;
+  const bandTop = 28;
+  const bandBottom = cardY - 20;
+
+  /* 日期胶囊：右栏顶部靠右 */
+  let dateW = 0;
+  const dateSize = 30 * dg;
+  const dateOn = !!c.date && !h.date;
+  if (dateOn) {
+    ctx.font = T(dateSize, 600, F_SANS);
+    dateW = measureSpaced(ctx, c.date, 2.5 * dg) + 56 * dg;
+  }
+
+  /* 句子：右栏宽度内断行，整块在「胶囊下 → 信息卡上」之间垂直居中 */
+  const enSize = 48 * g, enLH = enSize * 1.34;
+  const cnSize = 44 * g, cnLH = cnSize * 1.5, cnGap = 30 * g;
+  const srcSize = 30 * g;
+  ctx.font = T(enSize, 400, F_SANS);
+  const enLines = !h.en && c.en ? wrapText(ctx, c.en, colW) : [];
+  ctx.font = T(cnSize, 400, F_SANS);
+  const cnLines = !h.cn && c.cn ? wrapText(ctx, c.cn, colW) : [];
+  const sourceOn = !!c.source && !h.source;
+  const enOn = !h.en && enLines.length > 0;
+  const cnOn = !h.cn && cnLines.length > 0;
+  const enY = bandTop + 56 + 8;
+  const cnY = enY + (enOn ? enLines.length * enLH + cnGap : 0);
+  const srcY = cnY + (cnOn ? cnLines.length * cnLH + cnGap : 0);
+  const total = (sourceOn ? srcY + srcSize * 1.4 : (cnOn ? cnY + cnLines.length * cnLH : cnY)) - bandTop;
+  const centerShift = Math.max(0, (bandBottom - bandTop - total - 56) / 2);
+  const date = {
+    on: dateOn, x: colX + colW - dateW, y: bandTop, w: dateW, h: 56,
+    size: dateSize, k: dg,
+  };
+
+  return {
+    base: 1,
+    fx: { 'badge-date': dg, en: g, cn: g, source: g },
+    textX: colX,
+    band: null,
+    textTop: 0,
+    textBottom: srcY + (sourceOn ? srcSize * 1.4 : 0),
+    title: null,
+    rule: { on: false, gapTop: 0, h: 0, w: 0, gapBottom: 0, y: 0 },
+    date,
+    en: { on: enLines.length > 0 && !h.en, size: enSize, lh: enLH, lines: enLines, y: enY + centerShift, family: F_SANS },
+    cn: { on: cnLines.length > 0 && !h.cn, size: cnSize, lh: cnLH, lines: cnLines, y: cnY + centerShift, family: F_SANS },
+    source: { on: sourceOn, size: srcSize, y: srcY + centerShift, text: c.source },
+    panel: null,                          /* 单词卡不进横屏 */
+    card: { x: colX, y: cardY, w: colW, h: WIDE_CARD_H },
+    ch: CH,
+    /* 左侧图片区：覆盖裁切 + 右缘渐隐（drawBackground 的 wide 分支），
+       imgBlock 保留几何含义（fitBase/调整层/命中表复用），w = 486 区分于标准版全宽 */
+    imgBlock: { x: 0, y: 0, w: WIDE_IMG_W, h: WIDE_H, wide: true },
   };
 }
 
@@ -1491,7 +1598,7 @@ function buildAnnots(ctx, L) {
 
   /* ---- 单词卡片 ---- */
   const P = L.panel;
-  if (!P.hidden && P.h > 0) {
+  if (P && !P.hidden && P.h > 0) {
     push('panel', '单词卡整体', P.x, P.y, P.w, P.h, { color: C.cardBg });
 
     const barH = Math.min(P.h - P.padY * 2, P.row1H + 22);
@@ -1595,7 +1702,7 @@ function buildGaps(L) {
     if (L.title && L.date && L.date.on) {
       add('gap-title-en', '大标题 → 英文句', L.en.y - L.title.h);
     }
-    if (P && P.hidden) {
+    if (!P || P.hidden) {
       add('gap-text-card', '文字块 → 信息卡', L.card.y - textBottom);
     } else {
       add('gap-text-panel', '文字块 → 单词卡', P.y - textBottom);
@@ -1635,6 +1742,12 @@ function inspect() {
     items,
     gaps: buildGaps(L),
     opts: Object.assign({}, state.opts),
+    /* 版式与日期切换自证（2026-09-28 横屏版回归用，只增字段不改旧字段）：
+       mode = standard / long / wide；lastToggleAt = 最近一次今日⇄昨日的时间戳；
+       viewDate = 正在看哪一天（'' = 今天） */
+    mode: state.mode,
+    lastToggleAt: state.lastToggleAt || 0,
+    viewDate: state.viewDate,
     /* 当前主题（2026-09-24 摇一摇换配色）：id = THEMES 的 key，name = toast 里的中文名。
        只增不改：标注通道与旧回归不认识它也无碍，新回归靠它自证「进了哪个主题」 */
     theme: { id: state.theme, name: (THEMES[state.theme] || THEMES.night).name },
@@ -1845,6 +1958,30 @@ function drawBackground(ctx, L) {
     return;
   }
 
+  /* 横屏版：左栏图片覆盖裁切（cover-fit 居中）+ 右缘渐隐 —— 与标准版裁切同思路，
+     但窗口是左栏竖条（L.imgBlock.wide = true），fit 的「面积相当」不适用于 cover */
+  if (L.imgBlock && L.imgBlock.wide) {
+    drawBase(ctx);
+    const bw = L.imgBlock.w, bh = L.imgBlock.h;
+    const k = Math.max(bw / im.width, bh / im.height);
+    const dw = im.width * k, dh = im.height * k;
+    const dx = (bw - dw) / 2, dy = (bh - dh) / 2;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, bw, bh);
+    ctx.clip();
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(im, dx, dy, dw, dh);
+    fadeImageRight(ctx, bw, bh);
+    ctx.restore();
+    state.bgDraw = {
+      w: Math.round(dw), h: Math.round(dh), blockH: bh, imgW: bw,
+      clipped: dw > bw || dh > bh, blankBottom: 0,
+      scale: Math.round(k * 1000) / 1000, x: Math.round(dx), y: Math.round(dy),
+    };
+    return;
+  }
+
   /* 标准版顶部图片区：宽度统一铺满 1080、高度按原始比例，
      超出这个 648px 区域的部分**硬裁掉**（不裁的话竖图会一路糊到中部区域）。
      宽图（如 16:9 → 608 高）下方会露出一段底色。 */
@@ -1891,11 +2028,24 @@ function drawBackground(ctx, L) {
 /** 海报底色：随主题走（2026-09-24 前是硬编码的墨蓝夜空，night 的数值就是原值） */
 function drawBase(ctx) {
   const p = PAL();
-  const g = ctx.createLinearGradient(0, 0, CW * 0.35, CH);
+  /* 横屏：渐变横排（左图右文的画面里，竖向渐变会在图片与底色交界处穿帮） */
+  const g = isWide()
+    ? ctx.createLinearGradient(0, 0, CW, 0)
+    : ctx.createLinearGradient(0, 0, CW * 0.35, CH);
   g.addColorStop(0, p.bgTop);
   g.addColorStop(1, p.bgBottom);
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, CW, CH);
+}
+
+/** 图片右缘渐隐（横屏左图右文用）：与 fadeImageBottom 同手法，方向朝右 */
+function fadeImageRight(ctx, iw, ih) {
+  const w = Math.min(200, iw * 0.3);
+  const g = ctx.createLinearGradient(iw - w, 0, iw, 0);
+  g.addColorStop(0, `rgba(${PAL().fade},0)`);
+  g.addColorStop(1, `rgba(${PAL().fade},1)`);
+  ctx.fillStyle = g;
+  ctx.fillRect(iw - w, 0, w, ih);
 }
 
 /**
@@ -2240,7 +2390,7 @@ function drawEditPreview(L) {
 
 function drawWordCard(ctx, L) {
   const P = L.panel;
-  if (P.hidden || P.h <= 0) return;
+  if (!P || P.hidden || P.h <= 0) return;   /* 横屏版无单词卡（L.panel = null） */
   const C = PAL();           /* 卡面各色随主题（卡底四套都近白，词性色标共用不变） */
   const R = 30;
 
@@ -2410,7 +2560,7 @@ function initialBgStyle() {
   const bg = QS.get('bg');
   if (bg === 'cover') return 'cover';
   if (bg === 'natural' || bg === 'band' || bg === 'card') return 'natural';  /* 旧参数归入原比例 */
-  return state.opts.longPoster ? 'natural' : DEFAULT_BG;
+  return state.mode !== 'standard' ? 'natural' : DEFAULT_BG;
 }
 
 /** 昨天（本地时区）—— 用于「日期胶囊单击切到昨日存档」 */
@@ -2570,6 +2720,21 @@ function bindShake() {
       onShake();
     }
   });
+}
+
+/** 方向感应（2026-09-28）：横屏放置 → 自动进横屏版；竖屏放置 → 回进 wide 前的版式。
+   只在空闲态切（播放 / 调整中不打断）；wide 不写版式记忆（设备状态不持久化） */
+function bindOrientation() {
+  /* 仅移动设备启用：桌面拖拽窗口改横竖比例不该切版式（回归的旋转视口也不受影响） */
+  if (!isMobileDevice(window.devicePixelRatio || 1)) return;
+  const mq = window.matchMedia('(orientation: landscape)');
+  const onChange = () => {
+    if (state.voice || state.edit) return;       /* 独占态不打断，落下一次方向变化再说 */
+    if (mq.matches && state.mode !== 'wide') applyMode('wide');
+    else if (!mq.matches && state.mode === 'wide') applyMode(state.modeBeforeWide || 'standard');
+  };
+  if (mq.addEventListener) mq.addEventListener('change', onChange);
+  else mq.addListener(onChange);                 /* 旧 Safari */
 }
 
 /** 两个相册选图入口（界面上没有按钮了，都靠单击海报上的图片 / 卡片触发） */
@@ -3043,7 +3208,7 @@ function buildHitRegions(L) {
 
   /* 信息卡与顶部图片区：单击 = 从相册选图（放最后，别挡住上面的具体元素） */
   push('card', L.card.x, L.card.y, L.card.w, L.card.h);
-  if (L.imgBlock) push('img', 0, L.imgBlock.y, CW, L.imgBlock.h);
+  if (L.imgBlock) push('img', L.imgBlock.x, L.imgBlock.y, L.imgBlock.w, L.imgBlock.h);
   return R;
 }
 
@@ -3238,7 +3403,8 @@ function bindGestures() {
         zoomDrag = {
           id: hit.id, startY: e.clientY, startZoom: regionFx(hit.id).scale, active: false,
         };
-      } else if (!hit || hit.id === 'img' || hit.id === 'card') {
+      } else if ((!hit || hit.id === 'img' || hit.id === 'card') && !isWide()) {
+        /* 横屏版下拉让路（与系统通知中心冲突）—— 回标准版再下拉（2026-09-28 用户拍板） */
         pullDrag = { startY: e.clientY, moved: false, armed: false };
       }
     }
@@ -3295,14 +3461,22 @@ function bindGestures() {
           Date.now() - modeSwitchAt >= MODE_SWITCH_COOLDOWN) {
         const [a, b] = [...modePtrs.values()];
         const ratio = Math.hypot(a.x - b.x, a.y - b.y) / modePinch0;
-        if (ratio >= MODE_SWITCH_EXPAND && !state.opts.longPoster) {
-          modeSwitchFired = true;
-          modeSwitchAt = Date.now();
-          applyMode('long');
-        } else if (ratio <= MODE_SWITCH_PINCH && state.opts.longPoster) {
-          modeSwitchFired = true;
-          modeSwitchAt = Date.now();
-          applyMode('standard');
+        /* 双指切版映射（2026-09-28 三态）：
+           standard: 扩 → long / 捏 → wide
+           long:     扩 → （无，长版是最全的竖版）/ 捏 → standard
+           wide:     扩 → standard / 捏 → （无，横屏是最宽的版式） */
+        if (ratio >= MODE_SWITCH_EXPAND) {
+          if (state.mode === 'standard') {
+            modeSwitchFired = true; modeSwitchAt = Date.now(); applyMode('long');
+          } else if (state.mode === 'wide') {
+            modeSwitchFired = true; modeSwitchAt = Date.now(); applyMode('standard');
+          }
+        } else if (ratio <= MODE_SWITCH_PINCH) {
+          if (state.mode === 'long') {
+            modeSwitchFired = true; modeSwitchAt = Date.now(); applyMode('standard');
+          } else if (state.mode === 'standard') {
+            modeSwitchFired = true; modeSwitchAt = Date.now(); applyMode('wide');
+          }
         }
       }
     }
@@ -3689,6 +3863,7 @@ function setOverlay(show, text) {
   watchViewport();
   bindInputs();
   bindShake();        /* 摇一摇换配色：监听与 iOS 授权（pointerup 收尾手势）都在这里挂 */
+  bindOrientation();  /* 横屏放置 → 横屏版；竖屏放置 → 回原版式（空闲态才切） */
 
   /* 字体度量必须先就绪，否则折行与居中会算错 —— 用回退字体的度量算出来的版面，
      和字体到位后重排的结果不一样（刷新前后观感不一致）。
