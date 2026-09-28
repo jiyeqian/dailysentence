@@ -1731,6 +1731,7 @@ function ok(label, cond, extra) {
     const reg = (id) => (window.__ds.state.regions || []).find((r) => r.id === id);
     return {
       enSize: L.en.size, cnSize: L.cn.size, srcSize: L.source.size, dateSize: L.date.size,
+      dateH: L.date.h, dateK: L.date.k,
       base: L.base, textTop: L.textTop, textBottom: L.textBottom,
       cardTop: reg('card') && reg('card').y,
       enSizeCap: window.__ds.zoomMax('en') && 36,
@@ -1740,6 +1741,14 @@ function ok(label, cond, extra) {
     wGeo.enSize <= 36.5 && wGeo.enSize > 10 && wGeo.base > 0 && wGeo.base <= 1,
     `en=${Math.round(wGeo.enSize)} cn=${Math.round(wGeo.cnSize)} src=${Math.round(wGeo.srcSize)} ` +
     `date=${Math.round(wGeo.dateSize)} base=${wGeo.base}`);
+  /* 横屏日期胶囊默认 = 竖版物理大小（2026-09-28 用户：「横版日期字体太大，默认就用竖版大小」）：
+     横屏位图放大 U=16/9，故设计值 = 竖版值 ÷ 16/9 —— 字号 28×9/16 ≈ 15.75、胶囊高 52×9/16 ≈ 29.25 */
+  ok('横屏日期胶囊默认 = 竖版物理大小（字号 28÷16/9、胶囊高 52÷16/9）',
+    Math.abs(wGeo.dateSize - 28 * 9 / 16) < 1 &&
+    Math.abs(wGeo.dateH - 52 * 9 / 16) < 1.5 &&
+    Math.abs(wGeo.dateK - 9 / 16) < 0.001,
+    `字号 ${wGeo.dateSize.toFixed(2)}（期望 ${(28 * 9 / 16).toFixed(2)}）｜` +
+    `胶囊高 ${wGeo.dateH.toFixed(2)}（期望 ${(52 * 9 / 16).toFixed(2)}）｜k=${wGeo.dateK.toFixed(4)}`);
   ok('横屏文字块装得下（文字底 ≤ 信息卡顶，不溢出压卡）',
     wGeo.textBottom <= wGeo.cardTop + 1,
     `文字底 ${Math.round(wGeo.textBottom)} / 卡顶 ${Math.round(wGeo.cardTop)}（活动区顶 ${Math.round(wGeo.textTop)}）`);

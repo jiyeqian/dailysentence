@@ -1171,8 +1171,11 @@ const WIDE_TEXT_X = 546;       // 右栏文字左缘
 const WIDE_SZ_EN = 36;         // 3 区（英文句）横屏基准
 const WIDE_SZ_CN = 28;         // 4 区（中文句）横屏基准
 const WIDE_SZ_SRC = 20;        // 5 区（出处）横屏基准
-const WIDE_SZ_DATE = 22;       // 2 区（日期胶囊字号）横屏基准
-const WIDE_DATE_H = 44;        // 日期胶囊高（随 2 区缩放整体长大）
+/* 横屏位图相对设计坐标放大 U = 16/9 倍（1080→1920），所以横屏里任何「想要与竖版同物理
+   大小」的部件，设计值都要 ÷ 16/9。日期胶囊就按这个默认（2026-09-28 用户：「横版日期
+   字体太大，默认就用竖版字体大小」）：字号 / 胶囊高 / 内边距 / 字距整体缩，观感与竖版
+   一致；用户缩放（dg）仍叠在其上 */
+const WIDE_SHRINK = 9 / 16;
 const WIDE_GAP = 22;           // 英/中/出处块间距（随保底倍率一起缩）
 
 /**
@@ -1220,18 +1223,21 @@ function computeLayoutWide(ctx) {
   const cardH = Math.round(colW * CARD_H / (CW - 2 * CARD_PAD));
   const cardY = WIDE_H - 48 - cardH;
   const dateTop = 24;
-  const dateH = WIDE_DATE_H * dg;
+  /* 胶囊内部度量整体按 WIDE_SHRINK 缩到「竖版物理大小」：kDate = dg × 9/16 同时驱动
+     字号 / 胶囊高 / 内边距 / 字距（drawTopText 读 date.k 去画内边距与字距） */
+  const kDate = dg * WIDE_SHRINK;
+  const dateH = DATE_H * kDate;
   const textTop = dateTop + dateH + 14;
   const bandBottom = cardY - 24;
   const avail = Math.max(60, bandBottom - textTop);
 
   /* 日期胶囊：右栏顶部靠右 */
   let dateW = 0;
-  const dateSize = WIDE_SZ_DATE * dg;
+  const dateSize = SZ_DATE * kDate;      /* 竖版 SZ_DATE ÷ 16/9，物理观感与竖版一致 */
   const dateOn = !!c.date && !h.date;
   if (dateOn) {
     ctx.font = T(dateSize, 600, F_SANS);
-    dateW = measureSpaced(ctx, c.date, 2.5 * dg) + 56 * dg;
+    dateW = measureSpaced(ctx, c.date, 2.5 * kDate) + 56 * kDate;
   }
 
   /* 保底（与标准版 textFit 同语义）：按 fx 全 1 量测，装不下才整块等比缩小，
@@ -1251,7 +1257,7 @@ function computeLayoutWide(ctx) {
   const srcY = cnY + (M.cnLines.length ? M.cnLines.length * M.cnLH + M.gap : 0);
   const date = {
     on: dateOn, x: colX + colW - dateW, y: dateTop, w: dateW, h: dateH,
-    size: dateSize, k: dg,
+    size: dateSize, k: kDate,
   };
 
   return {
