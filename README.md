@@ -44,17 +44,6 @@
 | **长版** | 双指张开（或 `?long=1`） | 标准版的内容 + 关键词大标题 + 单词卡（音标 / 词性 / 释义），按内容长高 |
 | **横屏版** | 把手机横过来放 | 配图铺满整幅海报、文字直接压在照片上（按照片明暗自动选深浅字色与阴影），右栏文字 + 右下信息卡 |
 
-## 效果
-
-| 输入模板 | 参考样式 | 生成结果 |
-| :---: | :---: | :---: |
-| <img src="docs/images/input.jpg" width="200"> | <img src="docs/images/output.png" width="200"> | <img src="docs/images/preview.png" width="200"> |
-
-- `docs/images/input.jpg` —— 乐词打卡图模板（提供头像 / 昵称 / 坚持天数 / 学习统计卡片）
-- `docs/images/output.png` —— 目标版式：文字位置参照
-- `docs/images/dailysentence.png` —— 数据来源页面截图
-- `docs/images/preview.png` —— 实际生成结果
-
 ## 本地打开
 
 ```bash
