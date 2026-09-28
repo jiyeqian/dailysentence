@@ -1715,6 +1715,134 @@ function ok(label, cond, extra) {
     rback.opts.wide === false && rback.canvas.physW === 1080 && rback.canvas.physH === 1920,
     `${rd.canvas.physW}x${rd.canvas.physH} → ${rback.canvas.physW}x${rback.canvas.physH}`);
 
+  /* ---------------- 横屏版（wide）：方向进出 + 字号保底 + 缩放 + 波形（2026-09-28） ---------------- */
+  console.log('横屏版（方向进出 + 字号保底 + 波形贴合右栏）');
+  await mp.goto(BASE + '/?debug=1&long=1', { waitUntil: 'load' });
+  await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await mp.waitForTimeout(600);
+  await mp.setViewportSize({ width: 659, height: 393 });
+  await mp.waitForTimeout(900);
+  const wd0 = await info(mp);
+  ok('长版横屏放置也进横屏版（modeBeforeWide 记住长版）',
+    wd0.mode === 'wide' && wd0.canvas.physW === 1920 && wd0.canvas.physH === 1080,
+    `mode=${wd0.mode} ${wd0.canvas.physW}x${wd0.canvas.physH}`);
+  const wGeo = await mp.evaluate(() => {
+    const L = window.__ds.state.layout;
+    const reg = (id) => (window.__ds.state.regions || []).find((r) => r.id === id);
+    return {
+      enSize: L.en.size, cnSize: L.cn.size, srcSize: L.source.size, dateSize: L.date.size,
+      base: L.base, textTop: L.textTop, textBottom: L.textBottom,
+      cardTop: reg('card') && reg('card').y,
+      enSizeCap: window.__ds.zoomMax('en') && 36,
+    };
+  });
+  ok('横屏字号 = 横屏基准 × 保底（en ≤ 36，不再沿用标准版 48；base 透出）',
+    wGeo.enSize <= 36.5 && wGeo.enSize > 10 && wGeo.base > 0 && wGeo.base <= 1,
+    `en=${Math.round(wGeo.enSize)} cn=${Math.round(wGeo.cnSize)} src=${Math.round(wGeo.srcSize)} ` +
+    `date=${Math.round(wGeo.dateSize)} base=${wGeo.base}`);
+  ok('横屏文字块装得下（文字底 ≤ 信息卡顶，不溢出压卡）',
+    wGeo.textBottom <= wGeo.cardTop + 1,
+    `文字底 ${Math.round(wGeo.textBottom)} / 卡顶 ${Math.round(wGeo.cardTop)}（活动区顶 ${Math.round(wGeo.textTop)}）`);
+  /* 真实拖动缩放（命中 → zoomDrag → applyZoom 全链路，与标准版同一条钳制路径） */
+  await dragY(mp, 'en', -120);
+  const wZoom = await info(mp);
+  ok('横屏上滑英文句 = 字号缩放生效', wZoom.text.fx.en > 1.05, `fx.en=${wZoom.text.fx.en}`);
+  await dragY(mp, 'en', 240);
+  const wZoomBack = await info(mp);
+  ok('横屏下滑 = 缩回', wZoomBack.text.fx.en < wZoom.text.fx.en, `fx.en=${wZoomBack.text.fx.en}`);
+  /* 波形层贴合右栏 3 区：不越左图、竖向盖 3 区（voiceBox 列几何从版面读） */
+  await mp.evaluate(() => window.__ds.playVoice());
+  await mp.waitForTimeout(250);
+  const wWave = await mp.evaluate(() => {
+    const el = document.getElementById('wave');
+    const r = el.getBoundingClientRect();
+    const L = window.__ds.state.layout;
+    const en = (window.__ds.state.regions || []).find((x) => x.id === 'en');
+    const pr = document.getElementById('poster').getBoundingClientRect();
+    const s = pr.width / 1080;
+    return {
+      show: !el.hidden && el.classList.contains('show'),
+      voice: !!window.__ds.inspect().voice,
+      waveLeft: r.left, waveRight: r.right,
+      waveTop: r.top, waveBottom: r.bottom,
+      colLeftPx: pr.left + L.textX * s, colRightPx: pr.left + L.textRight * s,
+      enTopPx: window.__ds.toClient(en.x, en.y).y,
+      enBottomPx: window.__ds.toClient(en.x, en.y + en.h).y,
+    };
+  });
+  ok('横屏朗读升起波形层（playVoice 显示态）', wWave.show && wWave.voice);
+  ok('横屏波形在右栏内（不越左图：wave ⊆ [textX, textRight]）',
+    wWave.waveLeft >= wWave.colLeftPx - 2 && wWave.waveRight <= wWave.colRightPx + 2,
+    `wave ${Math.round(wWave.waveLeft)}..${Math.round(wWave.waveRight)} / ` +
+    `列 ${Math.round(wWave.colLeftPx)}..${Math.round(wWave.colRightPx)}`);
+  ok('横屏波形竖向盖 3 区（顶贴 en 上缘、底不过 en 下缘太多）',
+    wWave.waveTop >= wWave.enTopPx - 16 && wWave.waveBottom <= wWave.enBottomPx + 20,
+    `wave ${Math.round(wWave.waveTop)}..${Math.round(wWave.waveBottom)} / ` +
+    `en ${Math.round(wWave.enTopPx)}..${Math.round(wWave.enBottomPx)}`);
+  await mp.evaluate(() => window.__ds.stopVoice('tap'));
+  await mp.waitForTimeout(300);
+  /* 横屏其余交互同权抽查：日期切换 / 双击删除 / 冷启动 */
+  await tap(mp, 'badge-date');
+  const wDate = await info(mp);
+  ok('横屏单击日期胶囊 = 触发今日⇄昨日', wDate.lastToggleAt > 0,
+    `viewDate=${wDate.viewDate || '(今日)'}`);
+  await tap(mp, 'badge-date');                       /* 切回，免影响后续 */
+  await tap(mp, 'en', 0, true);
+  const wHide = await info(mp);
+  ok('横屏双击英文句 = 删除（不可逆，刷新恢复）', wHide.meta.hidden.en === true,
+    JSON.stringify(wHide.meta.hidden));
+  await mp.reload({ waitUntil: 'load' });
+  await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await mp.waitForTimeout(800);
+  const wReload = await info(mp);
+  ok('横屏冷启动（reload 时已横着）= 直接进横屏版', wReload.mode === 'wide',
+    `mode=${wReload.mode}`);
+  ok('横屏刷新恢复（hidden 清空）', wReload.meta.hidden.en === false,
+    JSON.stringify(wReload.meta.hidden));
+  /* 竖屏放回 → 回长版；竖屏双指捏 → 不进 wide（两态映射） */
+  await mp.setViewportSize({ width: 390, height: 844 });
+  await mp.waitForTimeout(900);
+  const wBack = await info(mp);
+  ok('竖屏放回 = 回长版（modeBeforeWide 正确往返）',
+    wBack.mode === 'long' && wBack.canvas.physW === 1080,
+    `mode=${wBack.mode}`);
+  await mp.evaluate(async () => {
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    const stage = document.getElementById('stage');
+    const fire = (type, id, x, y) => stage.dispatchEvent(new PointerEvent(type, {
+      pointerId: id, clientX: x, clientY: y, bubbles: true, pointerType: 'touch', isPrimary: id === 9,
+    }));
+    const cx = 195, cy = 400;
+    fire('pointerdown', 9, cx - 60, cy);
+    fire('pointerdown', 10, cx + 60, cy);
+    for (let i = 1; i <= 10; i++) {
+      const half = 60 * (1 - i * 0.07);
+      fire('pointermove', 9, cx - half, cy);
+      fire('pointermove', 10, cx + half, cy);
+      await sleep(40);
+    }
+    fire('pointerup', 9, cx - 18, cy);
+    fire('pointerup', 10, cx + 18, cy);
+  });
+  await mp.waitForTimeout(700);
+  const wPinch = await info(mp);
+  ok('竖屏双指捏不进横屏版（两态：wide 只由方向进出）', wPinch.mode !== 'wide',
+    `mode=${wPinch.mode}`);
+  /* 横屏截图 + 再往返一轮，确认方向感应可重复进出 */
+  await mp.setViewportSize({ width: 659, height: 393 });
+  await mp.waitForTimeout(900);
+  await shot(mp, 'wide-landscape');
+  ok('再横屏 = 再次进 wide', (await info(mp)).mode === 'wide');
+  await mp.setViewportSize({ width: 390, height: 844 });
+  await mp.waitForTimeout(900);
+  ok('再竖回 = 回进横屏前的竖版（上一轮捏合已把竖版切成标准版，modeBeforeWide 跟着走）',
+    (await info(mp)).mode === 'standard');
+  /* 恢复标准版，别让后面的「改视口尺寸」断言拿到长版的高画布 */
+  await mp.evaluate(() => localStorage.setItem('ds:mode', 'standard'));
+  await mp.goto(BASE + '/?debug=1', { waitUntil: 'load' });
+  await mp.waitForFunction(() => window.__ds && window.__ds.state.layout);
+  await mp.waitForTimeout(600);
+
   await mp.setViewportSize({ width: 500, height: 1000 });
   await mp.waitForTimeout(800);
   const vd = await info(mp);

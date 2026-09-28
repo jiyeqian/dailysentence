@@ -1166,6 +1166,45 @@ const WIDE_IMG_W = 486;        // 左侧图片区宽（约 45%）
 const WIDE_TEXT_X = 546;       // 右栏文字左缘
 const WIDE_CARD_H = 176;       // 横屏信息卡高
 
+/* 横屏字号基准（2026-09-28 用户反馈「字体太大、乱套」后重定）：
+   设计画布只有 608 高（标准版 1920 的 1/3.16），直接沿用标准版字号会把右栏撑爆、
+   长句一路压到信息卡底下。口径与标准版 SZ_* 相同：进入就是这个字号，只有
+   「整块装不下活动区」才保底缩小（下面 measureWideText + 逐档回退），用户缩放叠其上 */
+const WIDE_SZ_EN = 36;         // 3 区（英文句）横屏基准
+const WIDE_SZ_CN = 28;         // 4 区（中文句）横屏基准
+const WIDE_SZ_SRC = 20;        // 5 区（出处）横屏基准
+const WIDE_SZ_DATE = 22;       // 2 区（日期胶囊字号）横屏基准
+const WIDE_DATE_H = 44;        // 日期胶囊高（随 2 区缩放整体长大）
+const WIDE_GAP = 22;           // 英/中/出处块间距（随保底倍率一起缩）
+
+/**
+ * 横屏文字块量测：给定倍率 k 断行并返回块几何 —— 版面求解与保底量测共用这一份，
+ * 保证「量出来的」与「画出来的」永远是同一套断行。k=1（fx 全 1）用于保底量测；
+ * k = base × 用户 fx 用于最终版面（与标准版 textFit 同语义：用户放大仍可溢出）。
+ */
+function measureWideText(ctx, k) {
+  const h = state.hidden;
+  const c = state.content;
+  const colW = CW - WIDE_TEXT_X - 48;
+  const enSize = WIDE_SZ_EN * k, enLH = enSize * 1.32;
+  const cnSize = WIDE_SZ_CN * k, cnLH = cnSize * 1.5;
+  const srcSize = WIDE_SZ_SRC * k;
+  const gap = WIDE_GAP * k;
+  ctx.font = T(enSize, 400, F_SANS);
+  const enLines = !h.en && c.en ? wrapText(ctx, c.en, colW) : [];
+  ctx.font = T(cnSize, 400, F_SANS);
+  const cnLines = !h.cn && c.cn ? wrapText(ctx, c.cn, colW) : [];
+  const sourceOn = !!c.source && !h.source;
+  const enH = enLines.length * enLH;
+  const cnH = cnLines.length * cnLH;
+  const srcH = sourceOn ? srcSize * 1.4 : 0;
+  const parts = [enLines.length ? enH : 0, cnLines.length ? cnH : 0, srcH].filter((v) => v > 0);
+  const total = parts.length
+    ? parts.reduce((a, b) => a + b, 0) + gap * (parts.length - 1)
+    : 0;
+  return { enLines, cnLines, enSize, enLH, cnSize, cnLH, srcSize, srcH, gap, colW, total, sourceOn };
+}
+
 function computeLayoutWide(ctx) {
   CH = WIDE_H;
 
@@ -1174,56 +1213,60 @@ function computeLayoutWide(ctx) {
   const h = state.hidden;
   const c = state.content;
 
-  /* 右栏几何 */
+  /* 右栏几何：文字活动区 =「胶囊底 → 信息卡上」；胶囊随 2 区缩放会把活动区推矮
+     （与标准版「胶囊永不压句子」同一取舍，极端时句子被保底略缩） */
   const colX = WIDE_TEXT_X;
   const colW = CW - WIDE_TEXT_X - 48;     /* 486：右缘留 48 设计边距 */
   const cardY = WIDE_H - 48 - WIDE_CARD_H;
-  const bandTop = 28;
-  const bandBottom = cardY - 20;
+  const dateTop = 24;
+  const dateH = WIDE_DATE_H * dg;
+  const textTop = dateTop + dateH + 14;
+  const bandBottom = cardY - 24;
+  const avail = Math.max(60, bandBottom - textTop);
 
   /* 日期胶囊：右栏顶部靠右 */
   let dateW = 0;
-  const dateSize = 30 * dg;
+  const dateSize = WIDE_SZ_DATE * dg;
   const dateOn = !!c.date && !h.date;
   if (dateOn) {
     ctx.font = T(dateSize, 600, F_SANS);
     dateW = measureSpaced(ctx, c.date, 2.5 * dg) + 56 * dg;
   }
 
-  /* 句子：右栏宽度内断行，整块在「胶囊下 → 信息卡上」之间垂直居中 */
-  const enSize = 48 * g, enLH = enSize * 1.34;
-  const cnSize = 44 * g, cnLH = cnSize * 1.5, cnGap = 30 * g;
-  const srcSize = 30 * g;
-  ctx.font = T(enSize, 400, F_SANS);
-  const enLines = !h.en && c.en ? wrapText(ctx, c.en, colW) : [];
-  ctx.font = T(cnSize, 400, F_SANS);
-  const cnLines = !h.cn && c.cn ? wrapText(ctx, c.cn, colW) : [];
-  const sourceOn = !!c.source && !h.source;
-  const enOn = !h.en && enLines.length > 0;
-  const cnOn = !h.cn && cnLines.length > 0;
-  const enY = bandTop + 56 + 8;
-  const cnY = enY + (enOn ? enLines.length * enLH + cnGap : 0);
-  const srcY = cnY + (cnOn ? cnLines.length * cnLH + cnGap : 0);
-  const total = (sourceOn ? srcY + srcSize * 1.4 : (cnOn ? cnY + cnLines.length * cnLH : cnY)) - bandTop;
-  const centerShift = Math.max(0, (bandBottom - bandTop - total - 56) / 2);
+  /* 保底（与标准版 textFit 同语义）：按 fx 全 1 量测，装不下才整块等比缩小，
+     逐档回退复核防取整跳行（教训同 textFit 的注释） */
+  const unit = measureWideText(ctx, 1);
+  let base = Math.min(1, Math.round((avail / Math.max(1, unit.total)) * 100) / 100);
+  let guard = 0;
+  while (base > 0.1 && guard++ < 40 && measureWideText(ctx, base).total > avail) {
+    base = Math.round((base - 0.01) * 100) / 100;
+  }
+
+  /* 最终字号 = 设计基准 × 保底 base × 用户 fx；断行按最终字号重算（量画同源） */
+  const M = measureWideText(ctx, base * g);
+  const centerShift = Math.max(0, (avail - M.total) / 2);
+  const enY = centerShift;
+  const cnY = enY + (M.enLines.length ? M.enLines.length * M.enLH + M.gap : 0);
+  const srcY = cnY + (M.cnLines.length ? M.cnLines.length * M.cnLH + M.gap : 0);
   const date = {
-    on: dateOn, x: colX + colW - dateW, y: bandTop, w: dateW, h: 56,
+    on: dateOn, x: colX + colW - dateW, y: dateTop, w: dateW, h: dateH,
     size: dateSize, k: dg,
   };
 
   return {
-    base: 1,
+    base,
     fx: { 'badge-date': dg, en: g, cn: g, source: g },
     textX: colX,
+    textRight: CW - 48,    /* 列右缘：波形层读它算列宽/列中心（标准/长版不设此字段，走隐含值） */
     band: null,
-    textTop: 0,
-    textBottom: srcY + (sourceOn ? srcSize * 1.4 : 0),
+    textTop,
+    textBottom: textTop + srcY + (M.sourceOn ? M.srcH : 0),
     title: null,
     rule: { on: false, gapTop: 0, h: 0, w: 0, gapBottom: 0, y: 0 },
     date,
-    en: { on: enLines.length > 0 && !h.en, size: enSize, lh: enLH, lines: enLines, y: enY + centerShift, family: F_SANS },
-    cn: { on: cnLines.length > 0 && !h.cn, size: cnSize, lh: cnLH, lines: cnLines, y: cnY + centerShift, family: F_SANS },
-    source: { on: sourceOn, size: srcSize, y: srcY + centerShift, text: c.source },
+    en: { on: M.enLines.length > 0 && !h.en, size: M.enSize, lh: M.enLH, lines: M.enLines, y: enY, family: F_SANS },
+    cn: { on: M.cnLines.length > 0 && !h.cn, size: M.cnSize, lh: M.cnLH, lines: M.cnLines, y: cnY, family: F_SANS },
+    source: { on: M.sourceOn, size: M.srcSize, y: srcY, text: c.source },
     panel: null,                          /* 单词卡不进横屏 */
     card: { x: colX, y: cardY, w: colW, h: WIDE_CARD_H },
     ch: CH,
@@ -2735,6 +2778,9 @@ function bindOrientation() {
   };
   if (mq.addEventListener) mq.addEventListener('change', onChange);
   else mq.addListener(onChange);                 /* 旧 Safari */
+  /* 冷启动就横着：change 只在方向*变化*时才发，注册时不查一遍的话，
+     横屏放置下打开/刷新会先落在竖版上（2026-09-28 严格测试发现） */
+  if (mq.matches) onChange();
 }
 
 /** 两个相册选图入口（界面上没有按钮了，都靠单击海报上的图片 / 卡片触发） */
@@ -2798,8 +2844,12 @@ const VOICE_TICK_MS = 500;   // 看门狗检查间隔
 const VOICE_KICK_MS = 1500;  // play() 迟迟没换来 playing 时「踢一下」的等待（见 speak）
 const VOICE_RETRY_MS = 400;  // play() 被拒 / 被打断后自动重试一次前的等待
 
-/** 波形横向基准：正文列宽（左右各 TEXT_X 的正文区）。列宽天天一样，波形宽度也就天天一样 */
+/** 波形横向基准：正文列宽（设计坐标）。标准/长版 = 左右各 TEXT_X 的正文区；
+    横屏版是「左图右文」的右栏（textX=546、右缘留 48），列几何从版面读 ——
+    写死标准版的 TEXT_X 会让横屏波形错位到左图上（2026-09-28 真机踩坑） */
 function waveColumnW() {
+  const L = state.layout;
+  if (L && L.textRight != null) return L.textRight - L.textX;
   return CW - 2 * TEXT_X;
 }
 
@@ -2828,9 +2878,14 @@ function voiceBox() {
   const colW = waveColumnW();
   const w = colW * WAVE_W_RATIO;
   const limit = colW * WAVE_ALIGN_LIMIT;                 /* 允许偏离列中心的最大量 */
-  const colCenter = TEXT_X + colW / 2;
+  /* 列左缘从版面读（标准/长版 = TEXT_X，横屏 = 右栏左缘），列中心跟着走 */
+  const colLeft = state.layout ? state.layout.textX : TEXT_X;
+  const colCenter = colLeft + colW / 2;
   const inkCenter = en.x + en.w / 2;                     /* 3 区文字框（就是句子最长那行）的中心 */
-  const center = Math.min(colCenter + limit, Math.max(colCenter - limit, inkCenter));
+  let center = Math.min(colCenter + limit, Math.max(colCenter - limit, inkCenter));
+  /* 硬夹制：波形整体必须落在列内 —— 横屏列只有 486 宽而波形 437，只按 ±10% 夹偏移
+     时中心探到下界会把波形左缘推进左图（2026-09-28 回归实测越界 24 设计值） */
+  center = Math.min(Math.max(center, colLeft + w / 2), colLeft + colW - w / 2);
   return {
     x: center - w / 2,
     y: en.y - padTop,
@@ -3461,21 +3516,17 @@ function bindGestures() {
           Date.now() - modeSwitchAt >= MODE_SWITCH_COOLDOWN) {
         const [a, b] = [...modePtrs.values()];
         const ratio = Math.hypot(a.x - b.x, a.y - b.y) / modePinch0;
-        /* 双指切版映射（2026-09-28 三态）：
-           standard: 扩 → long / 捏 → wide
-           long:     扩 → （无，长版是最全的竖版）/ 捏 → standard
-           wide:     扩 → standard / 捏 → （无，横屏是最宽的版式） */
+        /* 双指切版映射（2026-09-28 回两态）：扩/捏只在两个竖版之间切换，
+           横屏版没有任何双指入口/出口 —— 它是设备状态，进出只由手机横竖承载
+           （bindOrientation）。竖屏里捏进 wide 会得到一个 16:9 塞不进 9:16 屏的
+           版式，真机已踩坑；横屏里扩回 standard 同理是反向的同类问题。 */
         if (ratio >= MODE_SWITCH_EXPAND) {
           if (state.mode === 'standard') {
             modeSwitchFired = true; modeSwitchAt = Date.now(); applyMode('long');
-          } else if (state.mode === 'wide') {
-            modeSwitchFired = true; modeSwitchAt = Date.now(); applyMode('standard');
           }
         } else if (ratio <= MODE_SWITCH_PINCH) {
           if (state.mode === 'long') {
             modeSwitchFired = true; modeSwitchAt = Date.now(); applyMode('standard');
-          } else if (state.mode === 'standard') {
-            modeSwitchFired = true; modeSwitchAt = Date.now(); applyMode('wide');
           }
         }
       }
