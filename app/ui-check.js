@@ -1782,6 +1782,37 @@ function ok(label, cond, extra) {
     await mp.evaluate(() => window.__ds.setZoom('en', 1));
     await mp.waitForTimeout(250);
   }
+  /* 真机落点复核（2026-09-28 用户报「日期缩放有效、字体缩放失效」的根因回归）：
+     命中框必须覆盖整列，且手指按在**可见文字列中点**上要能缩放 ——
+     此前命中框按 CW−2×textX 算成 20 宽，只有区域内那一条细缝能命中，取区域中心的
+     老断言恰好躲过了它，所以必须按列中点（用户真实落点）再钉一条 */
+  {
+    const wCol = await mp.evaluate(() => {
+      const L = window.__ds.state.layout;
+      const reg = (id) => (window.__ds.state.regions || []).find((r) => r.id === id);
+      const en = reg('en');
+      const pt = window.__ds.toClient((L.textX + L.textRight) / 2, en.y + en.h / 2);
+      return {
+        x: pt.x, y: pt.y, enW: en.w, colW: L.textRight - L.textX,
+        cnW: reg('cn') && reg('cn').w, srcW: reg('source') && reg('source').w,
+      };
+    });
+    ok('横屏句子命中框覆盖整列（不再是 20 宽的细缝）',
+      wCol.enW >= wCol.colW * 0.9 && wCol.cnW >= wCol.colW * 0.9 && wCol.srcW >= wCol.colW * 0.6,
+      `en.w=${Math.round(wCol.enW)} cn.w=${Math.round(wCol.cnW)} src.w=${Math.round(wCol.srcW)} / 列宽 ${Math.round(wCol.colW)}`);
+    await mp.evaluate(() => window.__ds.setZoom('en', 1));
+    await mp.waitForTimeout(250);
+    await mp.mouse.move(wCol.x, wCol.y);
+    await mp.mouse.down();
+    await mp.mouse.move(wCol.x, wCol.y - 120, { steps: 10 });
+    await mp.mouse.up();
+    await mp.waitForTimeout(400);
+    const wColZoom = await info(mp);
+    ok('横屏手指按在可见文字列中点= 上滑缩放生效（真机落点）', wColZoom.text.fx.en > 1.05,
+      `fx.en=${wColZoom.text.fx.en}`);
+    await mp.evaluate(() => window.__ds.setZoom('en', 1));
+    await mp.waitForTimeout(250);
+  }
   /* 波形层贴合右栏 3 区：不越左图、竖向盖 3 区（voiceBox 列几何从版面读） */
   await mp.evaluate(() => window.__ds.playVoice());
   await mp.waitForTimeout(250);

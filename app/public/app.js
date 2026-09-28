@@ -3233,7 +3233,12 @@ async function readPickedImage(e) {
 function buildHitRegions(L) {
   const R = [];
   const tx = L.textX;
-  const maxW = CW - 2 * tx;
+  /* 列宽取版面真实的列几何：横屏是「左图右文」的右栏（textRight − textX = 486），
+     标准/长版左右各 TEXT_X（CW − 2×tx = 984）。**不能再用 CW − 2tx 这一个公式套两种版式** ——
+     横屏 textX=546 时它算出 −12，句子三个区的命中框被压成 20 设计值宽，
+     真机手指按在可见文字上直接落空（2026-09-28 用户报「日期缩放有效、字体缩放失效」；
+     回归当时取的是区域中心，恰好落在那条细缝里，所以漏检） */
+  const maxW = (L.textRight != null ? L.textRight : CW - tx) - tx;
   const push = (id, x, y, w, h) => {
     if (w > 0 && h > 0) R.push({ id, x, y, w, h });
   };
