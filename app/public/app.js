@@ -536,10 +536,11 @@ const state = {
   edit: null,
   mode: 'standard',     // 版式三态：'standard' | 'long' | 'wide'（横屏）；applyMode/initMode 维护
   modeBeforeWide: 'standard',  // 进横屏前的竖屏版式 —— 竖屏放置时回到它
-  /* 横屏照片基调：photoLumKey = 已采样过的那张图（身份比较），photoLum = 右栏平均亮度。
-     按图片缓存 —— 手势重绘时零开销；换图后 key 不等自然重采（见 photoToneNow） */
-  photoLumKey: null,
-  photoLum: null,
+  /* 横屏照片基调：photoToneKey = 已采样过的那张图（身份比较），
+     photoToneStats = 右栏亮度分布 { lum, p10, p50, p90, sd }。
+     按图片缓存整份采样结果 —— 手势重绘时零开销；换图后 key 不等自然重采（见 photoToneNow） */
+  photoToneKey: null,
+  photoToneStats: null,
   opts: {
     bgStyle: DEFAULT_BG,
     longPoster: false,  // 兼容字段 = (mode === 'long')，见 applyMode/initMode
@@ -1187,15 +1188,26 @@ const WIDE_GAP = 22;           // 英/中/出处块间距（随保底倍率一�
 
 /* ------------------- 横屏照片自适应配色（2026-09-28） -------------------
    横屏把配图 cover 铺满整幅，文字直接压在照片上 —— 固定「深幕布 + 主题文字色」在亮照片上会糊字。
-   这里按**右栏覆盖区域**的平均亮度二选一（整栏一刀切，一张照片一个基调）：
-     暗照片 → 深色幕布 + 亮色文字    亮照片 → 浅色幕布 + 深墨文字
+   这里按**右栏覆盖区域的最不利处对比度**二选一（整栏一刀切，一张照片一个基调）：
+     深墨字怕图片最暗处（看 p10）、亮字怕最亮处（看 p90）—— 取「最坏情况对比度更高」的一档，
+   灰蒙蒙 / 明暗混杂的照片因此不再被均值骗着选错基调（2026-09-29 升级）。
+   **右栏不再有底板**（2026-09-29 用户要求：文字直接压在照片上），可读性交给自适应阴影：
+     暗基调 → 深色紧影、亮基调 → 浅色柔晕；照片纹理越花，阴影越紧越实（按 sd 收紧）。
    色值仍全部取自 THEMES（零写死颜色）：按当前主题的冷暖组，取「同暖冷的另一明度主题」。
    手摇主题只决定冷暖基调与卡片 / 波形强调色，明暗由照片决定 —— 两个维度正交。 */
 
-const WIDE_TONE_LUM = 150;      // 右栏平均亮度 ≥ 此值算「亮照片」（唯一调优点）
+const WIDE_TONE_LUM = 150;      // 均值兜底阈值：分位不可用时才用（正常走最不利对比度）
 const WIDE_TONE_SAMPLE = 48;    // 采样边长（离屏 canvas，与 analyzeImageTone 同手法）
-const WIDE_VEIL_DARK_A = 0.55;  // 暗照片幕布透明度（沿用现状观感）
-const WIDE_VEIL_LIGHT_A = 0.62; // 亮照片浅幕布透明度（略高，压住照片细节让字更稳）
+/* 阴影参数（样式值，不是颜色）：暗底亮字要「紧而实」，亮底深字要「柔而淡」 */
+const WIDE_SHADOW = {
+  dark: { blur: 14, offY: 4.5, alpha: 0.85 },
+  light: { blur: 24, offY: 4, alpha: 0.26 },
+};
+const WIDE_SHADOW_BUSY = 0.45;  // 纹理 busyness（sd）的影响系数：越大越紧绷
+const WIDE_SD_REF = 60;         // sd 参考值：到这就按满系数收紧
+/* 极淡暗角（照片仍干净）：暗基调沿用既有「写死 rgba(0,0,0,·)」先例，亮基调只一层近乎不可见的浅色 */
+const WIDE_VIGNETTE_DARK_A = 0.22;
+const WIDE_VIGNETTE_LIGHT_A = 0.08;
 
 /** 冷暖分组：组内互换明度（paper↔ember 暖、celadon↔night 冷），跨组不混 */
 const WIDE_TONE_PAIR = {
@@ -1212,9 +1224,40 @@ function wideCover(im) {
   return { k, dw, dh, dx: (CW - dw) / 2, dy: (WIDE_H - dh) / 2 };
 }
 
+/** 解析调色板色值（`rgba(r,g,b,a)` / `#rrggbb`）→ 分量；解析不了返回 null（调用方回退原值） */
+function colorRGBA(col) {
+  const s = String(col || '');
+  const m = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)/i.exec(s);
+  if (m) return { r: +m[1], g: +m[2], b: +m[3], a: m[4] == null ? 1 : +m[4] };
+  const h = /^#([0-9a-f]{6})$/i.exec(s);
+  if (h) {
+    const n = parseInt(h[1], 16);
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255, a: 1 };
+  }
+  return null;
+}
+
+/** WCAG 相对亮度（0..1）—— 对比度计算专用（与「感知亮度 0.3R+0.59G+0.11B」口径不同，别混用） */
+function relLum255(r, g, b) {
+  const f = (v) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+
+/** 对比度（WCAG 2.x）：(亮者+0.05)/(暗者+0.05)，值域 1..21 */
+function contrastRatio(l1, l2) {
+  const hi = Math.max(l1, l2) + 0.05;
+  const lo = Math.min(l1, l2) + 0.05;
+  return hi / lo;
+}
+
 /**
- * 只采「右栏覆盖区域」的平均亮度（设计坐标 x ∈ [WIDE_TEXT_X−24, CW]、全高）——
- * 左图区不参与（文字不落在那里）。跨域污染 / 无图返回 null，调用方回退现状配色。
+ * 只采「右栏覆盖区域」的亮度分布（设计坐标 x ∈ [WIDE_TEXT_X−24, CW]、全高）——
+ * 左图区不参与（文字不落在那里）。返回 { lum, p10, p50, p90, sd }：
+ * 分位决定基调（最不利处对比度），sd 决定阴影收紧程度。
+ * 跨域污染 / 无图返回 null，调用方回退现状配色。
  */
 function analyzePhotoTone(im) {
   if (!im || !im.width || !im.height) return null;
@@ -1240,40 +1283,92 @@ function analyzePhotoTone(im) {
   } catch (e) {
     return null;               /* 跨域污染：放弃自适应、保持现状配色 */
   }
-  let lum = 0, n = 0;
+  const vals = [];
+  let sum = 0;
   for (let i = 0; i < data.length; i += 4) {
-    lum += 0.3 * data[i] + 0.59 * data[i + 1] + 0.11 * data[i + 2];
-    n++;
+    const v = 0.3 * data[i] + 0.59 * data[i + 1] + 0.11 * data[i + 2];
+    vals.push(v);
+    sum += v;
   }
-  return { lum: lum / Math.max(1, n) };
+  const n = Math.max(1, vals.length);
+  const mean = sum / n;
+  vals.sort((a, b) => a - b);
+  const at = (q) => vals[Math.min(vals.length - 1, Math.max(0, Math.round((vals.length - 1) * q)))];
+  let vs = 0;
+  for (const v of vals) vs += (v - mean) * (v - mean);
+  /* 返回整份亮度分布：p10/p90 用来按「最不利处」选基调，sd（纹理繁忙度）用来收紧阴影 */
+  return {
+    lum: mean,
+    p10: at(0.1),
+    p50: at(0.5),
+    p90: at(0.9),
+    sd: Math.sqrt(vs / n),
+  };
 }
 
 /**
  * 当前照片基调（惰性 + 按图片身份缓存采样）：
- * 返回 { lum, mode: 'light'|'dark', palId, pal, veil, veilA }；无图 / 取样失败返回 null。
- * 只缓存**采样结果**（贵的那步），调色板每次现推 —— 摇一摇换主题后冷暖组要立刻跟上。
+ * 返回 { lum, p10, p50, p90, sd, mode, palId, pal, contrast, vignette, vignetteA, shadow }；
+ * 无图 / 取样失败返回 null（绘制侧回退主题配色）。
+ * 只缓存**采样结果**（贵的那步），调色板与判定每次现推 —— 摇一摇换主题后冷暖组要立刻跟上。
  */
 function photoToneNow() {
   const im = state.bgImage;
   if (!im) {
-    state.photoLumKey = null;
-    state.photoLum = null;
+    state.photoToneKey = null;
+    state.photoToneStats = null;
     return null;
   }
-  if (state.photoLumKey !== im) {
-    const t = analyzePhotoTone(im);
-    state.photoLumKey = im;
-    state.photoLum = t ? t.lum : null;
+  if (state.photoToneKey !== im) {
+    state.photoToneKey = im;
+    state.photoToneStats = analyzePhotoTone(im);
   }
-  if (state.photoLum == null) return null;
-  const mode = state.photoLum >= WIDE_TONE_LUM ? 'light' : 'dark';
+  const st = state.photoToneStats;
+  if (!st) return null;
   const pair = WIDE_TONE_PAIR[state.theme] || WIDE_TONE_PAIR.night;
+  /* 候选基调的「最坏情况对比度」：深墨字怕图片最暗处（p10）、亮字怕最亮处（p90）。
+     取更坏者更高的一档 —— 灰蒙蒙 / 明暗混杂的照片因此不再被均值骗着选错基调。 */
+  const worst = (id) => {
+    const p = THEMES[id] || THEMES.night;
+    const c = colorRGBA(p.colEn);
+    if (!c) return 0;
+    const inkDark = id === 'paper' || id === 'celadon';
+    const bg = inkDark ? st.p10 : st.p90;
+    const mix = (v) => c.a * v + (1 - c.a) * bg;   /* 文字半透明 → 与底色叠出的实际色 */
+    return contrastRatio(relLum255(mix(c.r), mix(c.g), mix(c.b)), relLum255(bg, bg, bg));
+  };
+  const cLight = worst(pair.light);
+  const cDark = worst(pair.dark);
+  const mode = (cLight || cDark)
+    ? (cLight >= cDark ? 'light' : 'dark')
+    : (st.lum >= WIDE_TONE_LUM ? 'light' : 'dark');   /* 分位不可用时的兜底 */
   const palId = pair[mode];
   const pal = THEMES[palId] || THEMES.night;
+  /* 阴影按纹理繁忙度收紧：越花 → blur 越小、alpha 越高（样式参数；基色仍取自调色板） */
+  const busy = Math.min(1, st.sd / WIDE_SD_REF);
+  const sh = WIDE_SHADOW[mode];
+  const s0 = colorRGBA(pal.textShadow);
+  const sA = Math.min(1, Math.round(sh.alpha * (1 + WIDE_SHADOW_BUSY * busy) * 100) / 100);
+  const shadow = {
+    color: s0 ? `rgba(${s0.r},${s0.g},${s0.b},${sA})` : pal.textShadow,
+    blur: Math.round(sh.blur * (1 - WIDE_SHADOW_BUSY * busy)),
+    offY: sh.offY,
+    alpha: sA,
+  };
   return {
-    lum: Math.round(state.photoLum), mode, palId, pal,
-    veil: mode === 'light' ? (pal.photoVeil || pal.fade) : pal.scrim,
-    veilA: mode === 'light' ? WIDE_VEIL_LIGHT_A : WIDE_VEIL_DARK_A,
+    lum: Math.round(st.lum),
+    p10: Math.round(st.p10),
+    p50: Math.round(st.p50),
+    p90: Math.round(st.p90),
+    sd: Math.round(st.sd),
+    mode,
+    palId,
+    pal,
+    contrast: Math.round((mode === 'light' ? cLight : cDark) * 100) / 100,
+    /* 极淡暗角：亮基调只一层近乎不可见的浅色 tint（基色取调色板），暗基调沿用写死黑 */
+    vignette: mode === 'light' ? (pal.photoVeil || pal.fade) : '0,0,0',
+    vignetteA: mode === 'light' ? WIDE_VIGNETTE_LIGHT_A : WIDE_VIGNETTE_DARK_A,
+    shadow,
   };
 }
 
@@ -1391,8 +1486,12 @@ function computeLayoutWide(ctx) {
     /* 照片基调自证（只增字段）：null = 没照片 / 取样失败（绘制回退主题配色）。
        lum = 右栏平均亮度，mode = light/dark，palId = 选定的照片调色板主题 */
     wideTone: tone ? {
-      lum: tone.lum, mode: tone.mode, palId: tone.palId,
-      veil: tone.veil, veilA: tone.veilA,
+      /* 亮度分布（p10/p90 是选基调的依据，sd 是阴影收紧的依据） */
+      lum: tone.lum, p10: tone.p10, p50: tone.p50, p90: tone.p90, sd: tone.sd,
+      mode: tone.mode, palId: tone.palId,
+      contrast: tone.contrast,          /* 选定基调的「最坏情况对比度」（WCAG 口径） */
+      vignette: tone.vignette, vignetteA: tone.vignetteA,
+      shadow: tone.shadow,              /* 自适应阴影：drawTopText 读同一份 */
       /* 选定的正文色也带出来：回归靠它校核「亮图→深字 / 暗图→亮字」的对比度，真机排障也直接可读 */
       colEn: tone.pal.colEn, colSource: tone.pal.colSource,
     } : null,
@@ -2224,26 +2323,15 @@ function fadeImageBottom(ctx, ih) {
 function drawScrim(ctx, L) {
   /* 压暗基色随主题（暗色系各用各的近黑；paper 用暖褐 —— 纯黑压在浅底上会发灰发脏） */
   const s = PAL().scrim;
-  /* 横屏版（2026-09-28 第二轮改版）：背景图铺满整幅，右栏文字垫**半透明面板**透出背景
-     （文字压在面板上、面板下就是背景图）；左图区不加遮罩保持干净，只留极淡暗角 */
+  /* 横屏版（2026-09-29 去底板）：**不再给右栏垫任何半透明面板** —— 文字直接压在照片上，
+     可读性交给 drawTopText 的自适应阴影（按明暗与纹理收紧）。这里只剩一层极淡暗角，
+     帮四周文字不跌进过亮的亮区；没有基调（无图 / 取样失败）时暗角退回当前主题的 scrim */
   if (L.imgBlock && L.imgBlock.wide) {
-    /* 幕布随照片基调走（2026-09-28 自适应配色）：亮照片 → 浅幕布（配深墨字），
-       暗照片 → 深幕布（配亮字）；没有基调（无图 / 取样失败）时回退当前主题的 scrim */
-    const veil = L.wideTone ? L.wideTone.veil : s;
-    const a = L.wideTone ? L.wideTone.veilA : 0.55;
-    const px = WIDE_TEXT_X - 24;
-    const g = ctx.createLinearGradient(px, 0, px + 80, 0);
-    g.addColorStop(0, `rgba(${veil},0)`);
-    g.addColorStop(1, `rgba(${veil},${a})`);
-    ctx.fillStyle = g;
-    ctx.fillRect(px, 0, 80, CH);
-    ctx.fillStyle = `rgba(${veil},${a})`;
-    ctx.fillRect(px + 80, 0, CW - px - 80, CH);
-    /* 暗角：暗照片用黑、浅幕布用极淡同色影（纯黑压在浅幕布上会发灰发脏，同 paper 的教训） */
+    const vBase = L.wideTone ? L.wideTone.vignette : s;
+    const vA = L.wideTone ? L.wideTone.vignetteA : 0.22;
     const v = ctx.createRadialGradient(CW / 2, CH * 0.44, CW * 0.26, CW / 2, CH * 0.5, CH * 0.78);
-    v.addColorStop(0, 'rgba(0,0,0,0)');
-    v.addColorStop(1, L.wideTone && L.wideTone.mode === 'light'
-      ? `rgba(${veil},0.10)` : 'rgba(0,0,0,0.22)');
+    v.addColorStop(0, `rgba(${vBase},0)`);
+    v.addColorStop(1, `rgba(${vBase},${vA})`);
     ctx.fillStyle = v;
     ctx.fillRect(0, 0, CW, CH);
     return;
@@ -2317,10 +2405,14 @@ function drawTopText(ctx, L) {
   /* 取色：横屏有照片基调时用「按照片明暗选定」的调色板（亮图→深墨字 / 暗图→亮字），
      其余情况与改造前逐值一致（2026-09-28 自适应配色）—— 一处覆盖英文/中文/出处/日期胶囊/阴影 */
   const P = PAL_WIDE(L);
+  /* 阴影（2026-09-29 起横屏自适应）：宽态读照片基调给的参数 —— 暗底亮字「紧而实」、
+     亮底深字「柔而淡」，照片越花越收紧（WS.color 的基色仍取自选定调色板的 textShadow）；
+     非宽态严格保持现状（blur 22 / offsetY 4 / 调色板 textShadow），标准版与长版零变化 */
+  const WS = L.wideTone && L.wideTone.shadow;
   const shadow = () => {
-    ctx.shadowColor = P.textShadow;
-    ctx.shadowBlur = 22;
-    ctx.shadowOffsetY = 4;
+    ctx.shadowColor = WS ? WS.color : P.textShadow;
+    ctx.shadowBlur = WS ? WS.blur : 22;
+    ctx.shadowOffsetY = WS ? WS.offY : 4;
   };
   const noShadow = () => {
     ctx.shadowColor = 'transparent';
@@ -3922,8 +4014,11 @@ function diagText() {
     '安全区    top ' + r1(safe.top) + '   bottom ' + r1(safe.bottom),
     /* 横屏照片自适应配色（2026-09-28）：真机读这一行就知道选了哪个基调、为什么 */
     '照片基调  ' + (L.wideTone
-      ? L.wideTone.mode + '（右栏亮度 ' + L.wideTone.lum + '）   文字主题 ' + L.wideTone.palId +
-        '   幕布 ' + L.wideTone.veil + ' @' + L.wideTone.veilA
+      ? L.wideTone.mode + '（对比度 ' + L.wideTone.contrast + '）   文字主题 ' + L.wideTone.palId +
+        '   亮度 p10/p50/p90 ' + L.wideTone.p10 + '/' + L.wideTone.p50 + '/' + L.wideTone.p90 +
+        '   sd ' + L.wideTone.sd +
+        '   阴影 blur ' + L.wideTone.shadow.blur + ' α ' + L.wideTone.shadow.alpha +
+        '   暗角 @' + L.wideTone.vignetteA + '（右栏无底板）'
       : '（非横屏 / 无照片 / 取样失败 → 回退主题配色）'),
     '舞台      standalone=' + (STAGE_INFO.standalone ? 'Y' : 'N') + '   padTop=' + STAGE_INFO.padTop +
       '   screenH=' + STAGE_INFO.screenH + '   frameH=' + STAGE_INFO.frameH,

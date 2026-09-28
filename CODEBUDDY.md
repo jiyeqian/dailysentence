@@ -244,21 +244,31 @@ NODE_PATH=~/.workbuddy/binaries/node/workspace/node_modules \
   「先允许「运动与方向」权限，再点一次换图」—— 用户再点一次即正常。授权窗口状态随
   `inspect().shakeDiag.busy` 透出（只增字段）。回归：`requestPermission` 桩返回**由测试
   控制**的 promise，断言「在飞时不开相册 + busy=true」与「落定后再点正常开相册」。
-- **横屏照片自适应配色（2026-09-28，整栏一刀切）**：横屏把配图 cover 铺满整幅、文字直接压在
-  照片上，固定的「深幕布 + 主题文字色」在亮照片上会糊字 —— 改为按**右栏覆盖区域**的平均亮度
-  二选一：**暗照片 → 深幕布 + 亮字；亮照片 → 浅幕布 + 深墨字**。
-  取样只采设计 x ∈ [522, 1080] 全高那一块（`analyzePhotoTone`；`wideCover(im)` 与绘制共用同一份
-  cover 变换，不两处各算），阈值 `WIDE_TONE_LUM(150)` 一处可调，采样结果按**图片身份**缓存在
-  `state.photoLum`（手势期间零开销，换图后 key 不等自然重采）。
-  **色值仍全部取自 THEMES（零写死颜色）**：按当前主题的冷暖组取「同暖冷的另一明度主题」——
-  暖组 `paper ↔ ember`、冷组 `celadon ↔ night`（配对表 `WIDE_TONE_PAIR`）；浅幕布基色是浅色主题
-  新加的 `photoVeil`（缺失回退该主题 `fade`），深幕布用配色主题的 `scrim`。
+- **横屏照片自适应配色（2026-09-29 定稿：右栏无底板 + 分位选基调 + 自适应阴影）**：
+  横屏把配图 cover 铺满整幅，**文字直接压在照片上、右栏没有任何半透明底板**
+  （2026-09-29 用户要求；历史：曾垫一层「深/浅幕布」，已删）。可读性由两件事共同承担：
+  **① 选对文字基调 ② 自适应阴影**。
+  取样只采设计 x ∈ [522, 1080] 全高那一块（`analyzePhotoTone`，48×48 离屏 + `willReadFrequently`；
+  `wideCover(im)` 与绘制共用同一份 cover 变换，不两处各算），返回亮度分布
+  `{ lum, p10, p50, p90, sd }`，按**图片身份**缓存在 `state.photoToneStats`（手势期间零开销）。
+  **选基调不看均值，看最不利处对比度**：深墨字怕图片最暗处（比 p10）、亮字怕最亮处（比 p90），
+  用 WCAG 口径（`colorRGBA` / `relLum255` / `contrastRatio`）各算一次「最坏情况对比度」，
+  **取更坏者更高的一档** —— 灰蒙蒙 / 明暗混杂的照片不再被均值骗（`WIDE_TONE_LUM(150)` 只作
+  分位不可用时的兜底）。选出的 `contrast` 随自证透出，WCAG 大字号下限 3.0。
+  **阴影按明暗与纹理自适应**（`L.wideTone.shadow`，drawTopText 读同一份）：暗底亮字「紧而实」
+  （基值 blur 14 / α 0.85）、亮底深字「柔而淡」（基值 blur 24 / α 0.26），纹理越花越收紧
+  （`sd` 经 `WIDE_SD_REF(60)`、`WIDE_SHADOW_BUSY(0.45)` 换算：blur 收小、α 提高）——
+  基色仍取自选定调色板的 `textShadow`，**只缩放 alpha，不写死颜色**。
+  **色值仍全部取自 THEMES（零写死颜色）**：按当前主题冷暖组取「同暖冷的另一明度主题」——
+  暖组 `paper ↔ ember`、冷组 `celadon ↔ night`（`WIDE_TONE_PAIR`）。
   **手摇主题只决定冷暖基调与卡片/波形强调色，明暗由照片决定 —— 两个维度正交**。
-  绘制侧只有两处：`drawScrim` 横屏专支（幕布基色 / 透明度 / 暗角；浅幕布的暗角用极淡同色，
-  纯黑压在浅幕布上会发灰发脏）与 `drawTopText` 的取色 `PAL_WIDE(L)`（一处覆盖英文 / 中文 /
-  出处 / 日期胶囊 / 文字阴影）。无图 / 取样失败（跨域污染）→ `wideTone = null`，回退主题配色，
-  非宽态逐值不变。自证：`inspect().wideTone = { lum, mode, palId, veil, veilA, colEn, colSource }`，
-  `?diag=1` 有「照片基调」一行。备查表同 `docs/标注通道-使用手册.md`。
+  绘制侧只有两处：`drawScrim` 横屏专支**只剩极淡暗角**（暗基调沿用写死 `rgba(0,0,0,0.22)`、
+  亮基调一层 `photoVeil` @0.08 近乎不可见）与 `drawTopText` 的取色 `PAL_WIDE(L)`（一处覆盖
+  英文 / 中文 / 出处 / 日期胶囊）。无图 / 取样失败（跨域污染）→ `wideTone = null`，回退主题配色，
+  非宽态逐值不变（`shadow()` 的 22 / 4 与调色板 `textShadow` 是标准版与长版的现行值）。
+  自证：`inspect().wideTone = { lum, p10, p50, p90, sd, mode, palId, contrast, vignette, vignetteA,
+  shadow, colEn, colSource }`，`?diag=1` 有「照片基调」一行。备查表同 `docs/标注通道-使用手册.md`。
+  回归还钉一条**像素探针**：中灰底上右栏空白处取到的就是底色本身（≈128，旧实现有幕布时会到 ~200）。
 - **主题随图匹配（2026-09-25，四选一，不派生）**：三个时点自动执行 —— 初始化
   （`loadBackground` 尾部，下拉更新同收口）、换顶部图片后。输入量（离屏 48px 采样）：
   `lum`（感知亮度 0~255，0.3R+0.59G+0.11B）/ `warmth`（**平均 R − 平均 B**，正暖负冷）。
