@@ -1171,6 +1171,11 @@ function computeLayoutLong(ctx) {
 
 const WIDE_H = 608;            // 横屏设计画布高（× U=16/9 → 位图 1080）
 const WIDE_TEXT_X = 546;       // 右栏文字左缘
+/* 横屏信息卡整体不透明度（2026-09-29 用户：「Card 改为半透明，透过 Card 可见背景」）：
+   卡片的白底与卡内模板内容（头像 / 昵称 / 天数 / 统计）是同一张图的像素，只能整块同 alpha ——
+   观感是磨砂卡、背景隐约透出，代价是卡内数字也一起变淡（用户已确认接受）。
+   唯一旋钮：调大更实、调小更透；1 = 不透明（标准版 / 长版就是 1，不受影响） */
+const WIDE_CARD_ALPHA = 0.82;
 
 /* 横屏字号基准（2026-09-28 用户反馈「字体太大、乱套」后重定）：
    设计画布只有 608 高（标准版 1920 的 1/3.16），直接沿用标准版字号会把右栏撑爆、
@@ -2019,6 +2024,9 @@ function inspect() {
     /* 横屏照片自适应配色自证（2026-09-28，只增字段）：null = 没照片 / 取样失败（回退主题配色）。
        { lum, mode: light|dark, palId, veil, veilA } —— 真机/回归都读它判断选了哪个基调 */
     wideTone: L.wideTone || null,
+    /* 信息卡不透明度（2026-09-29，只增字段）：0.82 = 横屏半透明磨砂卡；1 = 不透明（标准 / 长版）。
+       真机判断「卡片透没透」直接读它，不必截图 */
+    cardAlpha: (L.imgBlock && L.imgBlock.wide) ? WIDE_CARD_ALPHA : 1,
     /* 当前主题（2026-09-24 摇一摇换配色）：id = THEMES 的 key，name = toast 里的中文名。
        只增不改：标注通道与旧回归不认识它也无碍，新回归靠它自证「进了哪个主题」 */
     theme: { id: state.theme, name: (THEMES[state.theme] || THEMES.night).name },
@@ -2519,13 +2527,34 @@ const CARD_IMG_INSET = 1.025;
 
 function drawProfileCard(ctx, L) {
   const c = L.card;
+  /* 横屏整块半透明（2026-09-29 用户：「Card 改为半透明，透过 Card 可见背景」）。
+     ⚠ 透明度只能落在**一层**上：模板图自带白底，若在它下面再铺一层半透明白底，两层会叠加成
+     `0.82 + 0.82×0.18 ≈ 0.97`，卡内像素实测 247/255 —— 几乎不透（本次踩过，回归的像素探针
+     当场抓到，随即改成下面这个结构）。
+     所以宽态：**卡面只画模板图那一层**（α = WIDE_CARD_ALPHA），白底只负责投影 ——
+     用 evenodd 把卡片内圈挖空，阴影照旧落在卡外（不挖掉就被一起裁掉）。
+     标准版 / 长版仍是「不透明白底 + 不透模板图」，逐像素不变。 */
+  const wide = !!(L.imgBlock && L.imgBlock.wide);
+  const a = wide ? WIDE_CARD_ALPHA : 1;
 
+  /* 卡片底 / 投影 */
   ctx.save();
-  roundRect(ctx, c.x, c.y, c.w, c.h, 18);
   ctx.shadowColor = 'rgba(4,10,22,0.42)';
   ctx.shadowBlur = 46;
   ctx.shadowOffsetY = 20;
   ctx.fillStyle = PAL().profileBg;
+  if (wide) {
+    /* 外圈矩形 + 卡片圆角矩形 evenodd 挖空后 clip：填充只落在卡外，于是只剩阴影。
+       （`clip(fillRule)` 需要 iOS 15+；更老的引擎会退化成「不挖空、卡面不透」，
+        与改造前观感一致，不会出错） */
+    ctx.beginPath();
+    ctx.rect(c.x - 80, c.y - 80, c.w + 160, c.h + 160);
+    roundRectPath(ctx, c.x, c.y, c.w, c.h, 18);
+    ctx.clip('evenodd');
+    roundRect(ctx, c.x, c.y, c.w, c.h, 18);
+  } else {
+    roundRect(ctx, c.x, c.y, c.w, c.h, 18);
+  }
   ctx.fill();
   ctx.restore();
 
@@ -2541,12 +2570,23 @@ function drawProfileCard(ctx, L) {
     ctx.save();
     roundRect(ctx, c.x, c.y, c.w, c.h, 18);
     ctx.clip();
+    /* 卡面就这一层：α 直接决定卡片的半透明程度（下面没有不透明白底可叠） */
+    ctx.globalAlpha = a;
     ctx.imageSmoothingQuality = 'high';
     const k2 = q.k * CARD_IMG_INSET;
     const cx = c.x + c.w / 2, cy = c.y + c.h / 2;
     const srcCx = (cx - q.x) / q.k, srcCy = (cy - q.y) / q.k;
     ctx.drawImage(q.base.im, cx - srcCx * k2, cy - srcCy * k2,
       q.base.im.width * k2, q.base.im.height * k2);
+    ctx.restore();
+  } else if (wide) {
+    /* 模板图还没加载出来时的兜底：补一层**同样半透明**的白底，免得宽态只剩一圈影子。
+       标准版 / 长版不走这里（它们上面已经铺了不透明白底） */
+    ctx.save();
+    roundRect(ctx, c.x, c.y, c.w, c.h, 18);
+    ctx.fillStyle = PAL().profileBg;
+    ctx.globalAlpha = a;
+    ctx.fill();
     ctx.restore();
   }
 }
@@ -4018,7 +4058,8 @@ function diagText() {
         '   亮度 p10/p50/p90 ' + L.wideTone.p10 + '/' + L.wideTone.p50 + '/' + L.wideTone.p90 +
         '   sd ' + L.wideTone.sd +
         '   阴影 blur ' + L.wideTone.shadow.blur + ' α ' + L.wideTone.shadow.alpha +
-        '   暗角 @' + L.wideTone.vignetteA + '（右栏无底板）'
+        '   暗角 @' + L.wideTone.vignetteA + '（右栏无底板）' +
+        '   卡片 α ' + WIDE_CARD_ALPHA
       : '（非横屏 / 无照片 / 取样失败 → 回退主题配色）'),
     '舞台      standalone=' + (STAGE_INFO.standalone ? 'Y' : 'N') + '   padTop=' + STAGE_INFO.padTop +
       '   screenH=' + STAGE_INFO.screenH + '   frameH=' + STAGE_INFO.frameH,

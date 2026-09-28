@@ -1881,6 +1881,33 @@ function ok(label, cond, extra) {
     toneDark.contrast >= 7,
     JSON.stringify(toneDark));
   await shot(mp, 'wide-tone-dark');       /* 暗基调留档：无底板 + 亮字 */
+  /* 横屏信息卡整块半透明（2026-09-29）：此刻背景仍是纯黑，卡内白区应约为 255×0.82 ≈ 209；
+     旧实现（不透明）会是 ~255。取卡片内 5 个采样点的**最大值** —— 白区一定在其中 */
+  const cardProbe = (page) => page.evaluate(() => {
+    const I = window.__ds.inspect();
+    const U = I.canvas.u || 1;
+    const ctx = document.getElementById('poster').getContext('2d');
+    const reg = (window.__ds.state.regions || []).find((r) => r.id === 'card');
+    if (!reg) return null;
+    const ps = [
+      [reg.x + reg.w * 0.10, reg.y + reg.h * 0.12],
+      [reg.x + reg.w * 0.90, reg.y + reg.h * 0.12],
+      [reg.x + reg.w * 0.50, reg.y + reg.h * 0.20],
+      [reg.x + reg.w * 0.10, reg.y + reg.h * 0.90],
+      [reg.x + reg.w * 0.90, reg.y + reg.h * 0.90],
+    ].map(([x, y]) => {
+      const d = ctx.getImageData(Math.round(x * U), Math.round(y * U), 1, 1).data;
+      return d[0];
+    });
+    return { max: Math.max.apply(null, ps), min: Math.min.apply(null, ps) };
+  });
+  const cardWidePx = await cardProbe(mp);
+  ok('横屏信息卡半透明（纯黑底上卡内白区 ≈ 209，背景透上来）',
+    !!cardWidePx && cardWidePx.max <= 245 && cardWidePx.max >= 150,
+    `卡内采样 最大 ${cardWidePx && cardWidePx.max} / 最小 ${cardWidePx && cardWidePx.min}｜` +
+    `期望 ≈209（255×0.82），旧实现 ~255`);
+  ok('横屏 cardAlpha 自证 = 0.82（标准 / 长版应为 1）',
+    (await info(mp)).cardAlpha === 0.82, `cardAlpha=${(await info(mp)).cardAlpha}`);
   const toneMix = await toneWith(mp, 'stripes');
   ok('明暗混杂不再被均值骗：均值偏暗但最亮处是纯白 → 选深墨字（旧均值规则会选反）',
     !!toneMix && toneMix.mode === 'light' && toneMix.lum < 150 && toneMix.p90 > 200,
@@ -2014,6 +2041,11 @@ function ok(label, cond, extra) {
     `mode=${wBack.mode}`);
   ok('非横屏不看照片基调（标准 / 长版配色与改造前一致：wideTone 为 null）',
     wBack.wideTone === null, JSON.stringify(wBack.wideTone));
+  /* 对照：竖版卡片必须**仍然不透明**（半透明只在横屏生效） */
+  const cardPortraitPx = await cardProbe(mp);
+  ok('标准 / 长版信息卡仍不透明（cardAlpha = 1，卡内像素 ~255）',
+    wBack.cardAlpha === 1 && !!cardPortraitPx && cardPortraitPx.max >= 240,
+    `cardAlpha=${wBack.cardAlpha}｜卡内采样 最大 ${cardPortraitPx && cardPortraitPx.max}`);
   await mp.evaluate(async () => {
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
     const stage = document.getElementById('stage');
