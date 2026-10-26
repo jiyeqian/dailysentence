@@ -1,15 +1,44 @@
-# 每日一句 · 海报生成器
+<p align="center">
+  <img src="app/public/icons/icon-512.png" width="108" alt="dailysentence">
+</p>
+
+<p align="center"><strong>dailysentence：每日一句，好好学习，天天向上。</strong></p>
+
+<p align="center">
+  <a href="https://dailysentence.app.workbuddy.host/"><img src="https://img.shields.io/badge/%E7%AB%8B%E5%8D%B3%E4%BD%93%E9%AA%8C-dailysentence.app-2f6df0?style=flat-square" alt="立即体验"></a>
+  <img src="https://img.shields.io/badge/Node-18%2B-339933?style=flat-square" alt="Node 18+">
+  <img src="https://img.shields.io/badge/%E4%BE%9D%E8%B5%96-%E9%9B%B6%E4%BE%9D%E8%B5%96-4b8bbe?style=flat-square" alt="零依赖">
+  <img src="https://img.shields.io/badge/PWA-%E5%8F%AF%E6%B7%BB%E5%8A%A0%E5%88%B0%E4%B8%BB%E5%B1%8F%E5%B9%95-5a4fcf?style=flat-square" alt="PWA 可添加到主屏幕">
+  <img src="https://img.shields.io/badge/license-MIT-4c566a?style=flat-square" alt="License MIT">
+</p>
+
+---
 
 把 [欧路词典「英语每日一句」](https://dict.eudic.net/home/dailysentence) 的当日内容，
 和乐词 App 的「个人信息卡片」模板合成为一张可以发朋友圈的竖版手机海报。
 
-一句话概括：**打开网页 → 自动抓取今日金句 → 长按保存**。
+**界面无按钮，所有海报定制与交互，都用手势。**
 
-| 线上地址（手机可直接打开） | 说明 |
+## 安装：添加到主屏幕
+
+**只有「添加到主屏幕」当 App 用，才能体验到完整的交互能力** —— 全屏、独立窗口、没有地址栏；
+iPhone 上还能拿到「动作与健身」权限（摇一摇换配色要用它）。
+
+无需部署，马上访问 <https://dailysentence.app.workbuddy.host/>，即可 **「添加到主屏幕」**。
+
+| 平台 | 怎么做 |
 | --- | --- |
-| <https://dailysentence.app.workbuddy.host/> | 支持「添加到主屏幕」，当 App 用 |
+| **iPhone / iPad（Safari）** | 打开上面的地址 → 点底部「分享」→ 向下找到「**添加到主屏幕**」→ 右上角「添加」 |
+| **Android（Chrome）** | 打开上面的地址 → 点右上角「⋮」→「**添加到主屏幕**」（或「安装应用」）→ 确认 |
 
-<img src="docs/images/preview.png" width="360" alt="生成效果预览">
+装好以后，主屏幕上的图标是蓝色的，图标上写着 **dailysentence**，
+而它的名字叫「**每日一句**」—— 点开就是全屏的每日一句。
+
+## 效果
+
+| 标准版（默认） | 长版 |
+| --- | --- |
+| <img src="docs/images/standard.png" width="330" alt="标准版"> | <img src="docs/images/long.png" width="330" alt="长版"> |
 
 ---
 
