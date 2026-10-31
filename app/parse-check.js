@@ -26,6 +26,7 @@ process.env.DS_DATA_DIR = TMP_DATA; // 必须在 require server.js 之前
 
 const {
   parseDaily,
+  parseDictPage,
   archiveDaily,
   listDays,
   readRecord,
@@ -175,7 +176,53 @@ const head = (aninfo) => `<!doctype html><html><body>
 }
 
 /* ---------------------------------------------------------------- */
-/* 7. 存档：写入 / 幂等 / 合并 / 读取                                  */
+/* 词条页：#ExpFCchild 截取两端必须落在标签之外                         */
+/* （2026-10-31 上游把标签改成 <div id="ExpFCchild" class="expDiv">， */
+/*   释义内容也不再包 <li> / div.exp，走了整段兜底——半截标签会漏进释义） */
+/* ---------------------------------------------------------------- */
+
+/* 7. 2026-10-31 新结构（真实页面快照） */
+const wordFile = path.join(__dirname, 'fixtures', 'word-celebrated-2026-10-31.html');
+if (fs.existsSync(wordFile)) {
+  const w = parseDictPage(fs.readFileSync(wordFile, 'utf8'), 'celebrated');
+  eq('1031 音标', w.phonetics, [{ label: '英', ph: "/'selɪbreɪtɪd/" }, { label: '美', ph: "/'selɪbreɪtɪd/" }]);
+  ok('1031 释义有词性', w.definitions.length === 1 && w.definitions[0].pos === 'adj.', w.definitions);
+  const text = w.definitions.length ? w.definitions[0].text : '';
+  ok('1031 释义内容完整', /有名/.test(text) && /著名/.test(text), text);
+  ok('1031 释义无半截标签', !/[<>"=]/.test(text), text);
+  ok('1031 释义不含分区标记', !/ExpFCchild|expDiv|ExpSYN/.test(text), text);
+} else {
+  ok('1031 夹具存在', false, wordFile);
+}
+
+/* 8. 老结构：<li> 型释义，两端修口后逐条不变 */
+{
+  const w = parseDictPage(
+    '<html><body><div id="ExpFCchild"><ol><li><i>n.</i> 词义一</li><li>词义二</li></ol></div>' +
+      '<div id="ExpSYN" class="explain_wrap"></div></body></html>',
+    'x'
+  );
+  eq('老结构 li 释义', w.definitions, [
+    { pos: 'n.', text: '词义一' },
+    { pos: 'n.', text: '词义二' },
+  ]);
+}
+
+/* 9. 老结构：<div class="exp"> 型释义 */
+{
+  const w = parseDictPage(
+    '<html><body><div id="ExpFCchild"><div class="exp">n. 词义甲</div><div class="exp">词义乙</div></div>' +
+      '<div id="ExpSYN"></div></body></html>',
+    'x'
+  );
+  eq('老结构 div.exp 释义', w.definitions, [
+    { pos: 'n.', text: '词义甲' },
+    { pos: 'n.', text: '词义乙' },
+  ]);
+}
+
+/* ---------------------------------------------------------------- */
+/* 存档：写入 / 幂等 / 合并 / 读取                                    */
 /* ---------------------------------------------------------------- */
 {
   const day = (iso, extra) =>

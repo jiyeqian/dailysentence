@@ -177,6 +177,24 @@ function earliestOf(s, needles, from) {
   return best;
 }
 
+/* i 落在某个开标签的属性里时，跳到该标签「>」之后；找不到「>」保持原位。
+   2026-10-31 起 #ExpFCchild 的标签写成了 <div id="ExpFCchild" class="expDiv">，
+   直接从 id="…" 开始 slice 会把属性尾巴漏进释义（stripTags 只剥完整标签）。 */
+function afterOpenTag(s, i) {
+  if (i < 0) return i;
+  const gt = s.indexOf('>', i);
+  return gt < 0 ? i : gt + 1;
+}
+
+/* end 落在某个未闭合标签中间（有「<」但还没到「>」）时，回退到该「<」之前；否则原样返回。
+   终点标记（id="ExpSYN" 等）本身就在标签属性里，直接以它为终点会漏出孤立的「<div 」。 */
+function beforeOpenTag(s, end) {
+  if (end < 1) return end;
+  const lt = s.lastIndexOf('<', end - 1);
+  const gt = s.lastIndexOf('>', end - 1);
+  return lt > gt ? lt : end;
+}
+
 /**
  * 释义 / 例句正文统一处理：上游会把部分汉字随机换成一张小图
  * （<img class="dictimgtoword">），这里统一打成占位符 HOLE，
@@ -299,11 +317,13 @@ function parseDictPage(html, query) {
     if (ph) out.phonetics.push({ label: stripTags(m[1]), ph });
   }
 
-  /* ---- 释义：英汉-汉英词典 #ExpFCchild（<div class="exp"> 或 <ol><li>） ----
+  /* ---- 释义：英汉-汉英词典 #ExpFCchild（<div class="exp"> / <ol><li> / 直排文本） ----
      结束位置取「下一个分区」的最早出现处：有的词没有近义反义区，
-     若只认 #ExpSYN 会把后面的生词本 / 历史记录等 <li> 也扫进来。 */
-  const fcStart = html.indexOf('id="ExpFCchild"');
-  const fcEnd = fcStart < 0 ? -1 : earliestOf(html, ['id="ExpSYN"', 'id="ExpSPEC"', 'id="ExpLJ"', 'id="SC_trans"'], fcStart + 14);
+     若只认 #ExpSYN 会把后面的生词本 / 历史记录等 <li> 也扫进来。
+     两端都要落在标签之外：起点跳完 id="ExpFCchild" 所在的开标签，
+     终点若停在未闭合标签中间则回退到该标签之前（否则漏出半截标签）。 */
+  const fcStart = afterOpenTag(html, html.indexOf('id="ExpFCchild"'));
+  const fcEnd = fcStart <= 0 ? -1 : beforeOpenTag(html, earliestOf(html, ['id="ExpSYN"', 'id="ExpSPEC"', 'id="ExpLJ"', 'id="SC_trans"'], fcStart));
   const fc = (fcStart < 0 ? '' : html.slice(fcStart, fcEnd < 0 ? undefined : fcEnd)).replace(
     /<div id="trans"[\s\S]*?<\/div>/gi,
     ''
